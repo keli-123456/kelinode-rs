@@ -24,6 +24,21 @@ pub struct SubscriptionProxyUpstreamRequest {
     pub head_only: bool,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SubscriptionProxyUpstreamResponse {
+    pub status: u16,
+    pub headers: BTreeMap<String, String>,
+    pub body: Vec<u8>,
+    pub content_length: Option<u64>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SubscriptionProxyClientResponse {
+    pub status: u16,
+    pub headers: BTreeMap<String, String>,
+    pub body: Vec<u8>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SubscriptionProxyRoute {
     Health,
@@ -186,6 +201,34 @@ pub fn build_subscription_upstream_url(
     Ok(url)
 }
 
+pub fn plan_subscription_proxy_response(
+    response: SubscriptionProxyUpstreamResponse,
+    max_response_bytes: u64,
+    head_only: bool,
+) -> Result<SubscriptionProxyClientResponse, SubscriptionProxyRouteError> {
+    let max_response_bytes = if max_response_bytes == 0 {
+        DEFAULT_MAX_RESPONSE_BYTES
+    } else {
+        max_response_bytes
+    };
+    if response
+        .content_length
+        .map(|length| length > max_response_bytes)
+        .unwrap_or(false)
+        || response.body.len() as u64 > max_response_bytes
+    {
+        return Err(SubscriptionProxyRouteError::BadGateway(
+            "upstream response too large".to_string(),
+        ));
+    }
+
+    Ok(SubscriptionProxyClientResponse {
+        status: response.status,
+        headers: forwarded_headers(&response.headers),
+        body: if head_only { Vec::new() } else { response.body },
+    })
+}
+
 fn first_non_empty(value: &str, fallback: &str) -> String {
     if value.is_empty() {
         fallback.to_string()
@@ -312,9 +355,10 @@ mod tests {
 
     use super::{
         build_subscription_upstream_url, normalize_subscription_proxy_config,
-        plan_subscription_proxy_request, SubscriptionProxyInboundRequest,
-        SubscriptionProxyRoute, SubscriptionProxyRouteError, DEFAULT_CHALLENGE_DIR,
-        DEFAULT_HTTPS_LISTEN, DEFAULT_MAX_RESPONSE_BYTES,
+        plan_subscription_proxy_request, plan_subscription_proxy_response,
+        SubscriptionProxyInboundRequest, SubscriptionProxyRoute, SubscriptionProxyRouteError,
+        SubscriptionProxyUpstreamResponse, DEFAULT_CHALLENGE_DIR, DEFAULT_HTTPS_LISTEN,
+        DEFAULT_MAX_RESPONSE_BYTES,
     };
     use crate::config::{SubscriptionProxyConfig, SubscriptionProxyProfile};
 
@@ -481,5 +525,64 @@ mod tests {
         .unwrap_err();
         assert_eq!(err, SubscriptionProxyRouteError::NotFound);
         assert_eq!(err.status_code(), 404);
+    }
+
+    #[test]
+    fn plans_subscription_response_with_header_filtering() {
+        let mut headers = BTreeMap::new();
+        headers.insert(
+            "Subscription-Userinfo".to_string(),
+            "upload=0; download=1".to_string(),
+        );
+        headers.insert("Connection".to_string(), "close".to_string());
+
+        let response = plan_subscription_proxy_response(
+            SubscriptionProxyUpstreamResponse {
+                status: 200,
+                headers,
+                body: b"ok".to_vec(),
+                content_length: Some(2),
+            },
+            1024,
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(response.status, 200);
+        assert_eq!(response.body, b"ok".to_vec());
+        assert_eq!(
+            response.headers["Subscription-Userinfo"],
+            "upload=0; download=1"
+        );
+        assert!(!response.headers.contains_key("Connection"));
+    }
+
+    #[test]
+    fn enforces_response_size_and_head_body_rules() {
+        let err = plan_subscription_proxy_response(
+            SubscriptionProxyUpstreamResponse {
+                status: 200,
+                body: vec![1, 2, 3],
+                content_length: Some(3),
+                ..SubscriptionProxyUpstreamResponse::default()
+            },
+            2,
+            false,
+        )
+        .unwrap_err();
+        assert_eq!(err.status_code(), 502);
+
+        let response = plan_subscription_proxy_response(
+            SubscriptionProxyUpstreamResponse {
+                status: 200,
+                body: b"ok".to_vec(),
+                ..SubscriptionProxyUpstreamResponse::default()
+            },
+            1024,
+            true,
+        )
+        .unwrap();
+
+        assert!(response.body.is_empty());
     }
 }
