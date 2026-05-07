@@ -8,6 +8,7 @@ use crate::port_forward::{
 };
 use crate::process::{core_process_spec, ProcessStatus, ProcessSupervisor};
 use crate::runtime::RuntimeBootstrapPlan;
+use crate::upgrade::{UpgradeExecutor, UpgradeManager, UpgradeStatus};
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct RuntimeControlOptions {
@@ -174,6 +175,24 @@ pub fn runtime_loop_signal(action: &RuntimePanelAction) -> RuntimeLoopSignal {
     }
 }
 
+pub fn handle_runtime_signal<E: UpgradeExecutor>(
+    signal: &RuntimeLoopSignal,
+    upgrade_manager: &mut UpgradeManager,
+    current_version: &str,
+    now: i64,
+    upgrade_executor: &mut E,
+) -> Result<Option<UpgradeStatus>, String> {
+    match signal {
+        RuntimeLoopSignal::Upgrade(command) => upgrade_manager.request(
+            command.clone(),
+            current_version,
+            now,
+            upgrade_executor,
+        ),
+        RuntimeLoopSignal::Continue | RuntimeLoopSignal::Reload => Ok(None),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
@@ -189,10 +208,12 @@ mod tests {
     use crate::runtime::build_runtime_bootstrap_plan;
 
     use crate::machine::{MachineStatusResponse, MachineUpgradeCommand};
+    use crate::upgrade::{MemoryUpgradeExecutor, UpgradeManager};
 
     use super::{
-        apply_runtime_plan, run_runtime_tick, runtime_loop_signal, runtime_panel_action,
-        RuntimeControlOptions, RuntimeLoopSignal, RuntimePanelAction, RuntimeTickOptions,
+        apply_runtime_plan, handle_runtime_signal, run_runtime_tick, runtime_loop_signal,
+        runtime_panel_action, RuntimeControlOptions, RuntimeLoopSignal, RuntimePanelAction,
+        RuntimeTickOptions,
     };
 
     #[test]
@@ -356,6 +377,25 @@ mod tests {
 
         assert_eq!(result.signal, RuntimeLoopSignal::Continue);
         assert_eq!(result.apply.machine_status.machine_id, 9);
+    }
+
+    #[test]
+    fn upgrade_signal_enters_upgrade_manager() {
+        let mut manager = UpgradeManager::default();
+        let mut executor = MemoryUpgradeExecutor::default();
+        let signal = RuntimeLoopSignal::Upgrade(MachineUpgradeCommand {
+            id: "upgrade-1".to_string(),
+            target_version: "v0.4.1".to_string(),
+        });
+
+        let status =
+            handle_runtime_signal(&signal, &mut manager, "v0.4.0", 300, &mut executor)
+                .unwrap()
+                .unwrap();
+
+        assert_eq!(status.status, "running");
+        assert_eq!(status.target_version, "v0.4.1");
+        assert_eq!(executor.launches.len(), 1);
     }
 
     #[derive(Default)]

@@ -22,6 +22,7 @@ First cut:
 - Report machine status to `keliboard` and normalize returned reload/upgrade commands for the runtime loop.
 - Run a single runtime tick that applies local state, optionally reports to the panel, and returns a continue/reload/upgrade signal.
 - Track machine self-upgrade status and launch the existing installer through a systemd-run or detached-shell boundary.
+- Feed upgrade signals into the self-upgrade state machine so the next status report can include running/failed/succeeded state.
 
 Not implemented yet:
 
