@@ -19,6 +19,7 @@
 - HY2 port-forward rule planner with conflict checks.
 - HY2 port-forward status/spec drift detection helpers.
 - HY2 port-forward repair/cleanup command planner.
+- HY2 port-forward executor abstraction for inspect/repair/cleanup.
 - Machine node resolution and subscription proxy config merging.
 - Compatibility tests around protocol parsing and endpoint construction.
 

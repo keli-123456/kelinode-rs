@@ -1,9 +1,14 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::env;
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use crate::panel::types::{NodeInfo, Protocol};
 
 pub const HYSTERIA_PORT_FORWARD_COMMENT: &str = "V2NODE-HY2";
 pub const HYSTERIA_PORT_FORWARD_CHAIN: &str = "V2NODE-HY2";
+pub const HYSTERIA_PORT_FORWARD_TOOLS: [&str; 2] = ["iptables", "ip6tables"];
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PortForwardMatcher {
@@ -51,6 +56,16 @@ pub struct PortForwardCommand {
     pub tool: String,
     pub args: Vec<String>,
 }
+
+pub trait PortForwardExecutor {
+    fn is_tool_available(&mut self, tool: &str) -> bool;
+    fn command_output(&mut self, command: &PortForwardCommand) -> Result<String, String>;
+    fn run_command(&mut self, command: &PortForwardCommand) -> Result<(), String>;
+    fn running_as_root(&self) -> bool;
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SystemPortForwardExecutor;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct PortForwardRange {
@@ -166,6 +181,100 @@ pub fn set_hysteria_port_forward_disabled(running_as_root: bool) -> HysteriaPort
     }
 }
 
+pub fn inspect_hysteria_port_forward<E: PortForwardExecutor>(
+    infos: &[NodeInfo],
+    executor: &mut E,
+) -> HysteriaPortForwardStatus {
+    let (rules, errors) = build_hysteria_port_forward_rules(infos);
+    let mut status =
+        new_hysteria_port_forward_status(&rules, &errors, executor.running_as_root());
+
+    for tool in HYSTERIA_PORT_FORWARD_TOOLS {
+        status
+            .tools
+            .push(inspect_port_forward_tool(executor, tool, &rules));
+    }
+
+    status
+}
+
+pub fn repair_hysteria_port_forward<E: PortForwardExecutor>(
+    infos: &[NodeInfo],
+    executor: &mut E,
+) -> HysteriaPortForwardStatus {
+    let (rules, errors) = build_hysteria_port_forward_rules(infos);
+    let mut status =
+        new_hysteria_port_forward_status(&rules, &errors, executor.running_as_root());
+
+    if !status.running_as_root {
+        for tool in HYSTERIA_PORT_FORWARD_TOOLS {
+            status
+                .tools
+                .push(inspect_port_forward_tool(executor, tool, &rules));
+        }
+        if !rules.is_empty() || hysteria_port_forward_needs_repair(&status) {
+            status
+                .errors
+                .push("HY2 port forwarding repair requires root".to_string());
+        }
+        return status;
+    }
+
+    for tool in HYSTERIA_PORT_FORWARD_TOOLS {
+        let mut tool_status = inspect_port_forward_tool(executor, tool, &rules);
+        if tool_status.available {
+            match execute_reconcile_port_forward_tool(executor, tool, &rules) {
+                Ok(()) => {
+                    tool_status = inspect_port_forward_tool(executor, tool, &rules);
+                }
+                Err(error) => {
+                    tool_status.error = error.clone();
+                    status.errors.push(format!("{tool}: {error}"));
+                }
+            }
+        }
+        status.tools.push(tool_status);
+    }
+
+    status
+}
+
+pub fn cleanup_hysteria_port_forward<E: PortForwardExecutor>(
+    executor: &mut E,
+) -> HysteriaPortForwardStatus {
+    let mut status = set_hysteria_port_forward_disabled(executor.running_as_root());
+
+    if !status.running_as_root {
+        status
+            .errors
+            .push("HY2 port forwarding cleanup requires root".to_string());
+        for tool in HYSTERIA_PORT_FORWARD_TOOLS {
+            status
+                .tools
+                .push(inspect_port_forward_tool(executor, tool, &[]));
+        }
+        return status;
+    }
+
+    for tool in HYSTERIA_PORT_FORWARD_TOOLS {
+        let mut tool_status = inspect_port_forward_tool(executor, tool, &[]);
+        if tool_status.available {
+            match execute_cleanup_port_forward_tool(executor, tool) {
+                Ok(()) => {
+                    tool_status = inspect_port_forward_tool(executor, tool, &[]);
+                }
+                Err(error) => {
+                    tool_status.error = error.clone();
+                    status.errors.push(format!("{tool}: {error}"));
+                }
+            }
+        }
+        status.tools.push(tool_status);
+    }
+
+    status
+}
+
 pub fn describe_port_forward_rules(
     rules: &[PortForwardRule],
 ) -> Vec<HysteriaPortForwardRuleSpec> {
@@ -178,6 +287,43 @@ pub fn describe_port_forward_rules(
             spec: expected_port_forward_spec_fields(rule).join(" "),
         })
         .collect()
+}
+
+pub fn inspect_port_forward_tool<E: PortForwardExecutor>(
+    executor: &mut E,
+    tool: &str,
+    rules: &[PortForwardRule],
+) -> HysteriaPortForwardToolStatus {
+    let mut status = HysteriaPortForwardToolStatus {
+        tool: tool.to_string(),
+        expected: expected_port_forward_specs(rules),
+        current: Vec::new(),
+        missing: Vec::new(),
+        extra: Vec::new(),
+        ..HysteriaPortForwardToolStatus::default()
+    };
+    if !executor.is_tool_available(tool) {
+        return status;
+    }
+    status.available = true;
+
+    let prerouting_command = command(tool, vec!["-t", "nat", "-S", "PREROUTING"]);
+    let prerouting_output = match executor.command_output(&prerouting_command) {
+        Ok(output) => output,
+        Err(error) => {
+            status.error = error;
+            return status;
+        }
+    };
+    let chain_command = command(tool, vec!["-t", "nat", "-S", HYSTERIA_PORT_FORWARD_CHAIN]);
+    status = inspect_port_forward_specs(
+        tool,
+        rules,
+        &prerouting_output,
+        executor.command_output(&chain_command).is_ok(),
+    );
+    status.available = true;
+    status
 }
 
 pub fn inspect_port_forward_specs(
@@ -283,6 +429,43 @@ pub fn cleanup_port_forward_commands(
     commands.push(command(tool, vec!["-t", "nat", "-F", HYSTERIA_PORT_FORWARD_CHAIN]));
     commands.push(command(tool, vec!["-t", "nat", "-X", HYSTERIA_PORT_FORWARD_CHAIN]));
     commands
+}
+
+pub fn execute_reconcile_port_forward_tool<E: PortForwardExecutor>(
+    executor: &mut E,
+    tool: &str,
+    rules: &[PortForwardRule],
+) -> Result<(), String> {
+    let prerouting_output = executor
+        .command_output(&command(tool, vec!["-t", "nat", "-S", "PREROUTING"]))
+        .unwrap_or_default();
+    execute_port_forward_commands(
+        executor,
+        &reconcile_port_forward_commands(tool, rules, &prerouting_output),
+    )
+}
+
+pub fn execute_cleanup_port_forward_tool<E: PortForwardExecutor>(
+    executor: &mut E,
+    tool: &str,
+) -> Result<(), String> {
+    let prerouting_output = executor
+        .command_output(&command(tool, vec!["-t", "nat", "-S", "PREROUTING"]))
+        .unwrap_or_default();
+    execute_port_forward_commands(
+        executor,
+        &cleanup_port_forward_commands(tool, &prerouting_output),
+    )
+}
+
+pub fn execute_port_forward_commands<E: PortForwardExecutor>(
+    executor: &mut E,
+    commands: &[PortForwardCommand],
+) -> Result<(), String> {
+    for command in commands {
+        executor.run_command(command)?;
+    }
+    Ok(())
 }
 
 pub fn delete_port_forward_commands(
@@ -430,6 +613,130 @@ fn command(tool: &str, args: Vec<&str>) -> PortForwardCommand {
     PortForwardCommand {
         tool: tool.to_string(),
         args: args.into_iter().map(str::to_string).collect(),
+    }
+}
+
+impl PortForwardExecutor for SystemPortForwardExecutor {
+    fn is_tool_available(&mut self, tool: &str) -> bool {
+        tool_exists(tool)
+    }
+
+    fn command_output(&mut self, command: &PortForwardCommand) -> Result<String, String> {
+        let output = Command::new(&command.tool)
+            .args(&command.args)
+            .output()
+            .map_err(|err| format!("run {} failed: {err}", command.tool))?;
+        if output.status.success() {
+            return Ok(String::from_utf8_lossy(&output.stdout).to_string());
+        }
+
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let detail = first_non_empty(&stderr, &stdout);
+        if detail.is_empty() {
+            Err(format!("{} exited with {}", command.tool, output.status))
+        } else {
+            Err(format!(
+                "{} exited with {}: {}",
+                command.tool, output.status, detail
+            ))
+        }
+    }
+
+    fn run_command(&mut self, command: &PortForwardCommand) -> Result<(), String> {
+        let output = Command::new(&command.tool)
+            .args(&command.args)
+            .output()
+            .map_err(|err| format!("run {} failed: {err}", command.tool))?;
+        if output.status.success() {
+            return Ok(());
+        }
+
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let detail = first_non_empty(&stderr, &stdout);
+        if detail.is_empty() {
+            Err(format!("{} exited with {}", command.tool, output.status))
+        } else {
+            Err(format!(
+                "{} exited with {}: {}",
+                command.tool, output.status, detail
+            ))
+        }
+    }
+
+    fn running_as_root(&self) -> bool {
+        running_as_root()
+    }
+}
+
+fn tool_exists(tool: &str) -> bool {
+    let path = Path::new(tool);
+    if path.components().count() > 1 {
+        return fs::metadata(path)
+            .map(|metadata| metadata.is_file())
+            .unwrap_or(false);
+    }
+
+    let Some(paths) = env::var_os("PATH") else {
+        return false;
+    };
+    candidate_tool_names(tool).into_iter().any(|name| {
+        env::split_paths(&paths).any(|path| {
+            fs::metadata(path.join(&name))
+                .map(|metadata| metadata.is_file())
+                .unwrap_or(false)
+        })
+    })
+}
+
+fn candidate_tool_names(tool: &str) -> Vec<PathBuf> {
+    #[cfg(windows)]
+    {
+        let path = Path::new(tool);
+        if path.extension().is_some() {
+            return vec![PathBuf::from(tool)];
+        }
+        let extensions = env::var_os("PATHEXT")
+            .map(|value| {
+                value
+                    .to_string_lossy()
+                    .split(';')
+                    .filter(|extension| !extension.trim().is_empty())
+                    .map(|extension| format!("{tool}{extension}"))
+                    .map(PathBuf::from)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_else(|| vec![PathBuf::from(format!("{tool}.exe"))]);
+        let mut names = vec![PathBuf::from(tool)];
+        names.extend(extensions);
+        names
+    }
+    #[cfg(not(windows))]
+    {
+        vec![PathBuf::from(tool)]
+    }
+}
+
+fn running_as_root() -> bool {
+    #[cfg(unix)]
+    {
+        Command::new("id")
+            .arg("-u")
+            .output()
+            .ok()
+            .and_then(|output| {
+                if output.status.success() {
+                    Some(String::from_utf8_lossy(&output.stdout).trim() == "0")
+                } else {
+                    None
+                }
+            })
+            .unwrap_or(false)
+    }
+    #[cfg(not(unix))]
+    {
+        false
     }
 }
 
@@ -642,13 +949,17 @@ impl PortForwardRange {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::{BTreeMap, BTreeSet};
+
     use serde_json::json;
 
     use super::{
-        build_hysteria_port_forward_rules, expected_port_forward_specs,
-        hysteria_port_forward_needs_repair, inspect_port_forward_specs,
+        build_hysteria_port_forward_rules, cleanup_hysteria_port_forward,
+        expected_port_forward_specs, hysteria_port_forward_needs_repair,
+        inspect_hysteria_port_forward, inspect_port_forward_specs,
         list_port_forward_specs_from_output, new_hysteria_port_forward_status,
         parse_iptables_spec, parse_port_forward_matchers, reconcile_port_forward_commands,
+        repair_hysteria_port_forward, PortForwardCommand, PortForwardExecutor,
     };
     use crate::panel::types::{CommonNode, NodeInfo};
 
@@ -876,6 +1187,104 @@ mod tests {
         assert_eq!(got, want);
     }
 
+    #[test]
+    fn inspect_hysteria_port_forward_uses_executor_outputs() {
+        let infos = vec![node(1, 443, "30000-30002", "")];
+        let mut executor = FakePortForwardExecutor::root();
+        executor.available.insert("iptables".to_string());
+        executor.output(
+            "iptables",
+            &["-t", "nat", "-S", "PREROUTING"],
+            Ok("-A PREROUTING -p udp -j V2NODE-HY2\n".to_string()),
+        );
+        executor.output(
+            "iptables",
+            &["-t", "nat", "-S", "V2NODE-HY2"],
+            Ok("-N V2NODE-HY2\n".to_string()),
+        );
+
+        let status = inspect_hysteria_port_forward(&infos, &mut executor);
+
+        assert!(status.running_as_root);
+        assert_eq!(status.tools.len(), 2);
+        assert!(status.tools[0].available);
+        assert_eq!(status.tools[0].missing.len(), 1);
+        assert!(status.tools[0].stale_chain);
+        assert!(!status.tools[1].available);
+    }
+
+    #[test]
+    fn repair_hysteria_port_forward_requires_root() {
+        let infos = vec![node(1, 443, "30000-30002", "")];
+        let mut executor = FakePortForwardExecutor::non_root();
+        executor.available.insert("iptables".to_string());
+        executor.output("iptables", &["-t", "nat", "-S", "PREROUTING"], Ok(String::new()));
+
+        let status = repair_hysteria_port_forward(&infos, &mut executor);
+
+        assert!(!status.running_as_root);
+        assert!(status
+            .errors
+            .iter()
+            .any(|error| error.contains("requires root")));
+        assert!(executor.ran.is_empty());
+    }
+
+    #[test]
+    fn repair_hysteria_port_forward_runs_planned_commands() {
+        let infos = vec![node(1, 443, "30000-30002", "")];
+        let mut executor = FakePortForwardExecutor::root();
+        executor.available.insert("iptables".to_string());
+        executor.output(
+            "iptables",
+            &["-t", "nat", "-S", "PREROUTING"],
+            Ok("-A PREROUTING -p udp -j V2NODE-HY2\n".to_string()),
+        );
+        executor.output(
+            "iptables",
+            &["-t", "nat", "-S", "V2NODE-HY2"],
+            Err("missing chain".to_string()),
+        );
+
+        let status = repair_hysteria_port_forward(&infos, &mut executor);
+
+        assert!(status.running_as_root);
+        assert!(status.errors.is_empty());
+        assert!(executor
+            .ran
+            .iter()
+            .any(|command| command.args.contains(&"-A".to_string())));
+        assert!(executor
+            .ran
+            .iter()
+            .any(|command| command.args.contains(&"-D".to_string())));
+    }
+
+    #[test]
+    fn cleanup_hysteria_port_forward_runs_cleanup_commands() {
+        let mut executor = FakePortForwardExecutor::root();
+        executor.available.insert("iptables".to_string());
+        executor.output(
+            "iptables",
+            &["-t", "nat", "-S", "PREROUTING"],
+            Ok("-A PREROUTING -p udp -j V2NODE-HY2\n".to_string()),
+        );
+        executor.output(
+            "iptables",
+            &["-t", "nat", "-S", "V2NODE-HY2"],
+            Ok("-N V2NODE-HY2\n".to_string()),
+        );
+
+        let status = cleanup_hysteria_port_forward(&mut executor);
+
+        assert!(!status.enabled);
+        assert!(status.errors.is_empty());
+        assert!(executor
+            .ran
+            .iter()
+            .any(|command| command.args == strings(vec!["-t", "nat", "-F", "V2NODE-HY2"])));
+    }
+
     fn node(id: u32, server_port: u16, port: &str, ports: &str) -> NodeInfo {
         let common: CommonNode = serde_json::from_value(json!({
             "protocol": "hysteria2",
@@ -893,5 +1302,60 @@ mod tests {
 
     fn strings(values: Vec<&str>) -> Vec<String> {
         values.into_iter().map(str::to_string).collect()
+    }
+
+    #[derive(Default)]
+    struct FakePortForwardExecutor {
+        available: BTreeSet<String>,
+        outputs: BTreeMap<String, Result<String, String>>,
+        ran: Vec<PortForwardCommand>,
+        root: bool,
+    }
+
+    impl FakePortForwardExecutor {
+        fn root() -> Self {
+            Self {
+                root: true,
+                ..Self::default()
+            }
+        }
+
+        fn non_root() -> Self {
+            Self::default()
+        }
+
+        fn output(&mut self, tool: &str, args: &[&str], result: Result<String, String>) {
+            let command = PortForwardCommand {
+                tool: tool.to_string(),
+                args: args.iter().map(|value| value.to_string()).collect(),
+            };
+            self.outputs.insert(command_key(&command), result);
+        }
+    }
+
+    impl PortForwardExecutor for FakePortForwardExecutor {
+        fn is_tool_available(&mut self, tool: &str) -> bool {
+            self.available.contains(tool)
+        }
+
+        fn command_output(&mut self, command: &PortForwardCommand) -> Result<String, String> {
+            self.outputs
+                .get(&command_key(command))
+                .cloned()
+                .unwrap_or_else(|| Ok(String::new()))
+        }
+
+        fn run_command(&mut self, command: &PortForwardCommand) -> Result<(), String> {
+            self.ran.push(command.clone());
+            Ok(())
+        }
+
+        fn running_as_root(&self) -> bool {
+            self.root
+        }
+    }
+
+    fn command_key(command: &PortForwardCommand) -> String {
+        format!("{} {}", command.tool, command.args.join(" "))
     }
 }
