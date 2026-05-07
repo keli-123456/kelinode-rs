@@ -1,0 +1,230 @@
+use crate::core::{write_core_config, CoreConfigWriteResult};
+use crate::health::{build_machine_status_payload, HealthReportInput};
+use crate::machine::MachineStatusPayload;
+use crate::port_forward::{
+    inspect_hysteria_port_forward, repair_hysteria_port_forward, HysteriaPortForwardStatus,
+    PortForwardExecutor,
+};
+use crate::process::{core_process_spec, ProcessStatus, ProcessSupervisor};
+use crate::runtime::RuntimeBootstrapPlan;
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct RuntimeControlOptions {
+    pub machine_id: u32,
+    pub core_command: Option<String>,
+    pub start_core: bool,
+    pub repair_port_forward: bool,
+    pub health: HealthReportInput,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct RuntimeApplyResult {
+    pub core_config: Option<CoreConfigWriteResult>,
+    pub core_process: Option<ProcessStatus>,
+    pub hy2_port_forward: HysteriaPortForwardStatus,
+    pub machine_status: MachineStatusPayload,
+}
+
+pub fn apply_runtime_plan<P, F>(
+    plan: &RuntimeBootstrapPlan,
+    process_supervisor: &mut P,
+    port_forward_executor: &mut F,
+    options: RuntimeControlOptions,
+) -> Result<RuntimeApplyResult, String>
+where
+    P: ProcessSupervisor,
+    F: PortForwardExecutor,
+{
+    let mut core_config = None;
+    let mut core_process = None;
+
+    if let Some(core_plan) = &plan.core_plan {
+        let write_result = write_core_config(core_plan).map_err(|err| err.message)?;
+        if options.start_core {
+            let spec = core_process_spec(core_plan, options.core_command.as_deref())
+                .map_err(|err| err.message)?;
+            let status = if write_result.changed {
+                process_supervisor.reload(&spec)
+            } else {
+                process_supervisor.start(&spec)
+            }
+            .map_err(|err| err.message)?;
+            core_process = Some(status);
+        }
+        core_config = Some(write_result);
+    }
+
+    let hy2_port_forward = if options.repair_port_forward {
+        repair_hysteria_port_forward(&plan.node_infos, port_forward_executor)
+    } else {
+        inspect_hysteria_port_forward(&plan.node_infos, port_forward_executor)
+    };
+
+    let mut report_plan = plan.clone();
+    report_plan.hy2_port_forward = hy2_port_forward.clone();
+    let mut health = options.health;
+    if health.core.is_none() {
+        health.core = core_process.clone();
+    }
+    let machine_status =
+        build_machine_status_payload(options.machine_id, &report_plan, health);
+
+    Ok(RuntimeApplyResult {
+        core_config,
+        core_process,
+        hy2_port_forward,
+        machine_status,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeSet;
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use serde_json::json;
+
+    use crate::config::{NodeConfig, ResolvedConfig, ResolvedMachineConfig};
+    use crate::panel::types::{CommonNode, NodeInfo};
+    use crate::port_forward::{PortForwardCommand, PortForwardExecutor};
+    use crate::process::MemoryProcessSupervisor;
+    use crate::runtime::build_runtime_bootstrap_plan;
+
+    use super::{apply_runtime_plan, RuntimeControlOptions};
+
+    #[test]
+    fn applies_plan_by_writing_config_starting_core_and_building_status() {
+        let dir = temp_test_dir("runtime-control");
+        let mut resolved = ResolvedConfig {
+            kernel: Default::default(),
+            realtime: Default::default(),
+            machine: ResolvedMachineConfig {
+                enabled: true,
+                continue_on_error: true,
+                profiles: Vec::new(),
+            },
+            agent: Default::default(),
+            nodes: vec![NodeConfig {
+                url: "https://panel.example.test".to_string(),
+                token: "token".to_string(),
+                node_id: 7,
+                machine_id: 3,
+                ..NodeConfig::default()
+            }],
+        };
+        resolved.kernel.config_dir = dir.join("v2node").display().to_string();
+        let plan =
+            build_runtime_bootstrap_plan(resolved, vec![test_node("vless", 7)], Vec::new())
+                .unwrap();
+        let mut process = MemoryProcessSupervisor::default();
+        let mut port_forward = FakePortForwardExecutor::default();
+
+        let result = apply_runtime_plan(
+            &plan,
+            &mut process,
+            &mut port_forward,
+            RuntimeControlOptions {
+                machine_id: 3,
+                start_core: true,
+                repair_port_forward: true,
+                ..RuntimeControlOptions::default()
+            },
+        )
+        .unwrap();
+
+        assert!(result.core_config.as_ref().unwrap().changed);
+        assert_eq!(process.starts.len(), 1);
+        assert_eq!(process.stops.len(), 1);
+        assert_eq!(
+            result.machine_status.status["core"]["status"]["state"],
+            json!("running")
+        );
+        assert_eq!(
+            result.machine_status.status["runtime"]["nodes"],
+            json!(1)
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn inspect_mode_does_not_start_core_when_disabled() {
+        let resolved = ResolvedConfig {
+            kernel: Default::default(),
+            realtime: Default::default(),
+            machine: ResolvedMachineConfig {
+                enabled: true,
+                continue_on_error: true,
+                profiles: Vec::new(),
+            },
+            agent: Default::default(),
+            nodes: Vec::new(),
+        };
+        let plan = build_runtime_bootstrap_plan(resolved, Vec::new(), Vec::new()).unwrap();
+        let mut process = MemoryProcessSupervisor::default();
+        let mut port_forward = FakePortForwardExecutor::default();
+
+        let result = apply_runtime_plan(
+            &plan,
+            &mut process,
+            &mut port_forward,
+            RuntimeControlOptions {
+                machine_id: 9,
+                start_core: false,
+                repair_port_forward: false,
+                ..RuntimeControlOptions::default()
+            },
+        )
+        .unwrap();
+
+        assert!(result.core_config.is_none());
+        assert!(result.core_process.is_none());
+        assert!(process.starts.is_empty());
+        assert_eq!(result.machine_status.machine_id, 9);
+    }
+
+    #[derive(Default)]
+    struct FakePortForwardExecutor {
+        available: BTreeSet<String>,
+        root: bool,
+    }
+
+    impl PortForwardExecutor for FakePortForwardExecutor {
+        fn is_tool_available(&mut self, tool: &str) -> bool {
+            self.available.contains(tool)
+        }
+
+        fn command_output(&mut self, command: &PortForwardCommand) -> Result<String, String> {
+            Err(format!("{} unavailable", command.tool))
+        }
+
+        fn run_command(&mut self, command: &PortForwardCommand) -> Result<(), String> {
+            Err(format!("{} unavailable", command.tool))
+        }
+
+        fn running_as_root(&self) -> bool {
+            self.root
+        }
+    }
+
+    fn test_node(protocol: &str, node_id: u32) -> NodeInfo {
+        let common: CommonNode = serde_json::from_value(json!({
+            "protocol": protocol,
+            "server_port": 10000 + node_id
+        }))
+        .unwrap();
+
+        NodeInfo::from_common("https://panel.example.test", node_id, common).unwrap()
+    }
+
+    fn temp_test_dir(label: &str) -> std::path::PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("kelinode-rs-{label}-{nanos}"));
+        fs::create_dir_all(&path).unwrap();
+        path
+    }
+}

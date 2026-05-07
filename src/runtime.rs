@@ -24,11 +24,12 @@ pub struct Bootstrap {
     pub machine_profile_count: usize,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct RuntimeBootstrapPlan {
     pub bootstrap: Bootstrap,
     pub resolved: ResolvedConfig,
     pub node_count: usize,
+    pub node_infos: Vec<NodeInfo>,
     pub node_failures: Vec<NodeFailure>,
     pub core_plan: Option<CorePlan>,
     pub hy2_port_forward: HysteriaPortForwardStatus,
@@ -120,6 +121,7 @@ pub fn build_runtime_bootstrap_plan(
         bootstrap,
         resolved,
         node_count: node_infos.len(),
+        node_infos,
         node_failures,
         core_plan,
         hy2_port_forward: new_hysteria_port_forward_status(&hy2_rules, &hy2_errors, false),

@@ -18,10 +18,11 @@ First cut:
 - Build runtime bootstrap plans that combine resolved config, node bootstrap, core config planning, and HY2 status.
 - Render an Xray-compatible core config skeleton and write it through a stable file layout.
 - Provide process supervisor and health payload aggregation layers for runtime integration.
+- Apply a runtime plan by writing core config, reconciling HY2 forwarding state, starting/reloading core, and building the machine status payload.
 
 Not implemented yet:
 
-- A full runtime event loop that wires config writes, core process start/reload, reports, and shutdown together.
+- A long-running async loop for polling config changes, periodic reports, realtime invalidations, and shutdown.
 - Real host metric collection for CPU, memory, disk, network, IP, and system fields.
 - User-authenticated external core config generation.
 - Realtime websocket workers.
