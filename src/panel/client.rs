@@ -120,8 +120,13 @@ impl PanelClient {
             .map(str::to_string);
         let body = response.bytes().await.context("read node config")?;
         let common: CommonNode = serde_json::from_slice(&body).context("decode node config")?;
-        let node = NodeInfo::from_common(&self.options.api_host, self.options.node_id, common)
-            .map_err(|err| anyhow!(err))?;
+        let node = NodeInfo::from_common_with_config_dir(
+            &self.options.api_host,
+            self.options.node_id,
+            &self.options.config_dir,
+            common,
+        )
+        .map_err(|err| anyhow!(err))?;
         self.node_etag = etag;
         Ok(Some(node))
     }

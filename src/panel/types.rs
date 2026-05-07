@@ -6,6 +6,8 @@ use serde::de::{self, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 
+use crate::config::normalize_config_dir;
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct NodeInfo {
     pub id: u32,
@@ -37,6 +39,8 @@ pub struct CommonNode {
     pub tls: u8,
     #[serde(default)]
     pub tls_settings: TlsSettings,
+    #[serde(skip)]
+    pub cert_info: Option<CertInfo>,
     #[serde(default)]
     pub network: String,
     #[serde(default)]
@@ -147,6 +151,17 @@ pub struct TlsSettings {
     pub reject_unknown_sni: String,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct CertInfo {
+    pub cert_mode: String,
+    pub cert_file: String,
+    pub key_file: String,
+    pub cert_domain: String,
+    pub dns_env: BTreeMap<String, String>,
+    pub provider: String,
+    pub reject_unknown_sni: bool,
+}
+
 #[derive(Clone, Debug, Default, Deserialize, PartialEq)]
 pub struct EncSettings {
     #[serde(default)]
@@ -232,6 +247,15 @@ pub struct UserTraffic {
 
 impl NodeInfo {
     pub fn from_common(api_host: &str, node_id: u32, common: CommonNode) -> Result<Self, String> {
+        Self::from_common_with_config_dir(api_host, node_id, "/etc/v2node", common)
+    }
+
+    pub fn from_common_with_config_dir(
+        api_host: &str,
+        node_id: u32,
+        config_dir: &str,
+        mut common: CommonNode,
+    ) -> Result<Self, String> {
         let protocol = Protocol::parse(&common.protocol)
             .ok_or_else(|| format!("unsupported protocol: {}", common.protocol))?;
         let security = Security::from_tls_value(common.tls);
@@ -246,6 +270,7 @@ impl NodeInfo {
             .and_then(|config| interval_to_duration(&config.pull_interval))
             .unwrap_or_else(|| Duration::from_secs(60));
         let tag = format!("[{}]-{}:{}", api_host.trim_end_matches('/'), protocol.as_str(), node_id);
+        common.cert_info = Some(build_cert_info(&common, protocol, node_id, config_dir));
 
         Ok(Self {
             id: node_id,
@@ -363,6 +388,62 @@ fn interval_to_duration(value: &Value) -> Option<Duration> {
     }
 }
 
+fn build_cert_info(
+    common: &CommonNode,
+    protocol: Protocol,
+    node_id: u32,
+    config_dir: &str,
+) -> CertInfo {
+    let config_dir = normalize_config_dir(config_dir);
+    let default_prefix = format!(
+        "{}/{}{}",
+        config_dir.trim_end_matches('/'),
+        protocol.as_str(),
+        node_id
+    );
+    let cert_file = first_non_empty(
+        common.tls_settings.cert_file.trim(),
+        &format!("{default_prefix}.cer"),
+    );
+    let key_file = first_non_empty(
+        common.tls_settings.key_file.trim(),
+        &format!("{default_prefix}.key"),
+    );
+
+    CertInfo {
+        cert_mode: common.tls_settings.cert_mode.trim().to_string(),
+        cert_file,
+        key_file,
+        cert_domain: common.tls_settings.server_name.trim().to_string(),
+        dns_env: parse_dns_env(&common.tls_settings.dns_env),
+        provider: common.tls_settings.provider.trim().to_string(),
+        reject_unknown_sni: common.tls_settings.reject_unknown_sni.trim() == "1",
+    }
+}
+
+fn first_non_empty(value: &str, fallback: &str) -> String {
+    if value.is_empty() {
+        fallback.to_string()
+    } else {
+        value.to_string()
+    }
+}
+
+fn parse_dns_env(value: &str) -> BTreeMap<String, String> {
+    let mut env = BTreeMap::new();
+    for item in value.split(',') {
+        let Some((key, value)) = item.split_once('=') else {
+            continue;
+        };
+        let key = key.trim();
+        if key.is_empty() {
+            continue;
+        }
+        env.insert(key.to_string(), value.trim().to_string());
+    }
+    env
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;
@@ -417,5 +498,37 @@ mod tests {
         assert_eq!(node.push_interval.as_secs(), 30);
         assert_eq!(node.pull_interval.as_secs(), 45);
         assert_eq!(node.tag, "[https://panel.example.test]-vless:9");
+    }
+
+    #[test]
+    fn node_info_defaults_certificate_paths_from_config_dir() {
+        let common: CommonNode = serde_json::from_value(json!({
+            "protocol": "hysteria2",
+            "tls": 1,
+            "tls_settings": {
+                "server_name": "node.example.test",
+                "cert_mode": "dns",
+                "dns_env": "A=1,B=2",
+                "provider": "cloudflare",
+                "reject_unknown_sni": "1"
+            }
+        }))
+        .unwrap();
+
+        let node = NodeInfo::from_common_with_config_dir(
+            "https://panel.example.test/",
+            10,
+            "/srv/v2node",
+            common,
+        )
+        .unwrap();
+        let cert = node.common.cert_info.unwrap();
+
+        assert_eq!(cert.cert_file, "/srv/v2node/hysteria210.cer");
+        assert_eq!(cert.key_file, "/srv/v2node/hysteria210.key");
+        assert_eq!(cert.cert_domain, "node.example.test");
+        assert_eq!(cert.dns_env["A"], "1");
+        assert_eq!(cert.dns_env["B"], "2");
+        assert!(cert.reject_unknown_sni);
     }
 }
