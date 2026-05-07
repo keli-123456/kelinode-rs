@@ -32,6 +32,7 @@ First cut:
 - Render PROXY protocol socket options from panel network settings.
 - Render Go-compatible default inbound sniffing for HTTP and TLS targets.
 - Render TLS `rejectUnknownSni` from panel certificate metadata.
+- Render REALITY `dest`, `xver`, and `mldsa65Seed` from panel TLS settings.
 - Render VLESS flow and Shadowsocks cipher/method options from panel node fields.
 - Render supported VLESS encryption decryption strings instead of silently forcing `none`.
 - Render Shadowsocks HTTP obfs transport headers and TCP-only network mode.

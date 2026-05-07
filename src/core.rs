@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{json, Map, Value};
 
-use crate::panel::types::{CertInfo, NodeInfo, Protocol, Security, UserInfo};
+use crate::panel::types::{CertInfo, NodeInfo, Protocol, Security, TlsSettings, UserInfo};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CoreKind {
@@ -50,8 +50,10 @@ pub struct InboundPlan {
     pub reject_unknown_sni: bool,
     pub server_name: String,
     pub reality_dest: String,
+    pub reality_xver: u64,
     pub reality_private_key: String,
     pub reality_short_id: String,
+    pub reality_mldsa65_seed: String,
     pub users: Vec<InboundUserPlan>,
     pub routes: Vec<RoutePlan>,
 }
@@ -287,9 +289,11 @@ pub fn build_inbound_plan_with_users(
                 node.common.server_name.trim(),
             )
         }),
-        reality_dest: node.common.tls_settings.dest.trim().to_string(),
+        reality_dest: resolve_reality_dest(&node.common.tls_settings),
+        reality_xver: value_to_u64(&node.common.tls_settings.xver),
         reality_private_key: node.common.tls_settings.private_key.trim().to_string(),
         reality_short_id: node.common.tls_settings.short_id.trim().to_string(),
+        reality_mldsa65_seed: node.common.tls_settings.mldsa65_seed.trim().to_string(),
         users: users
             .iter()
             .filter(|user| !user.uuid.trim().is_empty())
@@ -404,6 +408,23 @@ fn resolve_vless_decryption(node: &NodeInfo) -> Result<String, CoreError> {
             "vless decryption method {encryption} is not support"
         ))),
     }
+}
+
+fn resolve_reality_dest(settings: &TlsSettings) -> String {
+    let host = first_non_empty(settings.dest.trim(), settings.server_name.trim());
+    let port = settings.server_port.trim();
+    if host.is_empty() || port.is_empty() {
+        host
+    } else {
+        format!("{host}:{port}")
+    }
+}
+
+fn value_to_u64(value: &Value) -> u64 {
+    value
+        .as_u64()
+        .or_else(|| value.as_str().and_then(|text| text.trim().parse().ok()))
+        .unwrap_or(0)
 }
 
 fn render_xray_config(plan: &CorePlan) -> Value {
@@ -1030,8 +1051,17 @@ fn render_xray_reality_settings(inbound: &InboundPlan) -> Value {
             json!(&inbound.reality_private_key),
         );
     }
+    if inbound.reality_xver > 0 {
+        settings.insert("xver".to_string(), json!(inbound.reality_xver));
+    }
     if !inbound.reality_short_id.trim().is_empty() {
         settings.insert("shortIds".to_string(), json!([&inbound.reality_short_id]));
+    }
+    if !inbound.reality_mldsa65_seed.trim().is_empty() {
+        settings.insert(
+            "mldsa65Seed".to_string(),
+            json!(&inbound.reality_mldsa65_seed),
+        );
     }
 
     Value::Object(settings)
@@ -1243,6 +1273,40 @@ mod tests {
         assert_eq!(
             config["inbounds"][0]["streamSettings"]["tlsSettings"]["rejectUnknownSni"],
             true
+        );
+    }
+
+    #[test]
+    fn renders_reality_dest_xver_and_mldsa_seed() {
+        let mut node = test_node("vless", 29, "");
+        node.common.tls = 2;
+        node.security = Security::Reality;
+        node.common.tls_settings.server_name = "reality.example.test".to_string();
+        node.common.tls_settings.server_port = "443".to_string();
+        node.common.tls_settings.private_key = "private-key".to_string();
+        node.common.tls_settings.short_id = "abcd".to_string();
+        node.common.tls_settings.mldsa65_seed = "seed-value".to_string();
+        node.common.tls_settings.xver = json!("1");
+        let plan = CorePlan::from_nodes(
+            CoreKind::Xray,
+            PathBuf::from("/srv/v2node/config.json"),
+            &[node],
+        )
+        .unwrap();
+
+        let config = render_core_config(&plan).unwrap();
+
+        assert_eq!(
+            config["inbounds"][0]["streamSettings"]["realitySettings"]["dest"],
+            "reality.example.test:443"
+        );
+        assert_eq!(
+            config["inbounds"][0]["streamSettings"]["realitySettings"]["xver"],
+            1
+        );
+        assert_eq!(
+            config["inbounds"][0]["streamSettings"]["realitySettings"]["mldsa65Seed"],
+            "seed-value"
         );
     }
 
