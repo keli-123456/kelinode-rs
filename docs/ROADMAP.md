@@ -47,6 +47,7 @@
 - Realtime protocol models for websocket messages, receipts, URL derivation, and invalidate actions.
 - Realtime runtime option resolution and message-to-task mapping for later websocket workers.
 - Transport-neutral realtime session worker for initial ping, pong replies, and task dispatch.
+- Shadowsocks 2022 server keys and Go-compatible per-user key rendering.
 - Concrete `tokio-tungstenite` realtime connector with rustls webpki roots.
 - Async runtime loop event channel for realtime reload and immediate user-refresh triggers.
 - `run` command realtime worker startup with queued reload and user-refresh events.

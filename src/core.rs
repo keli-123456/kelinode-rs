@@ -33,6 +33,7 @@ pub struct InboundPlan {
     pub network_settings: Value,
     pub flow: String,
     pub cipher: String,
+    pub server_key: String,
     pub vless_decryption: String,
     pub padding_scheme: Vec<String>,
     pub congestion_control: String,
@@ -258,6 +259,7 @@ pub fn build_inbound_plan_with_users(
         network_settings: node.common.network_settings.clone(),
         flow: node.common.flow.trim().to_string(),
         cipher: node.common.cipher.trim().to_string(),
+        server_key: node.common.server_key.trim().to_string(),
         vless_decryption: resolve_vless_decryption(node)?,
         padding_scheme: node
             .common
@@ -676,11 +678,18 @@ fn render_xray_id_client(user: &InboundUserPlan) -> Value {
 
 fn render_xray_shadowsocks_client(inbound: &InboundPlan, user: &InboundUserPlan) -> Value {
     let mut client = Map::new();
-    client.insert("password".to_string(), json!(&user.uuid));
-    client.insert("email".to_string(), json!(&user.email));
-    if !inbound.cipher.trim().is_empty() {
-        client.insert("method".to_string(), json!(&inbound.cipher));
+    if inbound.server_key.trim().is_empty() {
+        client.insert("password".to_string(), json!(&user.uuid));
+        if !inbound.cipher.trim().is_empty() {
+            client.insert("method".to_string(), json!(&inbound.cipher));
+        }
+    } else {
+        client.insert(
+            "password".to_string(),
+            json!(shadowsocks_2022_user_key(&user.uuid, &inbound.cipher)),
+        );
     }
+    client.insert("email".to_string(), json!(&user.email));
     Value::Object(client)
 }
 
@@ -691,7 +700,46 @@ fn render_xray_shadowsocks_settings(inbound: &InboundPlan, clients: Vec<Value>) 
     if !inbound.cipher.trim().is_empty() {
         settings.insert("method".to_string(), json!(&inbound.cipher));
     }
+    if !inbound.server_key.trim().is_empty() {
+        settings.insert("password".to_string(), json!(&inbound.server_key));
+    }
     Value::Object(settings)
+}
+
+fn shadowsocks_2022_user_key(uuid: &str, cipher: &str) -> String {
+    let key_length = match cipher.trim() {
+        "2022-blake3-aes-128-gcm" => 16,
+        "2022-blake3-aes-256-gcm" | "2022-blake3-chacha20-poly1305" => 32,
+        _ => 0,
+    };
+    let bytes = uuid.as_bytes();
+    base64_standard_encode(&bytes[..bytes.len().min(key_length)])
+}
+
+fn base64_standard_encode(bytes: &[u8]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut output = String::with_capacity(((bytes.len() + 2) / 3) * 4);
+
+    for chunk in bytes.chunks(3) {
+        let b0 = chunk[0];
+        let b1 = chunk.get(1).copied().unwrap_or(0);
+        let b2 = chunk.get(2).copied().unwrap_or(0);
+
+        output.push(TABLE[(b0 >> 2) as usize] as char);
+        output.push(TABLE[(((b0 & 0b0000_0011) << 4) | (b1 >> 4)) as usize] as char);
+        if chunk.len() > 1 {
+            output.push(TABLE[(((b1 & 0b0000_1111) << 2) | (b2 >> 6)) as usize] as char);
+        } else {
+            output.push('=');
+        }
+        if chunk.len() > 2 {
+            output.push(TABLE[(b2 & 0b0011_1111) as usize] as char);
+        } else {
+            output.push('=');
+        }
+    }
+
+    output
 }
 
 fn render_xray_socks_settings(inbound: &InboundPlan) -> Value {
@@ -1245,6 +1293,47 @@ mod tests {
             config["inbounds"][0]["settings"]["clients"][0]["method"],
             "aes-128-gcm"
         );
+    }
+
+    #[test]
+    fn renders_shadowsocks_2022_server_key_and_user_key() {
+        let mut node = test_node("shadowsocks", 25, "");
+        node.common.cipher = "2022-blake3-aes-128-gcm".to_string();
+        node.common.server_key = "server-secret".to_string();
+        let tag = node.tag.clone();
+        let mut users = std::collections::BTreeMap::new();
+        users.insert(
+            tag,
+            vec![UserInfo {
+                id: 25,
+                uuid: "0123456789abcdef0123456789abcdef".to_string(),
+                speed_limit: 0,
+                device_limit: 0,
+            }],
+        );
+        let plan = CorePlan::from_nodes_with_users(
+            CoreKind::Xray,
+            PathBuf::from("/srv/v2node/config.json"),
+            &[node],
+            &users,
+        )
+        .unwrap();
+
+        let config = render_core_config(&plan).unwrap();
+
+        assert_eq!(
+            config["inbounds"][0]["settings"]["method"],
+            "2022-blake3-aes-128-gcm"
+        );
+        assert_eq!(
+            config["inbounds"][0]["settings"]["password"],
+            "server-secret"
+        );
+        assert_eq!(
+            config["inbounds"][0]["settings"]["clients"][0]["password"],
+            "MDEyMzQ1Njc4OWFiY2RlZg=="
+        );
+        assert!(config["inbounds"][0]["settings"]["clients"][0]["method"].is_null());
     }
 
     #[test]
