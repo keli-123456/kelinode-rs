@@ -36,6 +36,7 @@ First cut:
 - Render HY2 bandwidth/obfs stream settings and TUIC congestion/0-RTT settings.
 - Report node traffic/online snapshots through the unified panel endpoint with legacy fallback.
 - Batch report per-node activity snapshots by runtime tag for multi-node machines.
+- Advance cached user sync state from delta or full-list responses with Go-compatible empty-list semantics.
 
 Not implemented yet:
 

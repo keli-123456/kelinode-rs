@@ -42,6 +42,7 @@
 - HY2 bandwidth/obfs stream rendering and TUIC congestion/0-RTT rendering.
 - Unified node traffic/online activity reporting with legacy endpoint fallback.
 - Per-node activity batch reporting keyed by runtime tag for multi-node machines.
+- User sync state advancement for delta and full-list responses with empty-list no-change semantics.
 - Machine node resolution and subscription proxy config merging.
 - Compatibility tests around protocol parsing and endpoint construction.
 

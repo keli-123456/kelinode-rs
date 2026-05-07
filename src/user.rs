@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use sha1::{Digest, Sha1};
 
 use crate::config::{normalize_config_dir, DEFAULT_CONFIG_DIR};
-use crate::panel::types::UserInfo;
+use crate::panel::types::{UserDeltaBody, UserInfo};
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct UserDeltaApplyResult {
@@ -21,6 +21,12 @@ pub struct UserListDiff {
     pub deleted: Vec<UserInfo>,
     pub added: Vec<UserInfo>,
     pub updated: Vec<UserInfo>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct UserSyncStepResult {
+    pub state: UserSyncState,
+    pub diff: UserListDiff,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -74,6 +80,59 @@ pub fn compare_user_list(old: &[UserInfo], new: &[UserInfo]) -> UserListDiff {
 
     diff.deleted = old_map.into_values().collect();
     diff
+}
+
+pub fn apply_user_delta_body(
+    state: &UserSyncState,
+    delta: &UserDeltaBody,
+) -> UserSyncStepResult {
+    let mut next_state = state.clone();
+    next_state.revision = delta.revision;
+
+    let diff = if delta.full {
+        if delta.users.is_empty() {
+            UserListDiff::default()
+        } else {
+            let diff = compare_user_list(&state.users, &delta.users);
+            next_state.users = delta.users.clone();
+            diff
+        }
+    } else if delta.deleted.is_empty() && delta.upsert.is_empty() {
+        UserListDiff::default()
+    } else {
+        let applied = apply_user_delta(&state.users, &delta.deleted, &delta.upsert);
+        next_state.users = applied.next;
+        UserListDiff {
+            deleted: applied.deleted_applied,
+            added: applied.added,
+            updated: applied.updated,
+        }
+    };
+
+    UserSyncStepResult {
+        state: next_state,
+        diff,
+    }
+}
+
+pub fn apply_full_user_list(
+    state: &UserSyncState,
+    users: &[UserInfo],
+) -> UserSyncStepResult {
+    if users.is_empty() {
+        return UserSyncStepResult {
+            state: state.clone(),
+            diff: UserListDiff::default(),
+        };
+    }
+
+    UserSyncStepResult {
+        state: UserSyncState {
+            users: users.to_vec(),
+            ..state.clone()
+        },
+        diff: compare_user_list(&state.users, users),
+    }
 }
 
 fn user_map_by_uuid(users: &[UserInfo]) -> BTreeMap<String, UserInfo> {
@@ -150,10 +209,10 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::{
-        apply_user_delta, compare_user_list, load_user_sync_state, save_user_sync_state,
-        user_sync_state_path, UserSyncState,
+        apply_full_user_list, apply_user_delta, apply_user_delta_body, compare_user_list,
+        load_user_sync_state, save_user_sync_state, user_sync_state_path, UserSyncState,
     };
-    use crate::panel::types::UserInfo;
+    use crate::panel::types::{UserDeltaBody, UserInfo};
 
     #[test]
     fn apply_user_delta_deletes_adds_and_updates_by_uuid() {
@@ -184,6 +243,93 @@ mod tests {
         assert_eq!(uuids(&diff.deleted), vec!["b"]);
         assert_eq!(uuids(&diff.added), vec!["c"]);
         assert_eq!(uuids(&diff.updated), vec!["a"]);
+    }
+
+    #[test]
+    fn delta_body_full_replaces_users_and_advances_revision() {
+        let state = UserSyncState {
+            revision: 1,
+            users: vec![user(1, "a", 0, 1), user(2, "b", 0, 1)],
+            updated_at: None,
+        };
+        let delta = UserDeltaBody {
+            full: true,
+            revision: 2,
+            users: vec![user(1, "a", 0, 2), user(3, "c", 0, 1)],
+            deleted: Vec::new(),
+            upsert: Vec::new(),
+        };
+
+        let result = apply_user_delta_body(&state, &delta);
+
+        assert_eq!(result.state.revision, 2);
+        assert_eq!(uuids(&result.state.users), vec!["a", "c"]);
+        assert_eq!(uuids(&result.diff.deleted), vec!["b"]);
+        assert_eq!(uuids(&result.diff.added), vec!["c"]);
+        assert_eq!(uuids(&result.diff.updated), vec!["a"]);
+    }
+
+    #[test]
+    fn empty_full_delta_keeps_existing_users_but_advances_revision() {
+        let state = UserSyncState {
+            revision: 1,
+            users: vec![user(1, "a", 0, 1)],
+            updated_at: None,
+        };
+        let delta = UserDeltaBody {
+            full: true,
+            revision: 2,
+            users: Vec::new(),
+            deleted: Vec::new(),
+            upsert: Vec::new(),
+        };
+
+        let result = apply_user_delta_body(&state, &delta);
+
+        assert_eq!(result.state.revision, 2);
+        assert_eq!(uuids(&result.state.users), vec!["a"]);
+        assert!(result.diff.added.is_empty());
+        assert!(result.diff.deleted.is_empty());
+        assert!(result.diff.updated.is_empty());
+    }
+
+    #[test]
+    fn incremental_delta_applies_deleted_and_upsert_users() {
+        let state = UserSyncState {
+            revision: 1,
+            users: vec![user(1, "a", 0, 1), user(2, "b", 0, 1)],
+            updated_at: None,
+        };
+        let delta = UserDeltaBody {
+            full: false,
+            revision: 2,
+            users: Vec::new(),
+            deleted: vec![user(2, "b", 0, 1)],
+            upsert: vec![user(3, "c", 0, 2)],
+        };
+
+        let result = apply_user_delta_body(&state, &delta);
+
+        assert_eq!(result.state.revision, 2);
+        assert_eq!(uuids(&result.state.users), vec!["a", "c"]);
+        assert_eq!(uuids(&result.diff.deleted), vec!["b"]);
+        assert_eq!(uuids(&result.diff.added), vec!["c"]);
+    }
+
+    #[test]
+    fn empty_full_user_list_keeps_existing_state() {
+        let state = UserSyncState {
+            revision: 7,
+            users: vec![user(1, "a", 0, 1)],
+            updated_at: None,
+        };
+
+        let result = apply_full_user_list(&state, &[]);
+
+        assert_eq!(result.state, state);
+        assert!(result.diff.added.is_empty());
+        assert!(result.diff.deleted.is_empty());
+        assert!(result.diff.updated.is_empty());
     }
 
     #[test]
