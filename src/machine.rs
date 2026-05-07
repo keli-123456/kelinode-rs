@@ -7,7 +7,7 @@ use serde_json::Value;
 use crate::config::{
     AgentConfig, MachineProfileConfig, NodeConfig,
     SubscriptionProxyConfig as RuntimeSubscriptionProxyConfig, SubscriptionProxyProfile,
-    DEFAULT_CONFIG_DIR, DEFAULT_TIMEOUT_SECS,
+    SubscriptionProxyZeroSslConfig, DEFAULT_CONFIG_DIR, DEFAULT_TIMEOUT_SECS,
 };
 use crate::panel::{PanelClient, PanelClientOptions};
 use crate::panel::types::RealtimeBaseConfig;
@@ -75,6 +75,8 @@ pub struct SubscriptionProxyConfig {
     pub certificate_domain: String,
     #[serde(default)]
     pub challenge_dir: String,
+    #[serde(default)]
+    pub zerossl: SubscriptionProxyZeroSslConfig,
     #[serde(default)]
     pub site_id: String,
     #[serde(default)]
@@ -322,6 +324,7 @@ pub fn merge_subscription_proxy(
         target.key_file = source.key_file.trim().to_string();
         target.certificate_domain = source.certificate_domain.trim().to_string();
         target.challenge_dir = source.challenge_dir.trim().to_string();
+        target.zerossl = source.zerossl.clone();
         target.allow_http_fallback = source.allow_http_fallback;
         target.max_response_bytes = source.max_response_bytes;
     } else {
@@ -331,6 +334,7 @@ pub fn merge_subscription_proxy(
         fill_if_empty(&mut target.key_file, &source.key_file);
         fill_if_empty(&mut target.certificate_domain, &source.certificate_domain);
         fill_if_empty(&mut target.challenge_dir, &source.challenge_dir);
+        merge_subscription_proxy_zerossl(&mut target.zerossl, &source.zerossl);
         if target.max_response_bytes == 0 {
             target.max_response_bytes = source.max_response_bytes;
         }
@@ -448,6 +452,10 @@ fn merge_runtime_agent(target: &mut AgentConfig, source: AgentConfig) {
         &mut target.subscription_proxy.challenge_dir,
         &source_proxy.challenge_dir,
     );
+    merge_subscription_proxy_zerossl(
+        &mut target.subscription_proxy.zerossl,
+        &source_proxy.zerossl,
+    );
     if target.subscription_proxy.max_response_bytes == 0 {
         target.subscription_proxy.max_response_bytes = source_proxy.max_response_bytes;
     }
@@ -463,6 +471,19 @@ fn merge_runtime_agent(target: &mut AgentConfig, source: AgentConfig) {
         }
         target.subscription_proxy.profiles.push(profile);
     }
+}
+
+fn merge_subscription_proxy_zerossl(
+    target: &mut crate::config::SubscriptionProxyZeroSslConfig,
+    source: &crate::config::SubscriptionProxyZeroSslConfig,
+) {
+    fill_if_empty(&mut target.status, &source.status);
+    fill_if_empty(&mut target.certificate_id, &source.certificate_id);
+    fill_if_empty(&mut target.validation_path, &source.validation_path);
+    fill_if_empty(&mut target.validation_content, &source.validation_content);
+    fill_if_empty(&mut target.certificate_pem, &source.certificate_pem);
+    fill_if_empty(&mut target.ca_bundle_pem, &source.ca_bundle_pem);
+    fill_if_empty(&mut target.expires_at, &source.expires_at);
 }
 
 async fn fetch_machine_nodes_for_profile(
@@ -574,7 +595,7 @@ mod tests {
         MachineNodesResponse, MachinePanelNode, MachineProfileBaseConfig, MachineProfileInput,
         MachineStatusPayload, NodeFailurePayload, SubscriptionProxyConfig,
     };
-    use crate::config::MachineProfileConfig;
+    use crate::config::{MachineProfileConfig, SubscriptionProxyZeroSslConfig};
     use crate::panel::types::RealtimeBaseConfig;
 
     #[test]
@@ -660,6 +681,10 @@ mod tests {
                     upstream_base_url: "https://panel.example.test/".to_string(),
                     subscribe_path: "answer/land".to_string(),
                     https_listen: "0.0.0.0:443".to_string(),
+                    zerossl: SubscriptionProxyZeroSslConfig {
+                        certificate_id: "cert-1".to_string(),
+                        ..SubscriptionProxyZeroSslConfig::default()
+                    },
                     ..SubscriptionProxyConfig::default()
                 }),
             }),
@@ -678,6 +703,10 @@ mod tests {
         assert_eq!(
             result.agent.subscription_proxy.profiles[0].subscribe_path,
             "answer/land"
+        );
+        assert_eq!(
+            result.agent.subscription_proxy.zerossl.certificate_id,
+            "cert-1"
         );
     }
 

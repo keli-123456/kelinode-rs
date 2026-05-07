@@ -78,6 +78,7 @@
 - Subscription proxy response forwarding plan with size limits and HEAD handling.
 - Subscription proxy certificate domain normalization with IPv6-to-public-IPv4 fallback planning.
 - Subscription proxy certificate status, owner site selection, and serve-mode fallback planning.
+- Subscription proxy ZeroSSL config preservation across direct, machine, and runtime merge paths.
 - Compatibility tests around protocol parsing and endpoint construction.
 
 ## Phase 2: Runtime Control

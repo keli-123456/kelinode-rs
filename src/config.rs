@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 
 pub const DEFAULT_CONFIG_DIR: &str = "/etc/v2node";
 pub const DEFAULT_TIMEOUT_SECS: u64 = 30;
@@ -111,6 +111,8 @@ pub struct SubscriptionProxyConfig {
     #[serde(default)]
     pub challenge_dir: String,
     #[serde(default)]
+    pub zerossl: SubscriptionProxyZeroSslConfig,
+    #[serde(default)]
     pub site_id: String,
     #[serde(default)]
     pub upstream_base_url: String,
@@ -122,6 +124,24 @@ pub struct SubscriptionProxyConfig {
     pub max_response_bytes: u64,
     #[serde(default)]
     pub profiles: Vec<SubscriptionProxyProfile>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
+pub struct SubscriptionProxyZeroSslConfig {
+    #[serde(default)]
+    pub status: String,
+    #[serde(default)]
+    pub certificate_id: String,
+    #[serde(default)]
+    pub validation_path: String,
+    #[serde(default, deserialize_with = "deserialize_validation_content")]
+    pub validation_content: String,
+    #[serde(default)]
+    pub certificate_pem: String,
+    #[serde(default)]
+    pub ca_bundle_pem: String,
+    #[serde(default)]
+    pub expires_at: String,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
@@ -148,6 +168,45 @@ pub struct NodeConfig {
     pub timeout: u64,
     #[serde(default)]
     pub config_dir: String,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum ValidationContentInput {
+    Text(String),
+    Lines(Vec<String>),
+    Bool(bool),
+    Signed(i64),
+    Unsigned(u64),
+    Float(f64),
+}
+
+impl ValidationContentInput {
+    fn into_normalized_string(self) -> String {
+        match self {
+            Self::Text(value) => value.trim().to_string(),
+            Self::Lines(values) => values
+                .into_iter()
+                .map(|value| value.trim().to_string())
+                .collect::<Vec<_>>()
+                .join("\n"),
+            Self::Bool(value) => value.to_string(),
+            Self::Signed(value) => value.to_string(),
+            Self::Unsigned(value) => value.to_string(),
+            Self::Float(value) => value.to_string(),
+        }
+    }
+}
+
+fn deserialize_validation_content<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Ok(
+        Option::<ValidationContentInput>::deserialize(deserializer)?
+            .map(ValidationContentInput::into_normalized_string)
+            .unwrap_or_default(),
+    )
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -416,12 +475,27 @@ fn normalize_subscription_proxy(src: &SubscriptionProxyConfig) -> SubscriptionPr
         key_file: src.key_file.trim().to_string(),
         certificate_domain: src.certificate_domain.trim().to_string(),
         challenge_dir: src.challenge_dir.trim().to_string(),
+        zerossl: normalize_subscription_proxy_zerossl(&src.zerossl),
         site_id: src.site_id.trim().to_string(),
         upstream_base_url: trim_trailing_slashes(src.upstream_base_url.trim()),
         subscribe_path: src.subscribe_path.trim().trim_matches('/').to_string(),
         allow_http_fallback: src.allow_http_fallback,
         max_response_bytes: src.max_response_bytes,
         profiles,
+    }
+}
+
+fn normalize_subscription_proxy_zerossl(
+    src: &SubscriptionProxyZeroSslConfig,
+) -> SubscriptionProxyZeroSslConfig {
+    SubscriptionProxyZeroSslConfig {
+        status: src.status.trim().to_string(),
+        certificate_id: src.certificate_id.trim().to_string(),
+        validation_path: src.validation_path.trim().to_string(),
+        validation_content: src.validation_content.trim().to_string(),
+        certificate_pem: src.certificate_pem.trim().to_string(),
+        ca_bundle_pem: src.ca_bundle_pem.trim().to_string(),
+        expires_at: src.expires_at.trim().to_string(),
     }
 }
 
@@ -673,6 +747,10 @@ mod tests {
         config.agent.subscription_proxy.upstream_base_url =
             " https://panel.example.test/ ".to_string();
         config.agent.subscription_proxy.subscribe_path = " /s/ ".to_string();
+        config.agent.subscription_proxy.zerossl.certificate_id = " cert-1 ".to_string();
+        config.agent.subscription_proxy.zerossl.validation_path =
+            " /.well-known/acme-challenge/token ".to_string();
+        config.agent.subscription_proxy.zerossl.validation_content = " challenge ".to_string();
         config
             .agent
             .subscription_proxy
@@ -695,6 +773,12 @@ mod tests {
             "https://site-a.example.test"
         );
         assert_eq!(proxy.profiles[0].subscribe_path, "sub");
+        assert_eq!(proxy.zerossl.certificate_id, "cert-1");
+        assert_eq!(
+            proxy.zerossl.validation_path,
+            "/.well-known/acme-challenge/token"
+        );
+        assert_eq!(proxy.zerossl.validation_content, "challenge");
     }
 
     #[test]
@@ -741,6 +825,36 @@ kernel:
 
         assert_eq!(resolved.nodes[0].node_id, 7);
         assert_eq!(resolved.nodes[0].config_dir, "/var/lib/v2node");
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn load_from_path_decodes_subscription_proxy_zerossl_content() {
+        let dir = temp_test_dir("load-zerossl-config");
+        let path = dir.join("config.yml");
+        fs::write(
+            &path,
+            r#"
+agent:
+  subscription_proxy:
+    zerossl:
+      certificate_id: " cert-1 "
+      validation_path: " /.well-known/acme-challenge/token "
+      validation_content:
+        - " line-a "
+        - "line-b"
+      certificate_pem: " -----BEGIN CERTIFICATE----- "
+      ca_bundle_pem: " -----BEGIN CA----- "
+"#,
+        )
+        .unwrap();
+
+        let config = AppConfig::load_from_path(&path).unwrap();
+        let proxy = config.agent.subscription_proxy;
+
+        assert_eq!(proxy.zerossl.validation_content, "line-a\nline-b");
+        assert_eq!(proxy.zerossl.certificate_id, " cert-1 ");
 
         let _ = fs::remove_dir_all(dir);
     }

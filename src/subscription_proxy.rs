@@ -327,6 +327,7 @@ where
     let certificate_domain = config.certificate_domain.trim();
     let mut status = SubscriptionProxyStatus {
         certificate_domain: certificate_domain.to_string(),
+        certificate_id: config.zerossl.certificate_id.trim().to_string(),
         cert_not_after: certificate_not_after(cert_file),
         ..SubscriptionProxyStatus::default()
     };
@@ -529,7 +530,9 @@ mod tests {
         SubscriptionProxyServeMode, SubscriptionProxyUpstreamResponse,
         DEFAULT_CHALLENGE_DIR, DEFAULT_HTTPS_LISTEN, DEFAULT_MAX_RESPONSE_BYTES,
     };
-    use crate::config::{SubscriptionProxyConfig, SubscriptionProxyProfile};
+    use crate::config::{
+        SubscriptionProxyConfig, SubscriptionProxyProfile, SubscriptionProxyZeroSslConfig,
+    };
 
     #[test]
     fn normalizes_single_subscription_proxy_profile() {
@@ -657,6 +660,10 @@ mod tests {
                 cert_file: " /etc/v2node/fullchain.pem ".to_string(),
                 key_file: " /etc/v2node/private.key ".to_string(),
                 certificate_domain: " sub.example.test ".to_string(),
+                zerossl: SubscriptionProxyZeroSslConfig {
+                    certificate_id: " cert-1 ".to_string(),
+                    ..SubscriptionProxyZeroSslConfig::default()
+                },
                 ..SubscriptionProxyConfig::default()
             },
             |path| {
@@ -672,6 +679,7 @@ mod tests {
         );
 
         assert_eq!(status.certificate_domain, "sub.example.test");
+        assert_eq!(status.certificate_id, "cert-1");
         assert_eq!(status.cert_not_after, "2026-06-01T00:00:00Z");
         assert_eq!(status.csr_pem, "-----BEGIN CERTIFICATE REQUEST-----test");
         assert!(status.need_certificate);

@@ -247,6 +247,7 @@ fn merge_subscription_proxy(
     fill_if_empty(&mut target.key_file, &source.key_file);
     fill_if_empty(&mut target.certificate_domain, &source.certificate_domain);
     fill_if_empty(&mut target.challenge_dir, &source.challenge_dir);
+    merge_subscription_proxy_zerossl(&mut target.zerossl, &source.zerossl);
     fill_if_empty(&mut target.site_id, &source.site_id);
     fill_if_empty(&mut target.upstream_base_url, &source.upstream_base_url);
     fill_if_empty(&mut target.subscribe_path, &source.subscribe_path);
@@ -267,6 +268,19 @@ fn merge_subscription_proxy(
         }
         target.profiles.push(profile);
     }
+}
+
+fn merge_subscription_proxy_zerossl(
+    target: &mut crate::config::SubscriptionProxyZeroSslConfig,
+    source: &crate::config::SubscriptionProxyZeroSslConfig,
+) {
+    fill_if_empty(&mut target.status, &source.status);
+    fill_if_empty(&mut target.certificate_id, &source.certificate_id);
+    fill_if_empty(&mut target.validation_path, &source.validation_path);
+    fill_if_empty(&mut target.validation_content, &source.validation_content);
+    fill_if_empty(&mut target.certificate_pem, &source.certificate_pem);
+    fill_if_empty(&mut target.ca_bundle_pem, &source.ca_bundle_pem);
+    fill_if_empty(&mut target.expires_at, &source.expires_at);
 }
 
 fn fill_if_empty(target: &mut String, value: &str) {
@@ -298,7 +312,7 @@ mod tests {
     use crate::config::{
         AgentConfig, AppConfig, MachineProfileConfig, NodeConfig, ResolvedConfig,
         ResolvedMachineConfig, RealtimeConfig, SubscriptionProxyConfig,
-        SubscriptionProxyProfile,
+        SubscriptionProxyProfile, SubscriptionProxyZeroSslConfig,
     };
     use crate::machine::MachineResolveSummary;
     use crate::panel::types::{CommonNode, NodeInfo, UserInfo};
@@ -366,6 +380,10 @@ mod tests {
                     enabled: true,
                     https_listen: "0.0.0.0:8443".to_string(),
                     http_listen: "0.0.0.0:80".to_string(),
+                    zerossl: SubscriptionProxyZeroSslConfig {
+                        certificate_id: "cert-1".to_string(),
+                        ..SubscriptionProxyZeroSslConfig::default()
+                    },
                     profiles: vec![SubscriptionProxyProfile {
                         site_id: "machine".to_string(),
                         upstream_base_url: "https://machine.example.test".to_string(),
@@ -382,6 +400,10 @@ mod tests {
         assert_eq!(resolved.nodes.len(), 2);
         assert_eq!(resolved.agent.subscription_proxy.https_listen, "0.0.0.0:443");
         assert_eq!(resolved.agent.subscription_proxy.http_listen, "0.0.0.0:80");
+        assert_eq!(
+            resolved.agent.subscription_proxy.zerossl.certificate_id,
+            "cert-1"
+        );
         assert_eq!(resolved.agent.subscription_proxy.profiles.len(), 2);
     }
 
