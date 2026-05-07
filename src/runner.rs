@@ -22,7 +22,7 @@ use crate::runtime::{
     node_config_for_info as runtime_node_config_for_info, rebuild_runtime_plan_with_users,
     RuntimeBootstrapPlan,
 };
-use crate::system::ResourceSampler;
+use crate::system::{ResourceSampler, SystemPublicIpProbe};
 use crate::user::{
     apply_full_user_list, apply_user_delta_body, load_user_sync_state, save_user_sync_state,
     user_sync_state_path, UserSyncState,
@@ -159,6 +159,7 @@ pub struct PanelRuntimeLoop<'a, P, F> {
     pub panel_clients: Vec<PanelClient>,
     pub version: String,
     pub refresh_health: bool,
+    pub public_ip_probe: bool,
     pub upgrade_status: Option<Value>,
     pub resource_sampler: ResourceSampler,
     user_sync: BTreeMap<String, RuntimeUserSyncEntry>,
@@ -189,6 +190,7 @@ where
             panel_clients: panel_client.into_iter().collect(),
             version: String::new(),
             refresh_health: false,
+            public_ip_probe: false,
             upgrade_status: None,
             resource_sampler: ResourceSampler::default(),
             user_sync: BTreeMap::new(),
@@ -198,6 +200,11 @@ where
     pub fn with_health_refresh(mut self, version: impl Into<String>) -> Self {
         self.version = version.into();
         self.refresh_health = true;
+        self
+    }
+
+    pub fn with_public_ip_probe(mut self, enabled: bool) -> Self {
+        self.public_ip_probe = enabled;
         self
     }
 
@@ -236,7 +243,12 @@ where
                 options.users_by_node_tag.clear();
             }
             if self.refresh_health {
-                let resources = self.resource_sampler.sample();
+                let resources = if self.public_ip_probe {
+                    let mut probe = SystemPublicIpProbe::default();
+                    self.resource_sampler.sample_with_public_ip_probe(&mut probe)
+                } else {
+                    self.resource_sampler.sample()
+                };
                 refresh_runtime_health(
                     &mut options,
                     &self.version,

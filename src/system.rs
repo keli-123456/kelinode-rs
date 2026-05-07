@@ -9,10 +9,28 @@ use serde_json::{json, Value};
 
 use crate::health::{ResourceSnapshot, UsageSnapshot};
 
+const PUBLIC_IPV4_ENDPOINT: &str = "https://api4.ipify.org";
+const PUBLIC_IPV6_ENDPOINT: &str = "https://api6.ipify.org";
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ResourceSampler {
     cpu: Option<CpuCounters>,
     network: Option<TimedNetworkSnapshot>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PublicIpFamily {
+    Ipv4,
+    Ipv6,
+}
+
+pub trait PublicIpProbe {
+    fn probe_public_ip(&mut self, family: PublicIpFamily) -> Option<String>;
+}
+
+#[derive(Clone, Debug)]
+pub struct SystemPublicIpProbe {
+    client: reqwest::blocking::Client,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -46,6 +64,15 @@ pub fn collect_resource_snapshot() -> ResourceSnapshot {
 impl ResourceSampler {
     pub fn sample(&mut self) -> ResourceSnapshot {
         self.sample_at(unix_now_seconds())
+    }
+
+    pub fn sample_with_public_ip_probe<P: PublicIpProbe>(
+        &mut self,
+        probe: &mut P,
+    ) -> ResourceSnapshot {
+        let mut snapshot = self.sample();
+        snapshot.ip = enrich_public_ip_snapshot(snapshot.ip, probe);
+        snapshot
     }
 
     fn sample_at(&mut self, now_seconds: f64) -> ResourceSnapshot {
@@ -112,6 +139,40 @@ impl ResourceSampler {
             counters: snapshot.counters,
         });
         network_status_value(snapshot, rx_rate, tx_rate)
+    }
+}
+
+impl Default for SystemPublicIpProbe {
+    fn default() -> Self {
+        let client = reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_secs(2))
+            .build()
+            .unwrap_or_else(|_| reqwest::blocking::Client::new());
+        Self { client }
+    }
+}
+
+impl PublicIpProbe for SystemPublicIpProbe {
+    fn probe_public_ip(&mut self, family: PublicIpFamily) -> Option<String> {
+        let endpoint = match family {
+            PublicIpFamily::Ipv4 => PUBLIC_IPV4_ENDPOINT,
+            PublicIpFamily::Ipv6 => PUBLIC_IPV6_ENDPOINT,
+        };
+        let value = self
+            .client
+            .get(endpoint)
+            .send()
+            .ok()?
+            .error_for_status()
+            .ok()?
+            .text()
+            .ok()?;
+        let value = value.trim();
+        match family {
+            PublicIpFamily::Ipv4 if is_public_ipv4(value) => Some(value.to_string()),
+            PublicIpFamily::Ipv6 if is_public_ipv6(value) => Some(value.to_string()),
+            _ => None,
+        }
     }
 }
 
@@ -293,6 +354,51 @@ pub fn parse_hostname_i_addresses(input: &str) -> Option<Value> {
     }
 }
 
+pub fn enrich_public_ip_snapshot<P: PublicIpProbe>(
+    snapshot: Option<Value>,
+    probe: &mut P,
+) -> Option<Value> {
+    let mut value = snapshot.unwrap_or_else(|| {
+        json!({
+            "local": [],
+            "local_ipv4": [],
+            "local_ipv6": [],
+            "public_ipv4": "",
+            "public_ipv6": ""
+        })
+    });
+
+    if value
+        .get("public_ipv4")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .is_empty()
+    {
+        if let Some(public_ipv4) = probe
+            .probe_public_ip(PublicIpFamily::Ipv4)
+            .filter(|value| is_public_ipv4(value))
+        {
+            value["public_ipv4"] = json!(public_ipv4);
+        }
+    }
+
+    if value
+        .get("public_ipv6")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .is_empty()
+    {
+        if let Some(public_ipv6) = probe
+            .probe_public_ip(PublicIpFamily::Ipv6)
+            .filter(|value| is_public_ipv6(value))
+        {
+            value["public_ipv6"] = json!(public_ipv6);
+        }
+    }
+
+    Some(value)
+}
+
 fn is_public_ipv4(value: &str) -> bool {
     let Ok(addr) = Ipv4Addr::from_str(value) else {
         return false;
@@ -409,10 +515,11 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        parse_df_portable_bytes, parse_hostname_i_addresses,
+        enrich_public_ip_snapshot, parse_df_portable_bytes, parse_hostname_i_addresses,
         parse_linux_loadavg_cpu_percent, parse_linux_meminfo, parse_linux_net_dev,
         parse_linux_proc_stat_cpu, parse_linux_uptime_seconds, system_info_value,
-        CpuCounters, NetworkCounters, NetworkSnapshot, ResourceSampler,
+        CpuCounters, NetworkCounters, NetworkSnapshot, PublicIpFamily, PublicIpProbe,
+        ResourceSampler,
     };
 
     #[test]
@@ -559,10 +666,64 @@ Inter-|   Receive                                                |  Transmit
     }
 
     #[test]
+    fn enriches_missing_public_ips_from_probe() {
+        let snapshot = parse_hostname_i_addresses("192.168.1.10 fe80::1 ").unwrap();
+        let mut probe = FakePublicIpProbe {
+            ipv4: Some("2.56.116.39".to_string()),
+            ipv6: Some("2001:4860::8888".to_string()),
+            ..FakePublicIpProbe::default()
+        };
+
+        let value = enrich_public_ip_snapshot(Some(snapshot), &mut probe).unwrap();
+
+        assert_eq!(value["public_ipv4"], json!("2.56.116.39"));
+        assert_eq!(value["public_ipv6"], json!("2001:4860::8888"));
+        assert_eq!(probe.ipv4_calls, 1);
+        assert_eq!(probe.ipv6_calls, 1);
+    }
+
+    #[test]
+    fn keeps_existing_public_ip_candidates_without_reprobing() {
+        let snapshot =
+            parse_hostname_i_addresses("2.56.116.39 2001:4860::8888 ").unwrap();
+        let mut probe = FakePublicIpProbe::default();
+
+        let value = enrich_public_ip_snapshot(Some(snapshot), &mut probe).unwrap();
+
+        assert_eq!(value["public_ipv4"], json!("2.56.116.39"));
+        assert_eq!(value["public_ipv6"], json!("2001:4860::8888"));
+        assert_eq!(probe.ipv4_calls, 0);
+        assert_eq!(probe.ipv6_calls, 0);
+    }
+
+    #[test]
     fn system_info_contains_platform_shape() {
         let value = system_info_value();
 
         assert_ne!(value["os"], json!(""));
         assert_ne!(value["arch"], json!(""));
+    }
+
+    #[derive(Default)]
+    struct FakePublicIpProbe {
+        ipv4: Option<String>,
+        ipv6: Option<String>,
+        ipv4_calls: usize,
+        ipv6_calls: usize,
+    }
+
+    impl PublicIpProbe for FakePublicIpProbe {
+        fn probe_public_ip(&mut self, family: PublicIpFamily) -> Option<String> {
+            match family {
+                PublicIpFamily::Ipv4 => {
+                    self.ipv4_calls += 1;
+                    self.ipv4.clone()
+                }
+                PublicIpFamily::Ipv6 => {
+                    self.ipv6_calls += 1;
+                    self.ipv6.clone()
+                }
+            }
+        }
     }
 }

@@ -47,6 +47,7 @@ First cut:
 - Start realtime workers from the `run` command and queue reload/user-refresh runtime events.
 - Tie realtime receipts to runtime event replies so user refresh can report applied or failed.
 - Wrap self-upgrade execution with install-dir backup, post-install version verification, and rollback.
+- Probe external IPv4/IPv6 addresses for machine status when local interface candidates are missing.
 - Collect Linux root disk usage and network byte counters for machine status payloads.
 - Compute Linux CPU usage from `/proc/stat` samples, with `/proc/loadavg` as a fallback.
 - Collect local and public IPv4/IPv6 candidates for machine status payloads without external network calls.
@@ -61,7 +62,6 @@ First cut:
 Not implemented yet:
 
 - Realtime config reload receipts can still race with process restart because the runtime exits to rebuild immediately after replying.
-- External public IP discovery when local interface addresses are not enough.
 - Complete per-protocol user options for bandwidth limits, device-limit enforcement, and advanced protocol-specific credentials.
 - Subscription reverse proxy.
 

@@ -128,6 +128,7 @@ async fn run_agent_once(
     )
     .with_panel_clients(panel_clients)
     .with_health_refresh(agent_version())
+    .with_public_ip_probe(true)
     .with_upgrade_status(upgrade_status);
     let mut realtime_workers = start_realtime_runtime_workers(realtime_options);
     let mut shutdown = false;
