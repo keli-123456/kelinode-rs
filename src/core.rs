@@ -1,9 +1,10 @@
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use serde_json::{json, Map, Value};
 
-use crate::panel::types::{CertInfo, NodeInfo, Protocol, Security};
+use crate::panel::types::{CertInfo, NodeInfo, Protocol, Security, UserInfo};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CoreKind {
@@ -37,6 +38,16 @@ pub struct InboundPlan {
     pub reality_dest: String,
     pub reality_private_key: String,
     pub reality_short_id: String,
+    pub users: Vec<InboundUserPlan>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InboundUserPlan {
+    pub id: u32,
+    pub uuid: String,
+    pub email: String,
+    pub speed_limit: u32,
+    pub device_limit: u32,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -84,9 +95,24 @@ impl CorePlan {
         config_path: PathBuf,
         nodes: &[NodeInfo],
     ) -> Result<Self, CoreError> {
+        Self::from_nodes_with_users(kind, config_path, nodes, &BTreeMap::new())
+    }
+
+    pub fn from_nodes_with_users(
+        kind: CoreKind,
+        config_path: PathBuf,
+        nodes: &[NodeInfo],
+        users_by_node_id: &BTreeMap<u32, Vec<UserInfo>>,
+    ) -> Result<Self, CoreError> {
         let inbounds = nodes
             .iter()
-            .map(build_inbound_plan)
+            .map(|node| {
+                let users = users_by_node_id
+                    .get(&node.id)
+                    .map(Vec::as_slice)
+                    .unwrap_or(&[]);
+                build_inbound_plan_with_users(node, users)
+            })
             .collect::<Result<Vec<_>, _>>()?;
         let listen_tags = inbounds.iter().map(|inbound| inbound.tag.clone()).collect();
 
@@ -185,6 +211,13 @@ pub fn write_core_config_value(
 }
 
 pub fn build_inbound_plan(node: &NodeInfo) -> Result<InboundPlan, CoreError> {
+    build_inbound_plan_with_users(node, &[])
+}
+
+pub fn build_inbound_plan_with_users(
+    node: &NodeInfo,
+    users: &[UserInfo],
+) -> Result<InboundPlan, CoreError> {
     if node.common.server_port == 0 {
         return Err(CoreError::new(format!(
             "node {} has empty server port",
@@ -214,6 +247,11 @@ pub fn build_inbound_plan(node: &NodeInfo) -> Result<InboundPlan, CoreError> {
         reality_dest: node.common.tls_settings.dest.trim().to_string(),
         reality_private_key: node.common.tls_settings.private_key.trim().to_string(),
         reality_short_id: node.common.tls_settings.short_id.trim().to_string(),
+        users: users
+            .iter()
+            .filter(|user| !user.uuid.trim().is_empty())
+            .map(inbound_user_plan)
+            .collect(),
     })
 }
 
@@ -333,23 +371,46 @@ fn render_xray_inbound(inbound: &InboundPlan) -> Value {
 }
 
 fn render_xray_inbound_settings(inbound: &InboundPlan) -> Value {
+    let clients = render_xray_clients(inbound);
     match inbound.protocol.as_str() {
         "vless" => json!({
-            "clients": [],
+            "clients": clients,
             "decryption": "none"
         }),
         "vmess" | "trojan" => json!({
-            "clients": []
+            "clients": clients
         }),
         "shadowsocks" => json!({
-            "clients": [],
+            "clients": clients,
             "network": "tcp,udp"
         }),
         "hysteria" | "tuic" => json!({
-            "clients": []
+            "clients": clients
         }),
         _ => json!({}),
     }
+}
+
+fn render_xray_clients(inbound: &InboundPlan) -> Vec<Value> {
+    inbound
+        .users
+        .iter()
+        .map(|user| match inbound.protocol.as_str() {
+            "trojan" | "shadowsocks" | "hysteria" | "tuic" => json!({
+                "password": &user.uuid,
+                "email": &user.email
+            }),
+            "vmess" => json!({
+                "id": &user.uuid,
+                "email": &user.email,
+                "alterId": 0
+            }),
+            _ => json!({
+                "id": &user.uuid,
+                "email": &user.email
+            }),
+        })
+        .collect()
 }
 
 fn render_xray_stream_settings(inbound: &InboundPlan) -> Map<String, Value> {
@@ -450,6 +511,16 @@ fn first_non_empty(value: &str, fallback: &str) -> String {
     }
 }
 
+fn inbound_user_plan(user: &UserInfo) -> InboundUserPlan {
+    InboundUserPlan {
+        id: user.id,
+        uuid: user.uuid.trim().to_string(),
+        email: format!("user-{}", user.id),
+        speed_limit: user.speed_limit,
+        device_limit: user.device_limit,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
@@ -462,7 +533,7 @@ mod tests {
         build_inbound_plan, core_file_layout, render_core_config, resolve_node_listen_ip,
         should_fallback_node_listen_ip, write_core_config, CoreKind, CorePlan,
     };
-    use crate::panel::types::{CommonNode, NodeInfo, Security};
+    use crate::panel::types::{CommonNode, NodeInfo, Security, UserInfo};
 
     #[test]
     fn core_plan_can_represent_external_xray() {
@@ -565,6 +636,68 @@ mod tests {
             config["inbounds"][0]["streamSettings"]["tlsSettings"]["certificates"][0]
                 ["certificateFile"],
             "/srv/v2node/node.cer"
+        );
+    }
+
+    #[test]
+    fn renders_xray_clients_from_users_by_node_id() {
+        let node = test_node("vless", 9, "0.0.0.0");
+        let mut users = std::collections::BTreeMap::new();
+        users.insert(
+            9,
+            vec![UserInfo {
+                id: 12,
+                uuid: "11111111-1111-1111-1111-111111111111".to_string(),
+                speed_limit: 0,
+                device_limit: 2,
+            }],
+        );
+        let plan = CorePlan::from_nodes_with_users(
+            CoreKind::Xray,
+            PathBuf::from("/srv/v2node/config.json"),
+            &[node],
+            &users,
+        )
+        .unwrap();
+
+        let config = render_core_config(&plan).unwrap();
+
+        assert_eq!(
+            config["inbounds"][0]["settings"]["clients"][0]["id"],
+            "11111111-1111-1111-1111-111111111111"
+        );
+        assert_eq!(
+            config["inbounds"][0]["settings"]["clients"][0]["email"],
+            "user-12"
+        );
+    }
+
+    #[test]
+    fn renders_password_based_clients_for_trojan() {
+        let node = test_node("trojan", 3, "");
+        let mut users = std::collections::BTreeMap::new();
+        users.insert(
+            3,
+            vec![UserInfo {
+                id: 5,
+                uuid: "password-value".to_string(),
+                speed_limit: 0,
+                device_limit: 0,
+            }],
+        );
+        let plan = CorePlan::from_nodes_with_users(
+            CoreKind::Xray,
+            PathBuf::from("/srv/v2node/config.json"),
+            &[node],
+            &users,
+        )
+        .unwrap();
+
+        let config = render_core_config(&plan).unwrap();
+
+        assert_eq!(
+            config["inbounds"][0]["settings"]["clients"][0]["password"],
+            "password-value"
         );
     }
 

@@ -24,12 +24,13 @@ First cut:
 - Track machine self-upgrade status and launch the existing installer through a systemd-run or detached-shell boundary.
 - Feed upgrade signals into the self-upgrade state machine so the next status report can include running/failed/succeeded state.
 - Collect basic host resource snapshots for system metadata, Linux memory/swap, and uptime.
+- Render panel users into Xray client entries for UUID/password based protocols.
 
 Not implemented yet:
 
 - A long-running async loop for polling config changes, periodic reports, realtime invalidations, and shutdown.
 - Full host metric collection for CPU, disk, network, and public/local IP fields.
-- User-authenticated external core config generation.
+- Complete per-protocol user options for flow, cipher, bandwidth limits, and device-limit enforcement.
 - Realtime websocket workers.
 - Download verification and rollback around self-upgrade execution.
 - Subscription reverse proxy.
