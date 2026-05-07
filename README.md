@@ -27,6 +27,7 @@ First cut:
 - Render panel users into Xray client entries for UUID/password based protocols.
 - Load panel users per active node and pass them into runtime bootstrap planning by node tag to keep multi-site nodes distinct.
 - Build a runtime plan from config with both node configs and panel user lists loaded.
+- Pass Xray stream transport settings through for websocket, grpc, httpupgrade, xhttp, tcp, and related networks.
 
 Not implemented yet:
 

@@ -30,6 +30,7 @@ pub struct InboundPlan {
     pub port: u16,
     pub security: String,
     pub network: String,
+    pub network_settings: Value,
     pub alpn: Vec<String>,
     pub fallback_to_ipv4: bool,
     pub cert_file: String,
@@ -234,6 +235,7 @@ pub fn build_inbound_plan_with_users(
         port: node.common.server_port,
         security: security_name(node.security),
         network: core_network_name(node),
+        network_settings: node.common.network_settings.clone(),
         alpn: resolve_tls_alpn(node),
         fallback_to_ipv4: should_fallback_node_listen_ip(&node.common.listen_ip),
         cert_file: cert.map(cert_file).unwrap_or_default(),
@@ -417,6 +419,11 @@ fn render_xray_stream_settings(inbound: &InboundPlan) -> Map<String, Value> {
     let mut stream = Map::new();
     if !inbound.network.trim().is_empty() {
         stream.insert("network".to_string(), json!(&inbound.network));
+        if let Some((key, value)) =
+            render_xray_network_settings(&inbound.network, &inbound.network_settings)
+        {
+            stream.insert(key.to_string(), value);
+        }
     }
     if inbound.security != "none" {
         stream.insert("security".to_string(), json!(&inbound.security));
@@ -436,6 +443,28 @@ fn render_xray_stream_settings(inbound: &InboundPlan) -> Map<String, Value> {
     }
 
     stream
+}
+
+fn render_xray_network_settings(
+    network: &str,
+    settings: &Value,
+) -> Option<(&'static str, Value)> {
+    if settings.is_null() || settings.as_object().map(|value| value.is_empty()).unwrap_or(false) {
+        return None;
+    }
+
+    let key = match network.trim().to_ascii_lowercase().as_str() {
+        "tcp" => "tcpSettings",
+        "kcp" => "kcpSettings",
+        "ws" | "websocket" => "wsSettings",
+        "http" | "h2" => "httpSettings",
+        "quic" => "quicSettings",
+        "grpc" => "grpcSettings",
+        "httpupgrade" => "httpupgradeSettings",
+        "xhttp" => "xhttpSettings",
+        _ => return None,
+    };
+    Some((key, settings.clone()))
 }
 
 fn render_xray_tls_settings(inbound: &InboundPlan) -> Value {
@@ -700,6 +729,31 @@ mod tests {
         assert_eq!(
             config["inbounds"][0]["settings"]["clients"][0]["password"],
             "password-value"
+        );
+    }
+
+    #[test]
+    fn renders_stream_network_settings_for_websocket() {
+        let mut node = test_node("vless", 11, "");
+        node.common.network = "ws".to_string();
+        node.common.network_settings = json!({
+            "path": "/ws",
+            "headers": {
+                "Host": "node.example.test"
+            }
+        });
+        let plan = CorePlan::from_nodes(
+            CoreKind::Xray,
+            PathBuf::from("/srv/v2node/config.json"),
+            &[node],
+        )
+        .unwrap();
+
+        let config = render_core_config(&plan).unwrap();
+
+        assert_eq!(
+            config["inbounds"][0]["streamSettings"]["wsSettings"]["path"],
+            "/ws"
         );
     }
 

@@ -33,6 +33,7 @@
 - Core user client planning and Xray client rendering from panel user lists.
 - Node user-set loading and runtime bootstrap planning with users keyed by node tag.
 - Full bootstrap entrypoint that resolves nodes and user lists before building the runtime plan.
+- Xray stream network settings passthrough for websocket/grpc/httpupgrade/xhttp/tcp-style transports.
 - Machine node resolution and subscription proxy config merging.
 - Compatibility tests around protocol parsing and endpoint construction.
 
