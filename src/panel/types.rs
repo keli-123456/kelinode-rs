@@ -109,6 +109,12 @@ pub struct RealtimeBaseConfig {
     pub ping_interval: Value,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RealtimeBootstrap {
+    pub enabled: bool,
+    pub url: String,
+}
+
 #[derive(Clone, Debug, Default, Deserialize, PartialEq)]
 pub struct TlsSettings {
     #[serde(default)]

@@ -9,10 +9,12 @@ use super::contract::{
     CONTENT_TYPE_MSGPACK, HEADER_RESPONSE_FORMAT, PATH_V1_UNIPROXY_ALIVE,
     PATH_V1_UNIPROXY_ALIVE_LIST, PATH_V1_UNIPROXY_PUSH, PATH_V1_UNIPROXY_USER,
     PATH_V1_UNIPROXY_USER_DELTA, PATH_V2_MACHINE_NODES, PATH_V2_MACHINE_STATUS,
-    PATH_V2_SERVER_CONFIG, RESPONSE_FORMAT_MSGPACK,
+    PATH_V2_SERVER_CONFIG, PATH_V2_SERVER_HANDSHAKE, PATH_V2_SERVER_REPORT,
+    RESPONSE_FORMAT_MSGPACK,
 };
 use super::types::{
-    AliveMap, CommonNode, NodeInfo, UserDeltaBody, UserInfo, UserListBody, UserTraffic,
+    AliveMap, CommonNode, NodeInfo, RealtimeBootstrap, UserDeltaBody, UserInfo, UserListBody,
+    UserTraffic,
 };
 use crate::config::{NodeConfig, DEFAULT_TIMEOUT_SECS};
 use crate::machine::{
@@ -188,6 +190,27 @@ impl PanelClient {
         serde_json::from_slice(&body).context("decode alive list")
     }
 
+    pub async fn get_realtime_bootstrap(&self) -> Result<Option<RealtimeBootstrap>> {
+        let response = self
+            .base_request(Method::POST, PATH_V2_SERVER_HANDSHAKE)
+            .send()
+            .await
+            .context("request realtime bootstrap")?;
+        if response.status() == StatusCode::NOT_FOUND
+            || response.status() == StatusCode::METHOD_NOT_ALLOWED
+        {
+            return Ok(None);
+        }
+        ensure_success(response.status(), "realtime bootstrap")?;
+        let body = response.bytes().await.context("read realtime bootstrap")?;
+        let payload: HandshakeResponse =
+            serde_json::from_slice(&body).context("decode realtime bootstrap")?;
+        Ok(Some(RealtimeBootstrap {
+            enabled: payload.websocket.enabled,
+            url: payload.websocket.ws_url.trim().to_string(),
+        }))
+    }
+
     pub async fn report_user_traffic(&self, traffic: &[UserTraffic]) -> Result<()> {
         let mut body = BTreeMap::<String, [i64; 2]>::new();
         for row in traffic {
@@ -200,6 +223,43 @@ impl PanelClient {
             .await
             .context("report user traffic")?;
         ensure_success(response.status(), "report user traffic")
+    }
+
+    pub async fn report_snapshot(
+        &self,
+        traffic: &[UserTraffic],
+        online: &BTreeMap<u32, Vec<String>>,
+    ) -> Result<bool> {
+        let mut traffic_body = BTreeMap::<String, [i64; 2]>::new();
+        for row in traffic {
+            traffic_body.insert(row.uid.to_string(), [row.upload, row.download]);
+        }
+        let alive_body = online
+            .iter()
+            .map(|(uid, ips)| (uid.to_string(), ips.clone()))
+            .collect::<BTreeMap<_, _>>();
+        let online_body = online
+            .iter()
+            .map(|(uid, ips)| (uid.to_string(), ips.len()))
+            .collect::<BTreeMap<_, _>>();
+
+        let response = self
+            .base_request(Method::POST, PATH_V2_SERVER_REPORT)
+            .json(&ReportSnapshotBody {
+                traffic: traffic_body,
+                alive: alive_body,
+                online: online_body,
+            })
+            .send()
+            .await
+            .context("report snapshot")?;
+        if response.status() == StatusCode::NOT_FOUND
+            || response.status() == StatusCode::METHOD_NOT_ALLOWED
+        {
+            return Ok(false);
+        }
+        ensure_success(response.status(), "report snapshot")?;
+        Ok(true)
     }
 
     pub async fn report_online_users(&self, alive_ips: &BTreeMap<u32, Vec<String>>) -> Result<()> {
@@ -306,6 +366,30 @@ struct MachineStatusRequestBody {
     status: BTreeMap<String, serde_json::Value>,
 }
 
+#[derive(serde::Deserialize)]
+struct HandshakeResponse {
+    #[serde(default)]
+    websocket: HandshakeWebsocket,
+}
+
+#[derive(Default, serde::Deserialize)]
+struct HandshakeWebsocket {
+    #[serde(default)]
+    enabled: bool,
+    #[serde(default)]
+    ws_url: String,
+}
+
+#[derive(serde::Serialize)]
+struct ReportSnapshotBody {
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    traffic: BTreeMap<String, [i64; 2]>,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    alive: BTreeMap<String, Vec<String>>,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    online: BTreeMap<String, usize>,
+}
+
 fn ensure_success(status: StatusCode, label: &str) -> Result<()> {
     if status.is_success() {
         Ok(())
@@ -319,7 +403,10 @@ mod tests {
     use std::time::Duration;
 
     use super::{PanelClient, PanelClientOptions};
-    use crate::panel::contract::{PATH_V2_MACHINE_NODES, PATH_V2_SERVER_CONFIG};
+    use crate::panel::contract::{
+        PATH_V2_MACHINE_NODES, PATH_V2_SERVER_CONFIG, PATH_V2_SERVER_HANDSHAKE,
+        PATH_V2_SERVER_REPORT,
+    };
 
     #[test]
     fn endpoint_joins_trimmed_host_and_path() {
@@ -336,6 +423,14 @@ mod tests {
         assert_eq!(
             client.endpoint(PATH_V2_SERVER_CONFIG),
             "https://panel.example.test/api/v2/server/config"
+        );
+        assert_eq!(
+            client.endpoint(PATH_V2_SERVER_HANDSHAKE),
+            "https://panel.example.test/api/v2/server/handshake"
+        );
+        assert_eq!(
+            client.endpoint(PATH_V2_SERVER_REPORT),
+            "https://panel.example.test/api/v2/server/report"
         );
     }
 
