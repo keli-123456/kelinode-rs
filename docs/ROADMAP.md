@@ -15,6 +15,7 @@
 - Core inbound planning for protocol/listen/security/ALPN parity.
 - Node TLS certificate runtime defaults from config directory.
 - Panel-backed machine profile fetch and aggregation entrypoint.
+- Runtime resolver that merges machine profile nodes and agent config.
 - Machine node resolution and subscription proxy config merging.
 - Compatibility tests around protocol parsing and endpoint construction.
 
