@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use crate::config::{AgentConfig, AppConfig, ResolvedConfig, SubscriptionProxyConfig};
 use crate::core::{CoreKind, CorePlan};
 use crate::machine::{resolve_machine_profiles_from_panel, MachineResolveSummary};
-use crate::node::{NodeFailure, NodeManager, NodeManagerOptions};
+use crate::node::{users_by_node_tag, NodeFailure, NodeManager, NodeManagerOptions};
 use crate::panel::types::{NodeInfo, UserInfo};
 use crate::port_forward::{
     build_hysteria_port_forward_rules, new_hysteria_port_forward_status,
@@ -70,17 +70,38 @@ impl Bootstrap {
 pub async fn bootstrap_from_config(
     config: &AppConfig,
 ) -> Result<RuntimeBootstrapPlan, String> {
+    let (resolved, manager) = build_node_manager_from_config(config).await?;
+    build_runtime_bootstrap_plan(
+        resolved,
+        manager.node_infos(),
+        manager.failures().to_vec(),
+    )
+}
+
+pub async fn bootstrap_from_config_with_users(
+    config: &AppConfig,
+) -> Result<RuntimeBootstrapPlan, String> {
+    let (resolved, manager) = build_node_manager_from_config(config).await?;
+    let users = manager.load_user_sets_from_panel().await?;
+    let users_by_tag = users_by_node_tag(&users);
+    build_runtime_bootstrap_plan_with_users(
+        resolved,
+        manager.node_infos(),
+        manager.failures().to_vec(),
+        &users_by_tag,
+    )
+}
+
+async fn build_node_manager_from_config(
+    config: &AppConfig,
+) -> Result<(ResolvedConfig, NodeManager), String> {
     let resolved = resolve_runtime_with_machine_profiles(config).await?;
     let options = NodeManagerOptions {
         continue_on_error: resolved.machine.continue_on_error,
     };
     let manager = NodeManager::build_from_panel(&resolved.nodes, resolved.realtime.clone(), options)
         .await?;
-    build_runtime_bootstrap_plan(
-        resolved,
-        manager.node_infos(),
-        manager.failures().to_vec(),
-    )
+    Ok((resolved, manager))
 }
 
 pub async fn resolve_runtime_with_machine_profiles(
