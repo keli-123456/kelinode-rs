@@ -10,6 +10,7 @@ pub mod panel;
 pub mod port_forward;
 pub mod process;
 pub mod report;
+pub mod runner;
 pub mod runtime;
 pub mod system;
 pub mod upgrade;

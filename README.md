@@ -40,6 +40,7 @@ First cut:
 - Collect Linux root disk usage and network byte counters for machine status payloads.
 - Estimate Linux CPU load percentage from `/proc/loadavg` for machine status payloads.
 - Collect local IPv4/IPv6 addresses for machine status payloads without external network calls.
+- Add a runtime loop scheduler for periodic user refresh, panel reports, and reload/upgrade signal exits.
 
 Not implemented yet:
 
