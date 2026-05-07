@@ -14,6 +14,7 @@ pub mod realtime_client;
 pub mod report;
 pub mod runner;
 pub mod runtime;
+pub mod subscription_proxy;
 pub mod system;
 pub mod upgrade;
 pub mod user;

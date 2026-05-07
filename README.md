@@ -67,6 +67,7 @@ First cut:
 - Add a `run` command that keeps the runtime loop alive across reloads and carries upgrade status into machine reports.
 - Report machine status to each configured machine-bound panel profile instead of only the first resolved node.
 - Stop the active core process when the `run` command receives Ctrl-C or SIGTERM.
+- Normalize subscription proxy profiles and build upstream subscription URLs compatible with the Go agent.
 
 Not implemented yet:
 

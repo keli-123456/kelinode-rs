@@ -73,6 +73,7 @@
 - Multi-panel machine status reporting for machine-bound deployments with more than one site profile.
 - Command shutdown signal handling that stops the active core process before exiting.
 - Machine node resolution and subscription proxy config merging.
+- Subscription proxy profile normalization and upstream subscription URL construction.
 - Compatibility tests around protocol parsing and endpoint construction.
 
 ## Phase 2: Runtime Control
