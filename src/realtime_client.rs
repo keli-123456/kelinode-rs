@@ -1,8 +1,17 @@
 use std::future::Future;
 use std::pin::Pin;
 
+use futures_util::{SinkExt, StreamExt};
+use tokio::net::TcpStream;
+use tokio_tungstenite::{
+    connect_async,
+    tungstenite::Message,
+    MaybeTlsStream, WebSocketStream,
+};
+
 use crate::realtime::{
-    realtime_runtime_task, RealtimeMessage, RealtimeOptions, RealtimeRuntimeTask,
+    build_realtime_dial_url, realtime_runtime_task, RealtimeMessage, RealtimeOptions,
+    RealtimeRuntimeTask,
 };
 
 pub type RealtimeTransportFuture<'a, T> =
@@ -11,6 +20,72 @@ pub type RealtimeTransportFuture<'a, T> =
 pub trait RealtimeTransport {
     fn send<'a>(&'a mut self, message: RealtimeMessage) -> RealtimeTransportFuture<'a, ()>;
     fn recv<'a>(&'a mut self) -> RealtimeTransportFuture<'a, Option<RealtimeMessage>>;
+}
+
+pub struct TokioTungsteniteTransport {
+    stream: WebSocketStream<MaybeTlsStream<TcpStream>>,
+}
+
+impl TokioTungsteniteTransport {
+    pub async fn connect(raw_url: &str) -> Result<Self, String> {
+        let (stream, _) = connect_async(raw_url)
+            .await
+            .map_err(|err| format!("connect realtime websocket: {err}"))?;
+        Ok(Self { stream })
+    }
+}
+
+pub async fn connect_realtime_transport(
+    options: &RealtimeOptions,
+) -> Result<TokioTungsteniteTransport, String> {
+    let dial_url = build_realtime_dial_url(options)?;
+    TokioTungsteniteTransport::connect(&dial_url).await
+}
+
+impl RealtimeTransport for TokioTungsteniteTransport {
+    fn send<'a>(&'a mut self, message: RealtimeMessage) -> RealtimeTransportFuture<'a, ()> {
+        Box::pin(async move {
+            let payload = serde_json::to_string(&message)
+                .map_err(|err| format!("encode realtime message: {err}"))?;
+            self.stream
+                .send(Message::Text(payload.into()))
+                .await
+                .map_err(|err| format!("send realtime message: {err}"))
+        })
+    }
+
+    fn recv<'a>(&'a mut self) -> RealtimeTransportFuture<'a, Option<RealtimeMessage>> {
+        Box::pin(async move {
+            loop {
+                let Some(frame) = self.stream.next().await else {
+                    return Ok(None);
+                };
+                let frame = frame.map_err(|err| format!("read realtime message: {err}"))?;
+                match frame {
+                    Message::Text(text) => match serde_json::from_str::<RealtimeMessage>(
+                        text.as_str(),
+                    ) {
+                        Ok(message) => return Ok(Some(message)),
+                        Err(_) => continue,
+                    },
+                    Message::Binary(bytes) => match serde_json::from_slice::<RealtimeMessage>(
+                        bytes.as_ref(),
+                    ) {
+                        Ok(message) => return Ok(Some(message)),
+                        Err(_) => continue,
+                    },
+                    Message::Ping(bytes) => {
+                        self.stream
+                            .send(Message::Pong(bytes))
+                            .await
+                            .map_err(|err| format!("send realtime pong frame: {err}"))?;
+                    }
+                    Message::Close(_) => return Ok(None),
+                    _ => {}
+                }
+            }
+        })
+    }
 }
 
 pub async fn serve_realtime_transport<T, F, N>(
