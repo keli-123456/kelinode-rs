@@ -1,3 +1,6 @@
+use std::fs;
+use std::path::{Path, PathBuf};
+
 use serde::Deserialize;
 
 pub const DEFAULT_CONFIG_DIR: &str = "/etc/v2node";
@@ -164,6 +167,28 @@ pub struct ResolvedMachineConfig {
 }
 
 impl AppConfig {
+    pub fn load_from_path(path: impl AsRef<Path>) -> Result<Self, String> {
+        let resolved_path = resolve_config_path(path);
+        let content = fs::read_to_string(&resolved_path)
+            .map_err(|err| format!("read config file {}: {err}", resolved_path.display()))?;
+
+        match config_extension(&resolved_path).as_deref() {
+            Some("yml") | Some("yaml") => serde_yaml::from_str(&content)
+                .map_err(|err| format!("decode yaml config {}: {err}", resolved_path.display())),
+            Some("json") => serde_json::from_str(&content)
+                .map_err(|err| format!("decode json config {}: {err}", resolved_path.display())),
+            _ => match serde_json::from_str(&content) {
+                Ok(config) => Ok(config),
+                Err(json_err) => serde_yaml::from_str(&content).map_err(|yaml_err| {
+                    format!(
+                        "decode config {}: json: {json_err}; yaml: {yaml_err}",
+                        resolved_path.display()
+                    )
+                }),
+            },
+        }
+    }
+
     pub fn direct_node(&self) -> Option<NodeConfig> {
         if !self.nodes.is_empty() || !self.machine.profiles.is_empty() {
             return None;
@@ -318,6 +343,33 @@ fn default_config_dir() -> String {
     DEFAULT_CONFIG_DIR.to_string()
 }
 
+pub fn resolve_config_path(path: impl AsRef<Path>) -> PathBuf {
+    let path = path.as_ref();
+    if path.as_os_str().is_empty() || path.exists() {
+        return path.to_path_buf();
+    }
+
+    let Some(extension) = config_extension(path) else {
+        return path.to_path_buf();
+    };
+    let candidates: &[&str] = match extension.as_str() {
+        "json" => &["yml", "yaml"],
+        "yml" | "yaml" => &["json"],
+        _ => &[],
+    };
+    if candidates.is_empty() {
+        return path.to_path_buf();
+    }
+
+    for candidate_extension in candidates {
+        let candidate = path.with_extension(candidate_extension);
+        if candidate.exists() {
+            return candidate;
+        }
+    }
+    path.to_path_buf()
+}
+
 pub fn normalize_config_dir(path: &str) -> String {
     let path = path.trim();
     if path.is_empty() {
@@ -461,11 +513,21 @@ fn normalize_optional_config_dir(path: &str) -> String {
     }
 }
 
+fn config_extension(path: &Path) -> Option<String> {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .map(|extension| extension.to_ascii_lowercase())
+}
+
 #[cfg(test)]
 mod tests {
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
     use super::{
-        normalize_config_dir, resolve_node_config_dir, AppConfig, KernelConfig,
-        MachineProfileConfig, NodeConfig, SubscriptionProxyProfile, DEFAULT_CONFIG_DIR,
+        normalize_config_dir, resolve_config_path, resolve_node_config_dir, AppConfig,
+        KernelConfig, MachineProfileConfig, NodeConfig, SubscriptionProxyProfile,
+        DEFAULT_CONFIG_DIR,
     };
 
     #[test]
@@ -643,5 +705,53 @@ mod tests {
             resolve_node_config_dir("/var/lib/v2node", "", 5, true),
             "/var/lib/v2node/node-5"
         );
+    }
+
+    #[test]
+    fn resolve_config_path_switches_between_json_and_yaml() {
+        let dir = temp_test_dir("resolve-config-path");
+        let json_path = dir.join("config.json");
+        let yaml_path = dir.join("config.yml");
+        fs::write(&yaml_path, "panel:\n  url: https://panel.example.test\n").unwrap();
+
+        assert_eq!(resolve_config_path(&json_path), yaml_path);
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn load_from_path_decodes_yaml_config() {
+        let dir = temp_test_dir("load-yaml-config");
+        let path = dir.join("config.yml");
+        fs::write(
+            &path,
+            r#"
+panel:
+  url: "https://panel.example.test"
+  token: "token"
+  node_id: 7
+kernel:
+  config_dir: "/var/lib/v2node"
+"#,
+        )
+        .unwrap();
+
+        let config = AppConfig::load_from_path(&path).unwrap();
+        let resolved = config.resolve_runtime().unwrap();
+
+        assert_eq!(resolved.nodes[0].node_id, 7);
+        assert_eq!(resolved.nodes[0].config_dir, "/var/lib/v2node");
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    fn temp_test_dir(label: &str) -> std::path::PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("kelinode-rs-{label}-{nanos}"));
+        fs::create_dir_all(&path).unwrap();
+        path
     }
 }
