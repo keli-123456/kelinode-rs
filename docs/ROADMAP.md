@@ -36,6 +36,7 @@
 - Xray stream network settings passthrough for websocket/grpc/httpupgrade/xhttp/tcp-style transports.
 - PROXY protocol socket option rendering from panel network settings.
 - Go-compatible default inbound sniffing for HTTP and TLS targets.
+- TLS `rejectUnknownSni` rendering from panel certificate metadata.
 - VLESS flow and Shadowsocks cipher/method rendering from panel node fields.
 - VLESS supported encryption/decryption string rendering with unsupported values rejected.
 - Shadowsocks HTTP obfs transport headers and TCP-only network mode.

@@ -47,6 +47,7 @@ pub struct InboundPlan {
     pub fallback_to_ipv4: bool,
     pub cert_file: String,
     pub key_file: String,
+    pub reject_unknown_sni: bool,
     pub server_name: String,
     pub reality_dest: String,
     pub reality_private_key: String,
@@ -279,6 +280,7 @@ pub fn build_inbound_plan_with_users(
         fallback_to_ipv4: should_fallback_node_listen_ip(&node.common.listen_ip),
         cert_file: cert.map(cert_file).unwrap_or_default(),
         key_file: cert.map(key_file).unwrap_or_default(),
+        reject_unknown_sni: cert.map(|cert| cert.reject_unknown_sni).unwrap_or(false),
         server_name: cert.map(cert_domain).unwrap_or_else(|| {
             first_non_empty(
                 node.common.tls_settings.server_name.trim(),
@@ -998,6 +1000,9 @@ fn render_xray_tls_settings(inbound: &InboundPlan) -> Value {
     if !inbound.alpn.is_empty() {
         settings.insert("alpn".to_string(), json!(&inbound.alpn));
     }
+    if inbound.reject_unknown_sni {
+        settings.insert("rejectUnknownSni".to_string(), json!(true));
+    }
     if !inbound.cert_file.trim().is_empty() && !inbound.key_file.trim().is_empty() {
         settings.insert(
             "certificates".to_string(),
@@ -1218,6 +1223,7 @@ mod tests {
         node.common.cert_info.as_mut().unwrap().cert_domain = "node.example.test".to_string();
         node.common.cert_info.as_mut().unwrap().cert_file = "/srv/v2node/node.cer".to_string();
         node.common.cert_info.as_mut().unwrap().key_file = "/srv/v2node/node.key".to_string();
+        node.common.cert_info.as_mut().unwrap().reject_unknown_sni = true;
         let plan = CorePlan::from_nodes(
             CoreKind::Xray,
             PathBuf::from("/srv/v2node/config.json"),
@@ -1233,6 +1239,10 @@ mod tests {
             config["inbounds"][0]["streamSettings"]["tlsSettings"]["certificates"][0]
                 ["certificateFile"],
             "/srv/v2node/node.cer"
+        );
+        assert_eq!(
+            config["inbounds"][0]["streamSettings"]["tlsSettings"]["rejectUnknownSni"],
+            true
         );
     }
 
