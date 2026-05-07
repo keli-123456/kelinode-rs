@@ -77,6 +77,7 @@
 - Subscription proxy request routing for health checks and upstream subscription forwarding.
 - Subscription proxy response forwarding plan with size limits and HEAD handling.
 - Subscription proxy certificate domain normalization with IPv6-to-public-IPv4 fallback planning.
+- Subscription proxy certificate status, owner site selection, and serve-mode fallback planning.
 - Compatibility tests around protocol parsing and endpoint construction.
 
 ## Phase 2: Runtime Control

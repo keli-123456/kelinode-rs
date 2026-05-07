@@ -41,6 +41,30 @@ pub struct SubscriptionProxyClientResponse {
     pub body: Vec<u8>,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SubscriptionProxyStatus {
+    pub status: String,
+    pub enabled: bool,
+    pub running: bool,
+    pub mode: String,
+    pub https_listen: String,
+    pub profiles: usize,
+    pub certificate_domain: String,
+    pub certificate_owner_site_id: String,
+    pub certificate_id: String,
+    pub need_certificate: bool,
+    pub csr_pem: String,
+    pub validation_ready: bool,
+    pub cert_not_after: String,
+    pub last_error: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SubscriptionProxyServeMode {
+    Https,
+    HttpFallback,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SubscriptionProxyRoute {
     Health,
@@ -275,6 +299,77 @@ pub fn plan_subscription_proxy_response(
     })
 }
 
+pub fn subscription_proxy_certificate_owner_site_id(
+    profiles: &[SubscriptionProxyProfile],
+) -> String {
+    for profile in profiles {
+        let site_id = profile.site_id.trim();
+        if !site_id.is_empty() {
+            return site_id.to_string();
+        }
+    }
+    String::new()
+}
+
+pub fn prepare_subscription_proxy_certificate_status<F, G, H>(
+    config: &SubscriptionProxyConfig,
+    mut certificate_not_after: F,
+    mut ensure_csr: G,
+    mut file_readable: H,
+) -> SubscriptionProxyStatus
+where
+    F: FnMut(&str) -> String,
+    G: FnMut(&str, &str) -> Result<String, String>,
+    H: FnMut(&str) -> bool,
+{
+    let cert_file = config.cert_file.trim();
+    let key_file = config.key_file.trim();
+    let certificate_domain = config.certificate_domain.trim();
+    let mut status = SubscriptionProxyStatus {
+        certificate_domain: certificate_domain.to_string(),
+        cert_not_after: certificate_not_after(cert_file),
+        ..SubscriptionProxyStatus::default()
+    };
+
+    if certificate_domain.is_empty() {
+        return status;
+    }
+
+    match ensure_csr(key_file, certificate_domain) {
+        Ok(csr_pem) => status.csr_pem = csr_pem,
+        Err(err) => {
+            status.last_error = err;
+            return status;
+        }
+    }
+
+    if !file_readable(cert_file) || !file_readable(key_file) {
+        status.need_certificate = true;
+    }
+
+    status
+}
+
+pub fn plan_subscription_proxy_serve_mode<F>(
+    config: &SubscriptionProxyConfig,
+    mut file_readable: F,
+) -> Result<SubscriptionProxyServeMode, String>
+where
+    F: FnMut(&str) -> bool,
+{
+    let cert_file = config.cert_file.trim();
+    let key_file = config.key_file.trim();
+    if file_readable(cert_file) && file_readable(key_file) {
+        return Ok(SubscriptionProxyServeMode::Https);
+    }
+    if config.allow_http_fallback {
+        return Ok(SubscriptionProxyServeMode::HttpFallback);
+    }
+    Err(format!(
+        "subscription proxy certificate files are not readable: cert={cert_file} key={key_file}"
+    ))
+}
+
 fn first_non_empty(value: &str, fallback: &str) -> String {
     if value.is_empty() {
         fallback.to_string()
@@ -428,8 +523,10 @@ mod tests {
         build_subscription_upstream_url, normalize_subscription_proxy_config,
         normalize_subscription_proxy_config_with_public_ipv4,
         plan_subscription_proxy_request, plan_subscription_proxy_response,
-        resolve_subscription_certificate_domain, SubscriptionProxyInboundRequest,
-        SubscriptionProxyRoute, SubscriptionProxyRouteError, SubscriptionProxyUpstreamResponse,
+        plan_subscription_proxy_serve_mode, prepare_subscription_proxy_certificate_status,
+        resolve_subscription_certificate_domain, subscription_proxy_certificate_owner_site_id,
+        SubscriptionProxyInboundRequest, SubscriptionProxyRoute, SubscriptionProxyRouteError,
+        SubscriptionProxyServeMode, SubscriptionProxyUpstreamResponse,
         DEFAULT_CHALLENGE_DIR, DEFAULT_HTTPS_LISTEN, DEFAULT_MAX_RESPONSE_BYTES,
     };
     use crate::config::{SubscriptionProxyConfig, SubscriptionProxyProfile};
@@ -528,6 +625,112 @@ mod tests {
             .unwrap();
         assert_eq!(domain, "2607:f358:1a:e::d4d9:5831");
         assert!(!changed);
+    }
+
+    #[test]
+    fn certificate_owner_site_id_uses_first_non_empty_profile() {
+        let owner = subscription_proxy_certificate_owner_site_id(&[
+            SubscriptionProxyProfile {
+                site_id: " ".to_string(),
+                upstream_base_url: String::new(),
+                subscribe_path: String::new(),
+            },
+            SubscriptionProxyProfile {
+                site_id: " site-a ".to_string(),
+                upstream_base_url: String::new(),
+                subscribe_path: String::new(),
+            },
+            SubscriptionProxyProfile {
+                site_id: "site-b".to_string(),
+                upstream_base_url: String::new(),
+                subscribe_path: String::new(),
+            },
+        ]);
+
+        assert_eq!(owner, "site-a");
+    }
+
+    #[test]
+    fn prepares_certificate_status_and_marks_missing_files() {
+        let status = prepare_subscription_proxy_certificate_status(
+            &SubscriptionProxyConfig {
+                cert_file: " /etc/v2node/fullchain.pem ".to_string(),
+                key_file: " /etc/v2node/private.key ".to_string(),
+                certificate_domain: " sub.example.test ".to_string(),
+                ..SubscriptionProxyConfig::default()
+            },
+            |path| {
+                assert_eq!(path, "/etc/v2node/fullchain.pem");
+                "2026-06-01T00:00:00Z".to_string()
+            },
+            |key_file, domain| {
+                assert_eq!(key_file, "/etc/v2node/private.key");
+                assert_eq!(domain, "sub.example.test");
+                Ok("-----BEGIN CERTIFICATE REQUEST-----test".to_string())
+            },
+            |_| false,
+        );
+
+        assert_eq!(status.certificate_domain, "sub.example.test");
+        assert_eq!(status.cert_not_after, "2026-06-01T00:00:00Z");
+        assert_eq!(status.csr_pem, "-----BEGIN CERTIFICATE REQUEST-----test");
+        assert!(status.need_certificate);
+        assert!(status.last_error.is_empty());
+    }
+
+    #[test]
+    fn certificate_status_keeps_csr_errors_non_fatal() {
+        let status = prepare_subscription_proxy_certificate_status(
+            &SubscriptionProxyConfig {
+                key_file: "/etc/v2node/private.key".to_string(),
+                certificate_domain: "sub.example.test".to_string(),
+                ..SubscriptionProxyConfig::default()
+            },
+            |_| String::new(),
+            |_, _| Err("key write failed".to_string()),
+            |_| false,
+        );
+
+        assert_eq!(status.last_error, "key write failed");
+        assert!(!status.need_certificate);
+        assert!(status.csr_pem.is_empty());
+    }
+
+    #[test]
+    fn plans_https_or_http_fallback_from_certificate_files() {
+        let https = plan_subscription_proxy_serve_mode(
+            &SubscriptionProxyConfig {
+                cert_file: "/etc/v2node/fullchain.pem".to_string(),
+                key_file: "/etc/v2node/private.key".to_string(),
+                ..SubscriptionProxyConfig::default()
+            },
+            |_| true,
+        )
+        .unwrap();
+        assert_eq!(https, SubscriptionProxyServeMode::Https);
+
+        let http = plan_subscription_proxy_serve_mode(
+            &SubscriptionProxyConfig {
+                cert_file: "/etc/v2node/fullchain.pem".to_string(),
+                key_file: "/etc/v2node/private.key".to_string(),
+                allow_http_fallback: true,
+                ..SubscriptionProxyConfig::default()
+            },
+            |_| false,
+        )
+        .unwrap();
+        assert_eq!(http, SubscriptionProxyServeMode::HttpFallback);
+
+        let err = plan_subscription_proxy_serve_mode(
+            &SubscriptionProxyConfig {
+                cert_file: "/etc/v2node/fullchain.pem".to_string(),
+                key_file: "/etc/v2node/private.key".to_string(),
+                ..SubscriptionProxyConfig::default()
+            },
+            |_| false,
+        )
+        .unwrap_err();
+        assert!(err.contains("certificate files are not readable"));
     }
 
     #[test]
