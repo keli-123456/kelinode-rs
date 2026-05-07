@@ -28,12 +28,13 @@ First cut:
 - Load panel users per active node and pass them into runtime bootstrap planning by node tag to keep multi-site nodes distinct.
 - Build a runtime plan from config with both node configs and panel user lists loaded.
 - Pass Xray stream transport settings through for websocket, grpc, httpupgrade, xhttp, tcp, and related networks.
+- Render VLESS flow and Shadowsocks cipher/method options from panel node fields.
 
 Not implemented yet:
 
 - A long-running async loop for polling config changes, periodic reports, realtime invalidations, and shutdown.
 - Full host metric collection for CPU, disk, network, and public/local IP fields.
-- Complete per-protocol user options for flow, cipher, bandwidth limits, and device-limit enforcement.
+- Complete per-protocol user options for bandwidth limits, device-limit enforcement, and advanced protocol-specific credentials.
 - Realtime websocket workers.
 - Download verification and rollback around self-upgrade execution.
 - Subscription reverse proxy.

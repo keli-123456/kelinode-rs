@@ -31,6 +31,8 @@ pub struct InboundPlan {
     pub security: String,
     pub network: String,
     pub network_settings: Value,
+    pub flow: String,
+    pub cipher: String,
     pub alpn: Vec<String>,
     pub fallback_to_ipv4: bool,
     pub cert_file: String,
@@ -236,6 +238,8 @@ pub fn build_inbound_plan_with_users(
         security: security_name(node.security),
         network: core_network_name(node),
         network_settings: node.common.network_settings.clone(),
+        flow: node.common.flow.trim().to_string(),
+        cipher: node.common.cipher.trim().to_string(),
         alpn: resolve_tls_alpn(node),
         fallback_to_ipv4: should_fallback_node_listen_ip(&node.common.listen_ip),
         cert_file: cert.map(cert_file).unwrap_or_default(),
@@ -382,10 +386,7 @@ fn render_xray_inbound_settings(inbound: &InboundPlan) -> Value {
         "vmess" | "trojan" => json!({
             "clients": clients
         }),
-        "shadowsocks" => json!({
-            "clients": clients,
-            "network": "tcp,udp"
-        }),
+        "shadowsocks" => render_xray_shadowsocks_settings(inbound, clients),
         "hysteria" | "tuic" => json!({
             "clients": clients
         }),
@@ -398,7 +399,8 @@ fn render_xray_clients(inbound: &InboundPlan) -> Vec<Value> {
         .users
         .iter()
         .map(|user| match inbound.protocol.as_str() {
-            "trojan" | "shadowsocks" | "hysteria" | "tuic" => json!({
+            "shadowsocks" => render_xray_shadowsocks_client(inbound, user),
+            "trojan" | "hysteria" | "tuic" => json!({
                 "password": &user.uuid,
                 "email": &user.email
             }),
@@ -407,12 +409,47 @@ fn render_xray_clients(inbound: &InboundPlan) -> Vec<Value> {
                 "email": &user.email,
                 "alterId": 0
             }),
-            _ => json!({
-                "id": &user.uuid,
-                "email": &user.email
-            }),
+            "vless" => render_xray_vless_client(inbound, user),
+            _ => render_xray_id_client(user),
         })
         .collect()
+}
+
+fn render_xray_vless_client(inbound: &InboundPlan, user: &InboundUserPlan) -> Value {
+    let mut client = Map::new();
+    client.insert("id".to_string(), json!(&user.uuid));
+    client.insert("email".to_string(), json!(&user.email));
+    if !inbound.flow.trim().is_empty() {
+        client.insert("flow".to_string(), json!(&inbound.flow));
+    }
+    Value::Object(client)
+}
+
+fn render_xray_id_client(user: &InboundUserPlan) -> Value {
+    json!({
+        "id": &user.uuid,
+        "email": &user.email
+    })
+}
+
+fn render_xray_shadowsocks_client(inbound: &InboundPlan, user: &InboundUserPlan) -> Value {
+    let mut client = Map::new();
+    client.insert("password".to_string(), json!(&user.uuid));
+    client.insert("email".to_string(), json!(&user.email));
+    if !inbound.cipher.trim().is_empty() {
+        client.insert("method".to_string(), json!(&inbound.cipher));
+    }
+    Value::Object(client)
+}
+
+fn render_xray_shadowsocks_settings(inbound: &InboundPlan, clients: Vec<Value>) -> Value {
+    let mut settings = Map::new();
+    settings.insert("clients".to_string(), Value::Array(clients));
+    settings.insert("network".to_string(), json!("tcp,udp"));
+    if !inbound.cipher.trim().is_empty() {
+        settings.insert("method".to_string(), json!(&inbound.cipher));
+    }
+    Value::Object(settings)
 }
 
 fn render_xray_stream_settings(inbound: &InboundPlan) -> Map<String, Value> {
@@ -703,6 +740,37 @@ mod tests {
     }
 
     #[test]
+    fn renders_vless_flow_for_users() {
+        let mut node = test_node("vless", 13, "");
+        node.common.flow = "xtls-rprx-vision".to_string();
+        let tag = node.tag.clone();
+        let mut users = std::collections::BTreeMap::new();
+        users.insert(
+            tag,
+            vec![UserInfo {
+                id: 13,
+                uuid: "22222222-2222-2222-2222-222222222222".to_string(),
+                speed_limit: 0,
+                device_limit: 0,
+            }],
+        );
+        let plan = CorePlan::from_nodes_with_users(
+            CoreKind::Xray,
+            PathBuf::from("/srv/v2node/config.json"),
+            &[node],
+            &users,
+        )
+        .unwrap();
+
+        let config = render_core_config(&plan).unwrap();
+
+        assert_eq!(
+            config["inbounds"][0]["settings"]["clients"][0]["flow"],
+            "xtls-rprx-vision"
+        );
+    }
+
+    #[test]
     fn renders_password_based_clients_for_trojan() {
         let node = test_node("trojan", 3, "");
         let tag = node.tag.clone();
@@ -729,6 +797,41 @@ mod tests {
         assert_eq!(
             config["inbounds"][0]["settings"]["clients"][0]["password"],
             "password-value"
+        );
+    }
+
+    #[test]
+    fn renders_shadowsocks_cipher_method() {
+        let mut node = test_node("shadowsocks", 14, "");
+        node.common.cipher = "aes-128-gcm".to_string();
+        let tag = node.tag.clone();
+        let mut users = std::collections::BTreeMap::new();
+        users.insert(
+            tag,
+            vec![UserInfo {
+                id: 14,
+                uuid: "ss-password".to_string(),
+                speed_limit: 0,
+                device_limit: 0,
+            }],
+        );
+        let plan = CorePlan::from_nodes_with_users(
+            CoreKind::Xray,
+            PathBuf::from("/srv/v2node/config.json"),
+            &[node],
+            &users,
+        )
+        .unwrap();
+
+        let config = render_core_config(&plan).unwrap();
+
+        assert_eq!(
+            config["inbounds"][0]["settings"]["method"],
+            "aes-128-gcm"
+        );
+        assert_eq!(
+            config["inbounds"][0]["settings"]["clients"][0]["method"],
+            "aes-128-gcm"
         );
     }
 
