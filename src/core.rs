@@ -1,6 +1,9 @@
-use std::path::PathBuf;
+use std::fs;
+use std::path::{Path, PathBuf};
 
-use crate::panel::types::{NodeInfo, Protocol, Security};
+use serde_json::{json, Map, Value};
+
+use crate::panel::types::{CertInfo, NodeInfo, Protocol, Security};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CoreKind {
@@ -28,6 +31,27 @@ pub struct InboundPlan {
     pub network: String,
     pub alpn: Vec<String>,
     pub fallback_to_ipv4: bool,
+    pub cert_file: String,
+    pub key_file: String,
+    pub server_name: String,
+    pub reality_dest: String,
+    pub reality_private_key: String,
+    pub reality_short_id: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CoreFileLayout {
+    pub config_path: PathBuf,
+    pub config_dir: PathBuf,
+    pub temp_config_path: PathBuf,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CoreConfigWriteResult {
+    pub path: PathBuf,
+    pub bytes: usize,
+    pub inbound_count: usize,
+    pub changed: bool,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -73,6 +97,91 @@ impl CorePlan {
             inbounds,
         })
     }
+
+    pub fn file_layout(&self) -> CoreFileLayout {
+        core_file_layout(&self.config_path)
+    }
+}
+
+pub fn core_file_layout(config_path: impl AsRef<Path>) -> CoreFileLayout {
+    let config_path = config_path.as_ref().to_path_buf();
+    let config_dir = config_path
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
+    let temp_config_path = config_path.with_extension("json.tmp");
+
+    CoreFileLayout {
+        config_path,
+        config_dir,
+        temp_config_path,
+    }
+}
+
+pub fn render_core_config(plan: &CorePlan) -> Result<Value, CoreError> {
+    match &plan.kind {
+        CoreKind::Xray => Ok(render_xray_config(plan)),
+        CoreKind::SingBox => Err(CoreError::new(
+            "sing-box core config rendering is not implemented yet",
+        )),
+        CoreKind::Mihomo => Err(CoreError::new(
+            "mihomo core config rendering is not implemented yet",
+        )),
+        CoreKind::Sidecar(name) => Err(CoreError::new(format!(
+            "sidecar core config rendering is not implemented for {name}",
+        ))),
+    }
+}
+
+pub fn write_core_config(plan: &CorePlan) -> Result<CoreConfigWriteResult, CoreError> {
+    let value = render_core_config(plan)?;
+    write_core_config_value(&plan.config_path, &value, plan.inbounds.len())
+}
+
+pub fn write_core_config_value(
+    path: impl AsRef<Path>,
+    value: &Value,
+    inbound_count: usize,
+) -> Result<CoreConfigWriteResult, CoreError> {
+    let path = path.as_ref();
+    let layout = core_file_layout(path);
+    fs::create_dir_all(&layout.config_dir).map_err(|err| {
+        CoreError::new(format!(
+            "create core config dir {}: {err}",
+            layout.config_dir.display()
+        ))
+    })?;
+
+    let mut content = serde_json::to_vec_pretty(value).map_err(|err| {
+        CoreError::new(format!("encode core config {}: {err}", path.display()))
+    })?;
+    content.push(b'\n');
+
+    if fs::read(path).ok().as_deref() == Some(content.as_slice()) {
+        return Ok(CoreConfigWriteResult {
+            path: path.to_path_buf(),
+            bytes: content.len(),
+            inbound_count,
+            changed: false,
+        });
+    }
+
+    fs::write(&layout.temp_config_path, &content).map_err(|err| {
+        CoreError::new(format!(
+            "write core config temp {}: {err}",
+            layout.temp_config_path.display()
+        ))
+    })?;
+    replace_file(&layout.temp_config_path, path).map_err(|err| {
+        CoreError::new(format!("replace core config {}: {err}", path.display()))
+    })?;
+
+    Ok(CoreConfigWriteResult {
+        path: path.to_path_buf(),
+        bytes: content.len(),
+        inbound_count,
+        changed: true,
+    })
 }
 
 pub fn build_inbound_plan(node: &NodeInfo) -> Result<InboundPlan, CoreError> {
@@ -83,6 +192,8 @@ pub fn build_inbound_plan(node: &NodeInfo) -> Result<InboundPlan, CoreError> {
         )));
     }
 
+    let cert = node.common.cert_info.as_ref();
+
     Ok(InboundPlan {
         tag: node.tag.clone(),
         protocol: core_protocol_name(node.protocol),
@@ -92,6 +203,17 @@ pub fn build_inbound_plan(node: &NodeInfo) -> Result<InboundPlan, CoreError> {
         network: core_network_name(node),
         alpn: resolve_tls_alpn(node),
         fallback_to_ipv4: should_fallback_node_listen_ip(&node.common.listen_ip),
+        cert_file: cert.map(cert_file).unwrap_or_default(),
+        key_file: cert.map(key_file).unwrap_or_default(),
+        server_name: cert.map(cert_domain).unwrap_or_else(|| {
+            first_non_empty(
+                node.common.tls_settings.server_name.trim(),
+                node.common.server_name.trim(),
+            )
+        }),
+        reality_dest: node.common.tls_settings.dest.trim().to_string(),
+        reality_private_key: node.common.tls_settings.private_key.trim().to_string(),
+        reality_short_id: node.common.tls_settings.short_id.trim().to_string(),
     })
 }
 
@@ -166,17 +288,181 @@ fn security_name(security: Security) -> String {
     }
 }
 
+fn render_xray_config(plan: &CorePlan) -> Value {
+    let inbounds = plan
+        .inbounds
+        .iter()
+        .map(render_xray_inbound)
+        .collect::<Vec<_>>();
+
+    json!({
+        "log": {
+            "loglevel": "warning"
+        },
+        "inbounds": inbounds,
+        "outbounds": [
+            {
+                "tag": "direct",
+                "protocol": "freedom"
+            },
+            {
+                "tag": "blocked",
+                "protocol": "blackhole"
+            }
+        ]
+    })
+}
+
+fn render_xray_inbound(inbound: &InboundPlan) -> Value {
+    let mut item = Map::new();
+    item.insert("tag".to_string(), json!(&inbound.tag));
+    item.insert("listen".to_string(), json!(&inbound.listen));
+    item.insert("port".to_string(), json!(inbound.port));
+    item.insert("protocol".to_string(), json!(&inbound.protocol));
+    item.insert(
+        "settings".to_string(),
+        render_xray_inbound_settings(inbound),
+    );
+
+    let stream_settings = render_xray_stream_settings(inbound);
+    if !stream_settings.is_empty() {
+        item.insert("streamSettings".to_string(), Value::Object(stream_settings));
+    }
+
+    Value::Object(item)
+}
+
+fn render_xray_inbound_settings(inbound: &InboundPlan) -> Value {
+    match inbound.protocol.as_str() {
+        "vless" => json!({
+            "clients": [],
+            "decryption": "none"
+        }),
+        "vmess" | "trojan" => json!({
+            "clients": []
+        }),
+        "shadowsocks" => json!({
+            "clients": [],
+            "network": "tcp,udp"
+        }),
+        "hysteria" | "tuic" => json!({
+            "clients": []
+        }),
+        _ => json!({}),
+    }
+}
+
+fn render_xray_stream_settings(inbound: &InboundPlan) -> Map<String, Value> {
+    let mut stream = Map::new();
+    if !inbound.network.trim().is_empty() {
+        stream.insert("network".to_string(), json!(&inbound.network));
+    }
+    if inbound.security != "none" {
+        stream.insert("security".to_string(), json!(&inbound.security));
+    }
+
+    match inbound.security.as_str() {
+        "tls" => {
+            stream.insert("tlsSettings".to_string(), render_xray_tls_settings(inbound));
+        }
+        "reality" => {
+            stream.insert(
+                "realitySettings".to_string(),
+                render_xray_reality_settings(inbound),
+            );
+        }
+        _ => {}
+    }
+
+    stream
+}
+
+fn render_xray_tls_settings(inbound: &InboundPlan) -> Value {
+    let mut settings = Map::new();
+    if !inbound.server_name.trim().is_empty() {
+        settings.insert("serverName".to_string(), json!(&inbound.server_name));
+    }
+    if !inbound.alpn.is_empty() {
+        settings.insert("alpn".to_string(), json!(&inbound.alpn));
+    }
+    if !inbound.cert_file.trim().is_empty() && !inbound.key_file.trim().is_empty() {
+        settings.insert(
+            "certificates".to_string(),
+            json!([{
+                "certificateFile": &inbound.cert_file,
+                "keyFile": &inbound.key_file
+            }]),
+        );
+    }
+
+    Value::Object(settings)
+}
+
+fn render_xray_reality_settings(inbound: &InboundPlan) -> Value {
+    let mut settings = Map::new();
+    if !inbound.reality_dest.trim().is_empty() {
+        settings.insert("dest".to_string(), json!(&inbound.reality_dest));
+    }
+    if !inbound.server_name.trim().is_empty() {
+        settings.insert("serverNames".to_string(), json!([&inbound.server_name]));
+    }
+    if !inbound.reality_private_key.trim().is_empty() {
+        settings.insert(
+            "privateKey".to_string(),
+            json!(&inbound.reality_private_key),
+        );
+    }
+    if !inbound.reality_short_id.trim().is_empty() {
+        settings.insert("shortIds".to_string(), json!([&inbound.reality_short_id]));
+    }
+
+    Value::Object(settings)
+}
+
+fn replace_file(from: &Path, to: &Path) -> Result<(), std::io::Error> {
+    match fs::rename(from, to) {
+        Ok(()) => Ok(()),
+        Err(err) if cfg!(windows) && to.exists() => {
+            fs::remove_file(to)?;
+            fs::rename(from, to).map_err(|_| err)
+        }
+        Err(err) => Err(err),
+    }
+}
+
+fn cert_file(cert: &CertInfo) -> String {
+    cert.cert_file.clone()
+}
+
+fn key_file(cert: &CertInfo) -> String {
+    cert.key_file.clone()
+}
+
+fn cert_domain(cert: &CertInfo) -> String {
+    cert.cert_domain.clone()
+}
+
+fn first_non_empty(value: &str, fallback: &str) -> String {
+    if value.is_empty() {
+        fallback.to_string()
+    } else {
+        value.to_string()
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use std::fs;
     use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     use serde_json::json;
 
     use super::{
-        build_inbound_plan, resolve_node_listen_ip, should_fallback_node_listen_ip, CoreKind,
-        CorePlan,
+        build_inbound_plan, core_file_layout, render_core_config, resolve_node_listen_ip,
+        should_fallback_node_listen_ip, write_core_config, CoreKind, CorePlan,
     };
-    use crate::panel::types::{CommonNode, NodeInfo};
+    use crate::panel::types::{CommonNode, NodeInfo, Security};
 
     #[test]
     fn core_plan_can_represent_external_xray() {
@@ -245,6 +531,63 @@ mod tests {
         assert_eq!(inbound.alpn, vec!["h3".to_string(), "h2".to_string()]);
     }
 
+    #[test]
+    fn core_file_layout_tracks_config_dir_and_temp_file() {
+        let layout = core_file_layout("/srv/v2node/config.json");
+
+        assert_eq!(layout.config_dir, PathBuf::from("/srv/v2node"));
+        assert_eq!(layout.temp_config_path, PathBuf::from("/srv/v2node/config.json.tmp"));
+    }
+
+    #[test]
+    fn renders_xray_config_with_tls_certificate_metadata() {
+        let mut node = test_node("vless", 9, "0.0.0.0");
+        node.common.tls = 1;
+        node.security = Security::Tls;
+        node.common.tls_settings.server_name = "node.example.test".to_string();
+        node.common.tls_settings.cert_file = "/srv/v2node/node.cer".to_string();
+        node.common.tls_settings.key_file = "/srv/v2node/node.key".to_string();
+        node.common.cert_info.as_mut().unwrap().cert_domain = "node.example.test".to_string();
+        node.common.cert_info.as_mut().unwrap().cert_file = "/srv/v2node/node.cer".to_string();
+        node.common.cert_info.as_mut().unwrap().key_file = "/srv/v2node/node.key".to_string();
+        let plan = CorePlan::from_nodes(
+            CoreKind::Xray,
+            PathBuf::from("/srv/v2node/config.json"),
+            &[node],
+        )
+        .unwrap();
+
+        let config = render_core_config(&plan).unwrap();
+
+        assert_eq!(config["inbounds"][0]["listen"], "::");
+        assert_eq!(config["inbounds"][0]["streamSettings"]["security"], "tls");
+        assert_eq!(
+            config["inbounds"][0]["streamSettings"]["tlsSettings"]["certificates"][0]
+                ["certificateFile"],
+            "/srv/v2node/node.cer"
+        );
+    }
+
+    #[test]
+    fn writes_core_config_atomically_and_detects_unchanged_content() {
+        let dir = temp_test_dir("core-config-write");
+        let path = dir.join("runtime").join("config.json");
+        let node = test_node("vless", 10, "");
+        let plan = CorePlan::from_nodes(CoreKind::Xray, path.clone(), &[node]).unwrap();
+
+        let first = write_core_config(&plan).unwrap();
+        let second = write_core_config(&plan).unwrap();
+        let saved = fs::read_to_string(&path).unwrap();
+
+        assert!(first.changed);
+        assert!(!second.changed);
+        assert_eq!(first.inbound_count, 1);
+        assert!(saved.contains("\"inbounds\""));
+        assert!(!path.with_extension("json.tmp").exists());
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
     fn test_node(protocol: &str, node_id: u32, listen_ip: &str) -> NodeInfo {
         let common: CommonNode = serde_json::from_value(json!({
             "protocol": protocol,
@@ -254,5 +597,15 @@ mod tests {
         .unwrap();
 
         NodeInfo::from_common("https://panel.example.test", node_id, common).unwrap()
+    }
+
+    fn temp_test_dir(label: &str) -> std::path::PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("kelinode-rs-{label}-{nanos}"));
+        fs::create_dir_all(&path).unwrap();
+        path
     }
 }
