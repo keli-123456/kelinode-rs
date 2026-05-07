@@ -601,6 +601,7 @@ fn render_xray_inbound(inbound: &InboundPlan) -> Value {
         "settings".to_string(),
         render_xray_inbound_settings(inbound),
     );
+    item.insert("sniffing".to_string(), render_xray_sniffing());
 
     let stream_settings = render_xray_stream_settings(inbound);
     if !stream_settings.is_empty() {
@@ -608,6 +609,13 @@ fn render_xray_inbound(inbound: &InboundPlan) -> Value {
     }
 
     Value::Object(item)
+}
+
+fn render_xray_sniffing() -> Value {
+    json!({
+        "enabled": true,
+        "destOverride": ["http", "tls"]
+    })
 }
 
 fn render_xray_inbound_settings(inbound: &InboundPlan) -> Value {
@@ -1131,6 +1139,25 @@ mod tests {
         assert_eq!(plan.listen_tags.len(), 1);
         assert_eq!(plan.inbounds[0].listen, "::");
         assert!(plan.inbounds[0].fallback_to_ipv4);
+    }
+
+    #[test]
+    fn renders_default_sniffing_for_inbounds() {
+        let node = test_node("vless", 28, "");
+        let plan = CorePlan::from_nodes(
+            CoreKind::Xray,
+            PathBuf::from("/srv/v2node/config.json"),
+            &[node],
+        )
+        .unwrap();
+
+        let config = render_core_config(&plan).unwrap();
+
+        assert_eq!(config["inbounds"][0]["sniffing"]["enabled"], true);
+        assert_eq!(
+            config["inbounds"][0]["sniffing"]["destOverride"],
+            json!(["http", "tls"])
+        );
     }
 
     #[test]

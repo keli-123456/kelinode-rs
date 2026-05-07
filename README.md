@@ -30,6 +30,7 @@ First cut:
 - Build a runtime plan from config with both node configs and panel user lists loaded.
 - Pass Xray stream transport settings through for websocket, grpc, httpupgrade, xhttp, tcp, and related networks.
 - Render PROXY protocol socket options from panel network settings.
+- Render Go-compatible default inbound sniffing for HTTP and TLS targets.
 - Render VLESS flow and Shadowsocks cipher/method options from panel node fields.
 - Render supported VLESS encryption decryption strings instead of silently forcing `none`.
 - Render Shadowsocks HTTP obfs transport headers and TCP-only network mode.
