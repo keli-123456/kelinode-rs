@@ -14,6 +14,7 @@ use super::contract::{
 use super::types::{
     AliveMap, CommonNode, NodeInfo, UserDeltaBody, UserInfo, UserListBody, UserTraffic,
 };
+use crate::config::{NodeConfig, DEFAULT_TIMEOUT_SECS};
 use crate::machine::{
     MachineNodesEnvelope, MachineNodesResponse, MachineStatusPayload, MachineStatusResponse,
 };
@@ -34,6 +35,25 @@ pub struct PanelClient {
     options: PanelClientOptions,
     node_etag: Option<String>,
     user_etag: Option<String>,
+}
+
+impl From<&NodeConfig> for PanelClientOptions {
+    fn from(config: &NodeConfig) -> Self {
+        let timeout = if config.timeout == 0 {
+            DEFAULT_TIMEOUT_SECS
+        } else {
+            config.timeout
+        };
+
+        Self {
+            api_host: config.url.clone(),
+            token: config.token.clone(),
+            node_id: config.node_id,
+            machine_id: config.machine_id,
+            timeout: Duration::from_secs(timeout),
+            config_dir: config.config_dir.clone(),
+        }
+    }
 }
 
 impl PanelClient {

@@ -6,6 +6,7 @@
 - Config file loader and `check-config` bootstrap inspection command.
 - Panel client with the existing Keli endpoint paths and query parameters.
 - Node/user/alive/traffic payloads compatible with `kelinode`.
+- Node manager initialization skeleton with machine-mode failure accounting.
 - Machine node resolution and subscription proxy config merging.
 - Compatibility tests around protocol parsing and endpoint construction.
 
