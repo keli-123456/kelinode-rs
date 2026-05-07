@@ -16,9 +16,17 @@ pub struct Bootstrap {
 
 impl Bootstrap {
     pub fn from_config(config: &AppConfig) -> Self {
-        let mode = if config.machine_mode_enabled() {
+        let Ok(resolved) = config.resolve_runtime() else {
+            return Self {
+                mode: RuntimeMode::Invalid,
+                node_count: 0,
+                machine_profile_count: 0,
+            };
+        };
+
+        let mode = if resolved.machine.enabled {
             RuntimeMode::MachineBinding
-        } else if !config.nodes.is_empty() || config.direct_node().is_some() {
+        } else if !resolved.nodes.is_empty() {
             RuntimeMode::DirectNode
         } else {
             RuntimeMode::Invalid
@@ -26,8 +34,8 @@ impl Bootstrap {
 
         Self {
             mode,
-            node_count: config.nodes.len() + usize::from(config.direct_node().is_some()),
-            machine_profile_count: config.machine.profiles.len(),
+            node_count: resolved.nodes.len(),
+            machine_profile_count: resolved.machine.profiles.len(),
         }
     }
 }
