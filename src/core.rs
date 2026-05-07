@@ -289,7 +289,7 @@ pub fn build_inbound_plan_with_users(
         users: users
             .iter()
             .filter(|user| !user.uuid.trim().is_empty())
-            .map(inbound_user_plan)
+            .map(|user| inbound_user_plan(&node.tag, user))
             .collect(),
         routes: node
             .common
@@ -927,14 +927,19 @@ fn first_non_empty(value: &str, fallback: &str) -> String {
     }
 }
 
-fn inbound_user_plan(user: &UserInfo) -> InboundUserPlan {
+fn inbound_user_plan(tag: &str, user: &UserInfo) -> InboundUserPlan {
+    let uuid = user.uuid.trim().to_string();
     InboundUserPlan {
         id: user.id,
-        uuid: user.uuid.trim().to_string(),
-        email: format!("user-{}", user.id),
+        email: user_tag(tag, &uuid),
+        uuid,
         speed_limit: user.speed_limit,
         device_limit: user.device_limit,
     }
+}
+
+fn user_tag(tag: &str, uuid: &str) -> String {
+    format!("{}|{}", tag, uuid)
 }
 
 fn route_plan(route: &crate::panel::types::Route) -> RoutePlan {
@@ -1080,12 +1085,13 @@ mod tests {
     fn renders_xray_clients_from_users_by_node_tag() {
         let node = test_node("vless", 9, "0.0.0.0");
         let tag = node.tag.clone();
+        let uuid = "11111111-1111-1111-1111-111111111111";
         let mut users = std::collections::BTreeMap::new();
         users.insert(
-            tag,
+            tag.clone(),
             vec![UserInfo {
                 id: 12,
-                uuid: "11111111-1111-1111-1111-111111111111".to_string(),
+                uuid: uuid.to_string(),
                 speed_limit: 0,
                 device_limit: 2,
             }],
@@ -1106,7 +1112,7 @@ mod tests {
         );
         assert_eq!(
             config["inbounds"][0]["settings"]["clients"][0]["email"],
-            "user-12"
+            format!("{}|{}", tag, uuid)
         );
     }
 
