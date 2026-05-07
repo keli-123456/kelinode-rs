@@ -34,6 +34,7 @@
 - Node user-set loading and runtime bootstrap planning with users keyed by node tag.
 - Full bootstrap entrypoint that resolves nodes and user lists before building the runtime plan.
 - Xray stream network settings passthrough for websocket/grpc/httpupgrade/xhttp/tcp-style transports.
+- PROXY protocol socket option rendering from panel network settings.
 - VLESS flow and Shadowsocks cipher/method rendering from panel node fields.
 - VLESS supported encryption/decryption string rendering with unsupported values rejected.
 - Xray route rendering for DNS servers, block rules, protocol rules, and custom outbound rules.

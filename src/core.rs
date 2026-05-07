@@ -819,6 +819,14 @@ fn render_xray_stream_settings(inbound: &InboundPlan) -> Map<String, Value> {
             stream.insert(key.to_string(), value);
         }
     }
+    if accepts_proxy_protocol(&inbound.network_settings) {
+        stream.insert(
+            "sockopt".to_string(),
+            json!({
+                "acceptProxyProtocol": true
+            }),
+        );
+    }
     if inbound.security != "none" {
         stream.insert("security".to_string(), json!(&inbound.security));
     }
@@ -900,6 +908,13 @@ fn render_xray_network_settings(
         _ => return None,
     };
     Some((key, settings.clone()))
+}
+
+fn accepts_proxy_protocol(settings: &Value) -> bool {
+    settings
+        .get("acceptProxyProtocol")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
 }
 
 fn render_xray_tls_settings(inbound: &InboundPlan) -> Value {
@@ -1548,6 +1563,29 @@ mod tests {
         assert_eq!(
             config["inbounds"][0]["streamSettings"]["wsSettings"]["path"],
             "/ws"
+        );
+    }
+
+    #[test]
+    fn renders_proxy_protocol_socket_option() {
+        let mut node = test_node("vless", 26, "");
+        node.common.network = "ws".to_string();
+        node.common.network_settings = json!({
+            "path": "/ws",
+            "acceptProxyProtocol": true
+        });
+        let plan = CorePlan::from_nodes(
+            CoreKind::Xray,
+            PathBuf::from("/srv/v2node/config.json"),
+            &[node],
+        )
+        .unwrap();
+
+        let config = render_core_config(&plan).unwrap();
+
+        assert_eq!(
+            config["inbounds"][0]["streamSettings"]["sockopt"]["acceptProxyProtocol"],
+            true
         );
     }
 
