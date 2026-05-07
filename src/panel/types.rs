@@ -177,7 +177,7 @@ pub enum Security {
     Other(u8),
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct UserInfo {
     pub id: u32,
     pub uuid: String,

@@ -1,5 +1,11 @@
 use std::collections::BTreeMap;
+use std::fs;
+use std::path::Path;
 
+use serde::{Deserialize, Serialize};
+use sha1::{Digest, Sha1};
+
+use crate::config::{normalize_config_dir, DEFAULT_CONFIG_DIR};
 use crate::panel::types::UserInfo;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -15,6 +21,14 @@ pub struct UserListDiff {
     pub deleted: Vec<UserInfo>,
     pub added: Vec<UserInfo>,
     pub updated: Vec<UserInfo>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+pub struct UserSyncState {
+    pub revision: i64,
+    pub users: Vec<UserInfo>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updated_at: Option<String>,
 }
 
 pub fn apply_user_delta(
@@ -75,9 +89,70 @@ fn user_changed(old: &UserInfo, new: &UserInfo) -> bool {
         || old.device_limit != new.device_limit
 }
 
+pub fn user_sync_state_path(config_dir: &str, api_host: &str, node_id: u32) -> String {
+    let mut base_dir = normalize_config_dir(config_dir);
+    if base_dir == DEFAULT_CONFIG_DIR {
+        base_dir = user_sync_state_dir();
+    }
+    format!(
+        "{}/user_sync_{}_{}.json",
+        base_dir.trim_end_matches('/'),
+        sha1_hex(api_host.as_bytes()),
+        node_id
+    )
+}
+
+pub fn load_user_sync_state(path: impl AsRef<Path>) -> Result<UserSyncState, String> {
+    let path = path.as_ref();
+    let data = fs::read_to_string(path)
+        .map_err(|err| format!("read user sync state {}: {err}", path.display()))?;
+    serde_json::from_str(&data)
+        .map_err(|err| format!("decode user sync state {}: {err}", path.display()))
+}
+
+pub fn save_user_sync_state(
+    path: impl AsRef<Path>,
+    state: &UserSyncState,
+) -> Result<(), String> {
+    let path = path.as_ref();
+    let data = serde_json::to_vec(state)
+        .map_err(|err| format!("encode user sync state {}: {err}", path.display()))?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|err| format!("create user sync state dir {}: {err}", parent.display()))?;
+    }
+    let tmp = path.with_extension("json.tmp");
+    fs::write(&tmp, data)
+        .map_err(|err| format!("write user sync state {}: {err}", tmp.display()))?;
+    fs::rename(&tmp, path)
+        .map_err(|err| format!("replace user sync state {}: {err}", path.display()))
+}
+
+fn user_sync_state_dir() -> String {
+    std::env::var("V2NODE_STATE_DIR")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| DEFAULT_CONFIG_DIR.to_string())
+}
+
+fn sha1_hex(data: &[u8]) -> String {
+    let digest = Sha1::digest(data);
+    let mut output = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        output.push_str(&format!("{byte:02x}"));
+    }
+    output
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{apply_user_delta, compare_user_list};
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use super::{
+        apply_user_delta, compare_user_list, load_user_sync_state, save_user_sync_state,
+        user_sync_state_path, UserSyncState,
+    };
     use crate::panel::types::UserInfo;
 
     #[test]
@@ -111,6 +186,32 @@ mod tests {
         assert_eq!(uuids(&diff.updated), vec!["a"]);
     }
 
+    #[test]
+    fn user_sync_state_path_matches_go_layout() {
+        let path = user_sync_state_path("/srv/v2node", "https://panel.example.test", 7);
+
+        assert!(path.starts_with("/srv/v2node/user_sync_"));
+        assert!(path.ends_with("_7.json"));
+    }
+
+    #[test]
+    fn saves_and_loads_user_sync_state() {
+        let dir = temp_test_dir("user-sync-state");
+        let path = dir.join("state").join("user_sync.json");
+        let state = UserSyncState {
+            revision: 42,
+            users: vec![user(1, "a", 0, 1)],
+            updated_at: None,
+        };
+
+        save_user_sync_state(&path, &state).unwrap();
+        let loaded = load_user_sync_state(&path).unwrap();
+
+        assert_eq!(loaded, state);
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
     fn user(id: u32, uuid: &str, speed_limit: u32, device_limit: u32) -> UserInfo {
         UserInfo {
             id,
@@ -122,5 +223,15 @@ mod tests {
 
     fn uuids(users: &[UserInfo]) -> Vec<&str> {
         users.iter().map(|user| user.uuid.as_str()).collect()
+    }
+
+    fn temp_test_dir(label: &str) -> std::path::PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("kelinode-rs-{label}-{nanos}"));
+        fs::create_dir_all(&path).unwrap();
+        path
     }
 }
