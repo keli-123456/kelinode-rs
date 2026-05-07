@@ -11,6 +11,7 @@ First cut:
 - Mirror the existing Keli node API contract.
 - Model single-node and machine-bound deployment configuration.
 - Pull node config, user list, user delta, alive list, and report traffic through the same endpoints.
+- Pull machine-bound nodes and report machine status through the same machine endpoints.
 - Keep Docker direct node mode and binary machine binding as explicit compatibility targets.
 - Define a core adapter boundary before choosing whether each protocol is external-core, sidecar, or Rust-native.
 

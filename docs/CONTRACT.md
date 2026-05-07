@@ -2,14 +2,25 @@
 
 `kelinode-rs` must preserve the same contract used by Go `kelinode`.
 
-## Query Parameters
+## Node Query Parameters
 
-Every panel request includes:
+Node-scoped panel requests include:
 
 - `node_type=v2node`
 - `node_id=<node id>`
 - `token=<api token>`
 - `machine_id=<machine id>` when machine binding is used
+
+Machine-scoped requests use a JSON body instead:
+
+```json
+{
+  "machine_id": 1,
+  "token": "machine-token"
+}
+```
+
+`POST /api/v2/server/machine/status` also includes a `status` object in that body.
 
 ## Endpoints
 
@@ -20,7 +31,7 @@ Every panel request includes:
 - `POST /api/v1/server/UniProxy/push`
 - `POST /api/v1/server/UniProxy/alive`
 - `POST /api/v2/server/machine/status`
-- `GET /api/v2/server/machine/nodes`
+- `POST /api/v2/server/machine/nodes`
 
 ## Protocols
 

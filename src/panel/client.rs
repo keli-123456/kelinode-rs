@@ -8,10 +8,14 @@ use reqwest::{Client, Method, RequestBuilder, StatusCode};
 use super::contract::{
     CONTENT_TYPE_MSGPACK, HEADER_RESPONSE_FORMAT, PATH_V1_UNIPROXY_ALIVE,
     PATH_V1_UNIPROXY_ALIVE_LIST, PATH_V1_UNIPROXY_PUSH, PATH_V1_UNIPROXY_USER,
-    PATH_V1_UNIPROXY_USER_DELTA, PATH_V2_SERVER_CONFIG, RESPONSE_FORMAT_MSGPACK,
+    PATH_V1_UNIPROXY_USER_DELTA, PATH_V2_MACHINE_NODES, PATH_V2_MACHINE_STATUS,
+    PATH_V2_SERVER_CONFIG, RESPONSE_FORMAT_MSGPACK,
 };
 use super::types::{
     AliveMap, CommonNode, NodeInfo, UserDeltaBody, UserInfo, UserListBody, UserTraffic,
+};
+use crate::machine::{
+    MachineNodesEnvelope, MachineNodesResponse, MachineStatusPayload, MachineStatusResponse,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -192,6 +196,52 @@ impl PanelClient {
         ensure_success(response.status(), "report online users")
     }
 
+    pub async fn get_machine_nodes(&self) -> Result<MachineNodesResponse> {
+        self.ensure_machine_identity()?;
+
+        let response = self
+            .client
+            .post(self.endpoint(PATH_V2_MACHINE_NODES))
+            .json(&self.machine_identity_body())
+            .send()
+            .await
+            .context("request machine nodes")?;
+        ensure_success(response.status(), "machine nodes")?;
+        let body = response.bytes().await.context("read machine nodes")?;
+        let envelope: MachineNodesEnvelope =
+            serde_json::from_slice(&body).context("decode machine nodes")?;
+        Ok(envelope.into_response())
+    }
+
+    pub async fn report_machine_status(
+        &self,
+        mut payload: MachineStatusPayload,
+    ) -> Result<MachineStatusResponse> {
+        self.ensure_machine_identity()?;
+        if payload.machine_id == 0 {
+            payload.machine_id = self.options.machine_id;
+        }
+
+        let body = MachineStatusRequestBody {
+            machine_id: payload.machine_id,
+            token: self.options.token.clone(),
+            status: payload.status,
+        };
+        let response = self
+            .client
+            .post(self.endpoint(PATH_V2_MACHINE_STATUS))
+            .json(&body)
+            .send()
+            .await
+            .context("report machine status")?;
+        ensure_success(response.status(), "machine status")?;
+        let body = response.bytes().await.context("read machine status")?;
+        if body.iter().all(|byte| byte.is_ascii_whitespace()) {
+            return Ok(MachineStatusResponse::default());
+        }
+        serde_json::from_slice(&body).context("decode machine status")
+    }
+
     fn base_request(&self, method: Method, path: &str) -> RequestBuilder {
         let mut query = vec![
             ("node_type".to_string(), "v2node".to_string()),
@@ -204,6 +254,36 @@ impl PanelClient {
 
         self.client.request(method, self.endpoint(path)).query(&query)
     }
+
+    fn ensure_machine_identity(&self) -> Result<()> {
+        if self.options.machine_id == 0 {
+            return Err(anyhow!("machine_id is required"));
+        }
+        if self.options.token.trim().is_empty() {
+            return Err(anyhow!("token is required"));
+        }
+        Ok(())
+    }
+
+    fn machine_identity_body(&self) -> MachineIdentityBody {
+        MachineIdentityBody {
+            machine_id: self.options.machine_id,
+            token: self.options.token.clone(),
+        }
+    }
+}
+
+#[derive(serde::Serialize)]
+struct MachineIdentityBody {
+    machine_id: u32,
+    token: String,
+}
+
+#[derive(serde::Serialize)]
+struct MachineStatusRequestBody {
+    machine_id: u32,
+    token: String,
+    status: BTreeMap<String, serde_json::Value>,
 }
 
 fn ensure_success(status: StatusCode, label: &str) -> Result<()> {
@@ -219,7 +299,7 @@ mod tests {
     use std::time::Duration;
 
     use super::{PanelClient, PanelClientOptions};
-    use crate::panel::contract::PATH_V2_SERVER_CONFIG;
+    use crate::panel::contract::{PATH_V2_MACHINE_NODES, PATH_V2_SERVER_CONFIG};
 
     #[test]
     fn endpoint_joins_trimmed_host_and_path() {
@@ -252,5 +332,23 @@ mod tests {
         .unwrap_err();
 
         assert!(err.to_string().contains("token"));
+    }
+
+    #[test]
+    fn machine_client_allows_machine_only_identity() {
+        let client = PanelClient::new(PanelClientOptions {
+            api_host: "https://panel.example.test".to_string(),
+            token: "token".to_string(),
+            node_id: 0,
+            machine_id: 3,
+            timeout: Duration::from_secs(1),
+            config_dir: "/etc/v2node".to_string(),
+        })
+        .unwrap();
+
+        assert_eq!(
+            client.endpoint(PATH_V2_MACHINE_NODES),
+            "https://panel.example.test/api/v2/server/machine/nodes"
+        );
     }
 }
