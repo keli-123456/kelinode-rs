@@ -141,11 +141,7 @@ impl UpgradeExecutor for MemoryUpgradeExecutor {
 
 pub fn upgrade_launch_plan(target_version: &str) -> UpgradeLaunchPlan {
     let target_version = target_version.trim().to_string();
-    let script = format!(
-        "curl -fsSL {} -o /tmp/v2node-install.sh && bash /tmp/v2node-install.sh {}",
-        shell_quote(INSTALL_SCRIPT_URL),
-        shell_quote(&target_version)
-    );
+    let script = upgrade_shell_script(&target_version);
 
     if tool_exists("systemd-run") {
         return UpgradeLaunchPlan {
@@ -176,6 +172,55 @@ pub fn upgrade_launch_plan(target_version: &str) -> UpgradeLaunchPlan {
         ],
         log_path: Some("/tmp/v2node-self-update.log".to_string()),
     }
+}
+
+fn upgrade_shell_script(target_version: &str) -> String {
+    let mut lines = Vec::new();
+    lines.push("set -eu".to_string());
+    lines.push(format!("target_version={}", shell_quote(target_version)));
+    lines.push(format!("install_script_url={}", shell_quote(INSTALL_SCRIPT_URL)));
+    lines.push("install_dir=/usr/local/v2node".to_string());
+    lines.push(
+        "backup_dir=\"/usr/local/v2node.backup.${target_version}.$(date +%Y%m%d%H%M%S)\""
+            .to_string(),
+    );
+    lines.push("restore_backup() {".to_string());
+    lines.push("  if [ -d \"$backup_dir\" ]; then".to_string());
+    lines.push("    rm -rf \"$install_dir\"".to_string());
+    lines.push("    mv \"$backup_dir\" \"$install_dir\"".to_string());
+    lines.push("    if command -v systemctl >/dev/null 2>&1; then".to_string());
+    lines.push("      systemctl restart v2node >/dev/null 2>&1 || true".to_string());
+    lines.push("    elif command -v service >/dev/null 2>&1; then".to_string());
+    lines.push("      service v2node restart >/dev/null 2>&1 || true".to_string());
+    lines.push("    fi".to_string());
+    lines.push("  fi".to_string());
+    lines.push("}".to_string());
+    lines.push("if [ -d \"$install_dir\" ]; then".to_string());
+    lines.push("  cp -a \"$install_dir\" \"$backup_dir\"".to_string());
+    lines.push("fi".to_string());
+    lines.push("if ! curl -fsSL \"$install_script_url\" -o /tmp/v2node-install.sh; then".to_string());
+    lines.push("  restore_backup".to_string());
+    lines.push("  exit 1".to_string());
+    lines.push("fi".to_string());
+    lines.push("if ! bash /tmp/v2node-install.sh \"$target_version\"; then".to_string());
+    lines.push("  restore_backup".to_string());
+    lines.push("  exit 1".to_string());
+    lines.push("fi".to_string());
+    lines.push("installed_version=\"\"".to_string());
+    lines.push("if [ -f \"$install_dir/.installed_version\" ]; then".to_string());
+    lines.push("  installed_version=$(cat \"$install_dir/.installed_version\" || true)".to_string());
+    lines.push("elif [ -x \"$install_dir/v2node\" ]; then".to_string());
+    lines.push("  installed_version=$(\"$install_dir/v2node\" version 2>/dev/null | awk '{print $2}' | head -n 1 || true)".to_string());
+    lines.push("fi".to_string());
+    lines.push("normalize_version() {".to_string());
+    lines.push("  printf '%s' \"$1\" | sed 's/^[vV]//'".to_string());
+    lines.push("}".to_string());
+    lines.push("if [ \"$(normalize_version \"$installed_version\")\" != \"$(normalize_version \"$target_version\")\" ]; then".to_string());
+    lines.push("  restore_backup".to_string());
+    lines.push("  exit 1".to_string());
+    lines.push("fi".to_string());
+    lines.push("rm -rf \"$backup_dir\"".to_string());
+    lines.join("\n")
 }
 
 pub fn valid_kelinode_version(version: &str) -> bool {
@@ -272,8 +317,8 @@ mod tests {
     use crate::machine::MachineUpgradeCommand;
 
     use super::{
-        shell_quote, valid_kelinode_version, versions_equal, MemoryUpgradeExecutor,
-        UpgradeManager,
+        shell_quote, upgrade_shell_script, valid_kelinode_version, versions_equal,
+        MemoryUpgradeExecutor, UpgradeManager,
     };
 
     #[test]
@@ -353,5 +398,17 @@ mod tests {
     fn quotes_shell_values_like_go_agent() {
         assert_eq!(shell_quote("a'b"), "'a'\"'\"'b'");
         assert!(versions_equal("v1.2.3", "1.2.3"));
+    }
+
+    #[test]
+    fn upgrade_shell_script_verifies_install_and_restores_backup() {
+        let script = upgrade_shell_script("v1.2.5");
+
+        assert!(script.contains("restore_backup()"));
+        assert!(script.contains("/usr/local/v2node.backup.${target_version}."));
+        assert!(script.contains(".installed_version"));
+        assert!(script.contains("normalize_version"));
+        assert!(script.contains("bash /tmp/v2node-install.sh \"$target_version\""));
+        assert!(script.contains("rm -rf \"$backup_dir\""));
     }
 }
