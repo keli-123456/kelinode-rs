@@ -43,10 +43,11 @@ First cut:
 - Add a runtime loop scheduler for periodic user refresh, panel reports, and reload/upgrade signal exits.
 - Add an async runtime loop variant for panel-backed user refresh and report ticks.
 - Add a panel-backed runtime loop adapter that reloads users by node tag before applying ticks.
+- Add a `run` command that keeps the runtime loop alive across reloads and carries upgrade status into machine reports.
 
 Not implemented yet:
 
-- A long-running async loop for polling config changes, periodic reports, realtime invalidations, and shutdown.
+- Realtime invalidation workers and graceful shutdown handling.
 - Full host metric collection for public IP fields and network rates.
 - Complete per-protocol user options for bandwidth limits, device-limit enforcement, and advanced protocol-specific credentials.
 - Realtime websocket workers.
@@ -66,6 +67,7 @@ Not implemented yet:
 ```bash
 cargo test
 cargo run -- version
+cargo run -- run /etc/v2node/config.yml
 ```
 
 This Windows workspace currently does not have Cargo installed, so build validation should run on a Rust-enabled Linux or CI machine.

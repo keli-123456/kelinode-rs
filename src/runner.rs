@@ -12,6 +12,8 @@ use crate::panel::types::UserInfo;
 use crate::port_forward::PortForwardExecutor;
 use crate::process::ProcessSupervisor;
 use crate::runtime::{rebuild_runtime_plan_with_users, RuntimeBootstrapPlan};
+use crate::system::collect_resource_snapshot;
+use serde_json::Value;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct RuntimeLoopOptions {
@@ -69,6 +71,9 @@ pub struct PanelRuntimeLoop<'a, P, F> {
     pub process_supervisor: &'a mut P,
     pub port_forward_executor: &'a mut F,
     pub panel_client: Option<PanelClient>,
+    pub version: String,
+    pub refresh_health: bool,
+    pub upgrade_status: Option<Value>,
 }
 
 impl<'a, P, F> PanelRuntimeLoop<'a, P, F>
@@ -87,7 +92,21 @@ where
             process_supervisor,
             port_forward_executor,
             panel_client,
+            version: String::new(),
+            refresh_health: false,
+            upgrade_status: None,
         }
+    }
+
+    pub fn with_health_refresh(mut self, version: impl Into<String>) -> Self {
+        self.version = version.into();
+        self.refresh_health = true;
+        self
+    }
+
+    pub fn with_upgrade_status(mut self, status: Option<Value>) -> Self {
+        self.upgrade_status = status;
+        self
     }
 }
 
@@ -112,6 +131,13 @@ where
                     rebuild_runtime_plan_with_users(&self.plan, &options.users_by_node_tag)?;
                 options.users_by_node_tag.clear();
             }
+            if self.refresh_health {
+                refresh_runtime_health(
+                    &mut options,
+                    &self.version,
+                    self.upgrade_status.clone(),
+                );
+            }
             let result = run_runtime_tick(
                 &self.plan,
                 &mut *self.process_supervisor,
@@ -123,6 +149,16 @@ where
             Ok(result.signal)
         })
     }
+}
+
+fn refresh_runtime_health(
+    options: &mut RuntimeTickOptions,
+    version: &str,
+    upgrade_status: Option<Value>,
+) {
+    options.control.health.version = version.to_string();
+    options.control.health.resources = collect_resource_snapshot();
+    options.control.health.upgrade = upgrade_status;
 }
 
 impl Default for RuntimeLoopOptions {
@@ -305,13 +341,14 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::{
-        node_config_for_info, run_runtime_loop, run_runtime_loop_async, should_run,
-        AsyncRuntimeLoopCallbacks, PanelRuntimeLoop, RuntimeLoopCallbacks, RuntimeLoopExit,
-        RuntimeLoopExitReason, RuntimeLoopFuture, RuntimeLoopOptions,
+        node_config_for_info, refresh_runtime_health, run_runtime_loop,
+        run_runtime_loop_async, should_run, AsyncRuntimeLoopCallbacks, PanelRuntimeLoop,
+        RuntimeLoopCallbacks, RuntimeLoopExit, RuntimeLoopExitReason, RuntimeLoopFuture,
+        RuntimeLoopOptions,
     };
     use crate::config::{NodeConfig, ResolvedConfig, ResolvedMachineConfig};
-    use crate::control::{RuntimeLoopSignal, RuntimeTickOptions};
     use crate::control::RuntimeControlOptions;
+    use crate::control::{RuntimeLoopSignal, RuntimeTickOptions};
     use crate::machine::MachineUpgradeCommand;
     use crate::panel::types::{CommonNode, NodeInfo, UserInfo};
     use crate::port_forward::{PortForwardCommand, PortForwardExecutor};
@@ -325,6 +362,24 @@ mod tests {
         assert!(!should_run(1, 2));
         assert!(should_run(2, 2));
         assert!(!should_run(2, 0));
+    }
+
+    #[test]
+    fn health_refresh_adds_version_resources_and_upgrade_status() {
+        let mut options = RuntimeTickOptions::default();
+
+        refresh_runtime_health(
+            &mut options,
+            "v-test",
+            Some(json!({"status": "running"})),
+        );
+
+        assert_eq!(options.control.health.version, "v-test");
+        assert!(options.control.health.resources.system.is_some());
+        assert_eq!(
+            options.control.health.upgrade,
+            Some(json!({"status": "running"}))
+        );
     }
 
     #[test]
