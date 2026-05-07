@@ -10,6 +10,7 @@ pub fn collect_resource_snapshot() -> ResourceSnapshot {
     let (mem, swap) = read_linux_memory_snapshot().unwrap_or_default();
 
     ResourceSnapshot {
+        cpu: read_linux_loadavg_cpu_percent().unwrap_or_default(),
         mem,
         swap,
         disk: read_linux_disk_snapshot().unwrap_or_default(),
@@ -56,6 +57,20 @@ pub fn parse_linux_uptime_seconds(input: &str) -> Option<u64> {
         .next()
         .and_then(|value| value.parse::<f64>().ok())
         .map(|value| value.max(0.0) as u64)
+}
+
+pub fn parse_linux_loadavg_cpu_percent(input: &str, cpu_count: usize) -> Option<f64> {
+    if cpu_count == 0 {
+        return None;
+    }
+    let one_minute = input
+        .split_whitespace()
+        .next()
+        .and_then(|value| value.parse::<f64>().ok())?;
+    if !one_minute.is_finite() || one_minute < 0.0 {
+        return None;
+    }
+    Some(((one_minute / cpu_count as f64) * 100.0).max(0.0))
 }
 
 pub fn parse_df_portable_bytes(input: &str) -> Option<UsageSnapshot> {
@@ -128,6 +143,12 @@ fn read_linux_disk_snapshot() -> Option<UsageSnapshot> {
     parse_df_portable_bytes(&content)
 }
 
+fn read_linux_loadavg_cpu_percent() -> Option<f64> {
+    let content = fs::read_to_string("/proc/loadavg").ok()?;
+    let cpu_count = std::thread::available_parallelism().ok()?.get();
+    parse_linux_loadavg_cpu_percent(&content, cpu_count)
+}
+
 fn read_linux_net_snapshot() -> Option<Value> {
     let content = fs::read_to_string("/proc/net/dev").ok()?;
     parse_linux_net_dev(&content)
@@ -161,8 +182,8 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        parse_df_portable_bytes, parse_linux_meminfo, parse_linux_net_dev,
-        parse_linux_uptime_seconds, system_info_value,
+        parse_df_portable_bytes, parse_linux_loadavg_cpu_percent, parse_linux_meminfo,
+        parse_linux_net_dev, parse_linux_uptime_seconds, system_info_value,
     };
 
     #[test]
@@ -186,6 +207,16 @@ SwapFree:        500 kB
     fn parses_linux_uptime_integer_seconds() {
         assert_eq!(parse_linux_uptime_seconds("123.45 678.90"), Some(123));
         assert_eq!(parse_linux_uptime_seconds(""), None);
+    }
+
+    #[test]
+    fn parses_loadavg_as_cpu_percent() {
+        assert_eq!(
+            parse_linux_loadavg_cpu_percent("2.00 1.00 0.50 1/100 1", 4),
+            Some(50.0)
+        );
+        assert_eq!(parse_linux_loadavg_cpu_percent("2.00", 0), None);
+        assert_eq!(parse_linux_loadavg_cpu_percent("", 4), None);
     }
 
     #[test]

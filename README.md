@@ -38,11 +38,12 @@ First cut:
 - Batch report per-node activity snapshots by runtime tag for multi-node machines.
 - Advance cached user sync state from delta or full-list responses with Go-compatible empty-list semantics.
 - Collect Linux root disk usage and network byte counters for machine status payloads.
+- Estimate Linux CPU load percentage from `/proc/loadavg` for machine status payloads.
 
 Not implemented yet:
 
 - A long-running async loop for polling config changes, periodic reports, realtime invalidations, and shutdown.
-- Full host metric collection for CPU, public/local IP fields, and network rates.
+- Full host metric collection for public/local IP fields and network rates.
 - Complete per-protocol user options for bandwidth limits, device-limit enforcement, and advanced protocol-specific credentials.
 - Realtime websocket workers.
 - Download verification and rollback around self-upgrade execution.

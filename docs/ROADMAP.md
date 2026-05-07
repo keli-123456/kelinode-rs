@@ -44,6 +44,7 @@
 - Per-node activity batch reporting keyed by runtime tag for multi-node machines.
 - User sync state advancement for delta and full-list responses with empty-list no-change semantics.
 - Linux root disk usage and network byte counter collection for machine status payloads.
+- Linux loadavg-based CPU percentage estimate for machine status payloads.
 - Machine node resolution and subscription proxy config merging.
 - Compatibility tests around protocol parsing and endpoint construction.
 
