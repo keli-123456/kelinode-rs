@@ -3,6 +3,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::panel::types::{NodeInfo, Protocol};
 
 pub const HYSTERIA_PORT_FORWARD_COMMENT: &str = "V2NODE-HY2";
+pub const HYSTERIA_PORT_FORWARD_CHAIN: &str = "V2NODE-HY2";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PortForwardMatcher {
@@ -14,6 +15,35 @@ pub struct PortForwardMatcher {
 pub struct PortForwardRule {
     pub matcher: PortForwardMatcher,
     pub target_port: u16,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HysteriaPortForwardRuleSpec {
+    pub protocol: String,
+    pub match_rule: String,
+    pub target_port: u16,
+    pub spec: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct HysteriaPortForwardToolStatus {
+    pub tool: String,
+    pub available: bool,
+    pub current: Vec<String>,
+    pub expected: Vec<String>,
+    pub missing: Vec<String>,
+    pub extra: Vec<String>,
+    pub stale_chain: bool,
+    pub error: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct HysteriaPortForwardStatus {
+    pub enabled: bool,
+    pub running_as_root: bool,
+    pub expected_rules: Vec<HysteriaPortForwardRuleSpec>,
+    pub tools: Vec<HysteriaPortForwardToolStatus>,
+    pub errors: Vec<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -104,6 +134,220 @@ pub fn build_hysteria_port_forward_rules(
     }
 
     (rules, errors)
+}
+
+pub fn new_hysteria_port_forward_status(
+    rules: &[PortForwardRule],
+    errors: &[String],
+    running_as_root: bool,
+) -> HysteriaPortForwardStatus {
+    HysteriaPortForwardStatus {
+        enabled: true,
+        running_as_root,
+        expected_rules: describe_port_forward_rules(rules),
+        tools: Vec::new(),
+        errors: errors.to_vec(),
+    }
+}
+
+pub fn set_hysteria_port_forward_disabled(running_as_root: bool) -> HysteriaPortForwardStatus {
+    HysteriaPortForwardStatus {
+        enabled: false,
+        running_as_root,
+        expected_rules: Vec::new(),
+        tools: Vec::new(),
+        errors: Vec::new(),
+    }
+}
+
+pub fn describe_port_forward_rules(
+    rules: &[PortForwardRule],
+) -> Vec<HysteriaPortForwardRuleSpec> {
+    rules
+        .iter()
+        .map(|rule| HysteriaPortForwardRuleSpec {
+            protocol: "udp".to_string(),
+            match_rule: rule.matcher.args.join(" "),
+            target_port: rule.target_port,
+            spec: expected_port_forward_spec_fields(rule).join(" "),
+        })
+        .collect()
+}
+
+pub fn inspect_port_forward_specs(
+    tool: &str,
+    rules: &[PortForwardRule],
+    prerouting_output: &str,
+    stale_chain: bool,
+) -> HysteriaPortForwardToolStatus {
+    let current = list_port_forward_specs_from_output(prerouting_output);
+    let expected = expected_port_forward_specs(rules);
+
+    let expected_keys = expected
+        .iter()
+        .map(|spec| {
+            let fields = parse_iptables_spec(spec);
+            (port_forward_fields_key(&fields), spec.clone())
+        })
+        .collect::<BTreeMap<_, _>>();
+    let current_keys = current
+        .iter()
+        .map(|spec| {
+            let fields = parse_iptables_spec(spec);
+            (port_forward_fields_key(&fields), spec.clone())
+        })
+        .collect::<BTreeMap<_, _>>();
+
+    let missing = expected_keys
+        .iter()
+        .filter(|(key, _)| !current_keys.contains_key(*key))
+        .map(|(_, spec)| spec.clone())
+        .collect::<Vec<_>>();
+    let extra = current_keys
+        .iter()
+        .filter(|(key, _)| !expected_keys.contains_key(*key))
+        .map(|(_, spec)| spec.clone())
+        .collect::<Vec<_>>();
+
+    HysteriaPortForwardToolStatus {
+        tool: tool.to_string(),
+        available: true,
+        current,
+        expected,
+        missing,
+        extra,
+        stale_chain,
+        error: String::new(),
+    }
+}
+
+pub fn hysteria_port_forward_needs_repair(
+    status: &HysteriaPortForwardStatus,
+) -> bool {
+    status.tools.iter().any(|tool| {
+        tool.available
+            && tool.error.is_empty()
+            && (!tool.missing.is_empty() || !tool.extra.is_empty() || tool.stale_chain)
+    })
+}
+
+pub fn expected_port_forward_specs(rules: &[PortForwardRule]) -> Vec<String> {
+    rules
+        .iter()
+        .map(|rule| expected_port_forward_spec_fields(rule).join(" "))
+        .collect()
+}
+
+pub fn expected_port_forward_spec_fields(rule: &PortForwardRule) -> Vec<String> {
+    let mut fields = vec![
+        "-A".to_string(),
+        "PREROUTING".to_string(),
+        "-p".to_string(),
+        "udp".to_string(),
+    ];
+    fields.extend(rule.matcher.args.clone());
+    fields.extend([
+        "-m".to_string(),
+        "comment".to_string(),
+        "--comment".to_string(),
+        HYSTERIA_PORT_FORWARD_COMMENT.to_string(),
+        "-j".to_string(),
+        "REDIRECT".to_string(),
+        "--to-ports".to_string(),
+        rule.target_port.to_string(),
+    ]);
+    normalize_port_forward_spec_fields(&fields)
+}
+
+pub fn list_port_forward_specs_from_output(output: &str) -> Vec<String> {
+    output
+        .lines()
+        .filter_map(|line| {
+            let fields = parse_iptables_spec(line.trim());
+            if is_port_forward_rule_spec(&fields) {
+                Some(normalize_port_forward_spec_fields(&fields).join(" "))
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+pub fn is_port_forward_rule_spec(fields: &[String]) -> bool {
+    if fields.len() < 4 || fields[0] != "-A" || fields[1] != "PREROUTING" {
+        return false;
+    }
+    for index in 2..fields.len().saturating_sub(1) {
+        if fields[index] == "-j" && fields[index + 1] == HYSTERIA_PORT_FORWARD_CHAIN {
+            return true;
+        }
+        if fields[index] == "--comment"
+            && fields[index + 1].trim_matches(|value| value == '"' || value == '\'')
+                == HYSTERIA_PORT_FORWARD_COMMENT
+        {
+            return true;
+        }
+    }
+    false
+}
+
+pub fn parse_iptables_spec(line: &str) -> Vec<String> {
+    if line.is_empty() {
+        return Vec::new();
+    }
+
+    let mut fields = Vec::new();
+    let mut builder = String::new();
+    let mut quote = None;
+
+    for character in line.chars() {
+        match quote {
+            Some(active_quote) => {
+                if character == active_quote {
+                    quote = None;
+                } else {
+                    builder.push(character);
+                }
+            }
+            None if character == '"' || character == '\'' => {
+                quote = Some(character);
+            }
+            None if character == ' ' || character == '\t' => {
+                if !builder.is_empty() {
+                    fields.push(std::mem::take(&mut builder));
+                }
+            }
+            None => builder.push(character),
+        }
+    }
+    if !builder.is_empty() {
+        fields.push(builder);
+    }
+    fields
+}
+
+pub fn normalize_port_forward_spec_fields(fields: &[String]) -> Vec<String> {
+    let mut out = Vec::with_capacity(fields.len());
+    let mut index = 0usize;
+    while index < fields.len() {
+        if fields[index] == "-m" && fields.get(index + 1).is_some_and(|value| value == "udp") {
+            index += 2;
+            continue;
+        }
+        let mut value = fields[index].clone();
+        if index > 0 && fields[index - 1] == "--comment" {
+            value = value
+                .trim_matches(|value| value == '"' || value == '\'')
+                .to_string();
+        }
+        out.push(value);
+        index += 1;
+    }
+    out
+}
+
+pub fn port_forward_fields_key(fields: &[String]) -> String {
+    normalize_port_forward_spec_fields(fields).join("\0")
 }
 
 pub fn parse_port_forward_matchers(raw: &str) -> Result<Vec<PortForwardMatcher>, String> {
@@ -317,7 +561,12 @@ impl PortForwardRange {
 mod tests {
     use serde_json::json;
 
-    use super::{build_hysteria_port_forward_rules, parse_port_forward_matchers};
+    use super::{
+        build_hysteria_port_forward_rules, expected_port_forward_specs,
+        hysteria_port_forward_needs_repair, inspect_port_forward_specs,
+        list_port_forward_specs_from_output, new_hysteria_port_forward_status,
+        parse_iptables_spec, parse_port_forward_matchers,
+    };
     use crate::panel::types::{CommonNode, NodeInfo};
 
     #[test]
@@ -398,6 +647,97 @@ mod tests {
         assert_eq!(errors.len(), 1);
         assert!(errors[0].contains("server_port"));
         assert!(rules.is_empty());
+    }
+
+    #[test]
+    fn describes_expected_port_forward_specs() {
+        let infos = vec![node(1, 443, "30000-30002", "")];
+        let (rules, errors) = build_hysteria_port_forward_rules(&infos);
+
+        assert!(errors.is_empty());
+        assert_eq!(
+            expected_port_forward_specs(&rules),
+            strings(vec![
+                "-A PREROUTING -p udp --dport 30000:30002 -m comment --comment V2NODE-HY2 -j REDIRECT --to-ports 443"
+            ])
+        );
+
+        let status = new_hysteria_port_forward_status(&rules, &errors, true);
+        assert_eq!(status.expected_rules.len(), 1);
+        assert_eq!(status.expected_rules[0].protocol, "udp");
+        assert_eq!(status.expected_rules[0].target_port, 443);
+    }
+
+    #[test]
+    fn parses_quoted_iptables_specs() {
+        let fields = parse_iptables_spec(
+            "-A PREROUTING -p udp --dport 30000:30002 -m comment --comment \"V2NODE-HY2\" -j REDIRECT --to-ports 443",
+        );
+
+        assert_eq!(
+            fields,
+            strings(vec![
+                "-A",
+                "PREROUTING",
+                "-p",
+                "udp",
+                "--dport",
+                "30000:30002",
+                "-m",
+                "comment",
+                "--comment",
+                "V2NODE-HY2",
+                "-j",
+                "REDIRECT",
+                "--to-ports",
+                "443",
+            ])
+        );
+    }
+
+    #[test]
+    fn lists_only_hysteria_port_forward_specs() {
+        let output = [
+            "-A PREROUTING -p udp -m udp --dport 10000:10002 -j V2NODE-HY2",
+            "-A PREROUTING -p udp -m udp --dport 30000:30002 -m comment --comment \"V2NODE-HY2\" -j REDIRECT --to-ports 443",
+            "-A PREROUTING -p tcp -j OTHER",
+        ]
+        .join("\n");
+
+        let specs = list_port_forward_specs_from_output(&output);
+
+        assert_eq!(specs.len(), 2);
+        assert_eq!(
+            specs[0],
+            "-A PREROUTING -p udp --dport 10000:10002 -j V2NODE-HY2"
+        );
+        assert_eq!(
+            specs[1],
+            "-A PREROUTING -p udp --dport 30000:30002 -m comment --comment V2NODE-HY2 -j REDIRECT --to-ports 443"
+        );
+    }
+
+    #[test]
+    fn inspect_port_forward_specs_detects_drift() {
+        let infos = vec![node(1, 443, "30000-30002", ""), node(2, 8443, "20000-20002", "")];
+        let (rules, errors) = build_hysteria_port_forward_rules(&infos);
+        assert!(errors.is_empty());
+        let output = [
+            "-A PREROUTING -p udp -m udp --dport 30000:30002 -m comment --comment \"V2NODE-HY2\" -j REDIRECT --to-ports 443",
+            "-A PREROUTING -p udp -m udp --dport 10000:10002 -j V2NODE-HY2",
+        ]
+        .join("\n");
+
+        let tool = inspect_port_forward_specs("iptables", &rules, &output, true);
+        let mut status = new_hysteria_port_forward_status(&rules, &errors, true);
+        status.tools.push(tool.clone());
+
+        assert_eq!(tool.missing.len(), 1);
+        assert!(tool.missing[0].contains("20000:20002"));
+        assert_eq!(tool.extra.len(), 1);
+        assert!(tool.extra[0].contains("V2NODE-HY2"));
+        assert!(tool.stale_chain);
+        assert!(hysteria_port_forward_needs_repair(&status));
     }
 
     fn node(id: u32, server_port: u16, port: &str, ports: &str) -> NodeInfo {

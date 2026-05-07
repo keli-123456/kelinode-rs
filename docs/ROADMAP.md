@@ -17,6 +17,7 @@
 - Panel-backed machine profile fetch and aggregation entrypoint.
 - Runtime resolver that merges machine profile nodes and agent config.
 - HY2 port-forward rule planner with conflict checks.
+- HY2 port-forward status/spec drift detection helpers.
 - Machine node resolution and subscription proxy config merging.
 - Compatibility tests around protocol parsing and endpoint construction.
 
