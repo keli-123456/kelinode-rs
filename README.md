@@ -35,6 +35,7 @@ First cut:
 - Render SOCKS/HTTP account settings and AnyTLS client/padding settings from panel users.
 - Render HY2 bandwidth/obfs stream settings and TUIC congestion/0-RTT settings.
 - Report node traffic/online snapshots through the unified panel endpoint with legacy fallback.
+- Batch report per-node activity snapshots by runtime tag for multi-node machines.
 
 Not implemented yet:
 

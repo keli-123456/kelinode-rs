@@ -10,12 +10,31 @@ pub struct NodeActivitySnapshot {
     pub online: BTreeMap<u32, Vec<String>>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NodeActivityTarget {
+    pub tag: String,
+    pub config: NodeConfig,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct NodeActivityReport {
     pub skipped: bool,
     pub unified: bool,
     pub legacy_traffic: bool,
     pub legacy_online: bool,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct NodeActivityBatchReport {
+    pub reported: usize,
+    pub skipped: usize,
+    pub failures: Vec<NodeActivityFailure>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NodeActivityFailure {
+    pub tag: String,
+    pub error: String,
 }
 
 pub trait NodeActivitySender {
@@ -69,6 +88,32 @@ where
     Ok(report)
 }
 
+pub fn report_activity_batch_with<F>(
+    targets: &[NodeActivityTarget],
+    snapshots: &BTreeMap<String, NodeActivitySnapshot>,
+    mut report_one: F,
+) -> NodeActivityBatchReport
+where
+    F: FnMut(&NodeActivityTarget, &NodeActivitySnapshot) -> Result<NodeActivityReport, String>,
+{
+    let mut batch = NodeActivityBatchReport::default();
+    for target in targets {
+        let Some(snapshot) = snapshots.get(&target.tag) else {
+            batch.skipped += 1;
+            continue;
+        };
+        match report_one(target, snapshot) {
+            Ok(report) if report.skipped => batch.skipped += 1,
+            Ok(_) => batch.reported += 1,
+            Err(error) => batch.failures.push(NodeActivityFailure {
+                tag: target.tag.clone(),
+                error,
+            }),
+        }
+    }
+    batch
+}
+
 pub async fn report_activity_to_panel(
     config: &NodeConfig,
     snapshot: &NodeActivitySnapshot,
@@ -111,14 +156,37 @@ pub async fn report_activity_to_panel(
     Ok(report)
 }
 
+pub async fn report_activity_batch_to_panel(
+    targets: &[NodeActivityTarget],
+    snapshots: &BTreeMap<String, NodeActivitySnapshot>,
+) -> NodeActivityBatchReport {
+    let mut batch = NodeActivityBatchReport::default();
+    for target in targets {
+        let Some(snapshot) = snapshots.get(&target.tag) else {
+            batch.skipped += 1;
+            continue;
+        };
+        match report_activity_to_panel(&target.config, snapshot).await {
+            Ok(report) if report.skipped => batch.skipped += 1,
+            Ok(_) => batch.reported += 1,
+            Err(error) => batch.failures.push(NodeActivityFailure {
+                tag: target.tag.clone(),
+                error,
+            }),
+        }
+    }
+    batch
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
 
     use super::{
-        report_activity_with_fallback, NodeActivityReport, NodeActivitySender,
-        NodeActivitySnapshot,
+        report_activity_batch_with, report_activity_with_fallback, NodeActivityReport,
+        NodeActivitySender, NodeActivitySnapshot, NodeActivityTarget,
     };
+    use crate::config::NodeConfig;
     use crate::panel::types::UserTraffic;
 
     #[test]
@@ -162,6 +230,40 @@ mod tests {
         assert_eq!(sender.calls, vec!["snapshot", "traffic", "online"]);
     }
 
+    #[test]
+    fn batch_reporting_matches_targets_by_tag_and_records_failures() {
+        let targets = vec![
+            target("node-a"),
+            target("node-b"),
+            target("node-missing"),
+            target("node-fail"),
+        ];
+        let mut snapshots = BTreeMap::new();
+        snapshots.insert("node-a".to_string(), sample_snapshot());
+        snapshots.insert("node-b".to_string(), NodeActivitySnapshot::default());
+        snapshots.insert("node-fail".to_string(), sample_snapshot());
+
+        let report = report_activity_batch_with(&targets, &snapshots, |target, snapshot| {
+            if target.tag == "node-fail" {
+                return Err("send failed".to_string());
+            }
+            if snapshot.is_empty() {
+                return Ok(NodeActivityReport {
+                    skipped: true,
+                    ..NodeActivityReport::default()
+                });
+            }
+            Ok(NodeActivityReport {
+                unified: true,
+                ..NodeActivityReport::default()
+            })
+        });
+
+        assert_eq!(report.reported, 1);
+        assert_eq!(report.skipped, 2);
+        assert_eq!(report.failures[0].tag, "node-fail");
+    }
+
     fn sample_snapshot() -> NodeActivitySnapshot {
         let mut online = BTreeMap::new();
         online.insert(7, vec!["198.51.100.7".to_string()]);
@@ -172,6 +274,13 @@ mod tests {
                 download: 20,
             }],
             online,
+        }
+    }
+
+    fn target(tag: &str) -> NodeActivityTarget {
+        NodeActivityTarget {
+            tag: tag.to_string(),
+            config: NodeConfig::default(),
         }
     }
 

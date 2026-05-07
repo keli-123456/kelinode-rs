@@ -3,6 +3,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::config::{NodeConfig, RealtimeConfig};
 use crate::panel::client::{PanelClient, PanelClientOptions};
 use crate::panel::types::{NodeInfo, UserInfo};
+use crate::report::NodeActivityTarget;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct NodeManagerOptions {
@@ -255,6 +256,16 @@ impl NodeManager {
         self.runtimes
             .iter()
             .map(|runtime| runtime.info.clone())
+            .collect()
+    }
+
+    pub fn activity_targets(&self) -> Vec<NodeActivityTarget> {
+        self.runtimes
+            .iter()
+            .map(|runtime| NodeActivityTarget {
+                tag: runtime.info.tag.clone(),
+                config: runtime.config.clone(),
+            })
             .collect()
     }
 
