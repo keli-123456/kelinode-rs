@@ -1,7 +1,9 @@
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
+use std::fs;
 use std::net::IpAddr;
 use std::net::Ipv4Addr;
+use std::path::Path;
 
 use crate::config::{SubscriptionProxyConfig, SubscriptionProxyProfile};
 
@@ -484,6 +486,24 @@ pub fn plan_subscription_proxy_certificate_file(
     }))
 }
 
+pub fn write_subscription_proxy_file(write: &SubscriptionProxyFileWrite) -> Result<(), String> {
+    let path = Path::new(write.path.trim());
+    if path.as_os_str().is_empty() {
+        return Err("subscription proxy file path is empty".to_string());
+    }
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent).map_err(|err| {
+                format!("create subscription proxy dir {}: {err}", parent.display())
+            })?;
+        }
+    }
+    fs::write(path, write.content.as_bytes())
+        .map_err(|err| format!("write subscription proxy file {}: {err}", path.display()))?;
+    set_subscription_proxy_file_mode(path, write.mode)?;
+    Ok(())
+}
+
 fn first_non_empty(value: &str, fallback: &str) -> String {
     if value.is_empty() {
         fallback.to_string()
@@ -519,6 +539,19 @@ fn validation_file_name(path: &str) -> Option<String> {
 
 fn validation_content_string(content: &str) -> String {
     format!("{}\n", content.trim())
+}
+
+#[cfg(unix)]
+fn set_subscription_proxy_file_mode(path: &Path, mode: u32) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
+
+    fs::set_permissions(path, fs::Permissions::from_mode(mode))
+        .map_err(|err| format!("chmod subscription proxy file {}: {err}", path.display()))
+}
+
+#[cfg(not(unix))]
+fn set_subscription_proxy_file_mode(_path: &Path, _mode: u32) -> Result<(), String> {
+    Ok(())
 }
 
 fn is_valid_upstream_base_url(value: &str) -> bool {
@@ -654,6 +687,8 @@ fn client_ip(remote_addr: &str) -> Option<String> {
 mod tests {
     use std::cell::RefCell;
     use std::collections::BTreeMap;
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::{
         build_subscription_upstream_url, normalize_subscription_proxy_config,
@@ -663,8 +698,9 @@ mod tests {
         plan_subscription_proxy_validation_file, prepare_subscription_proxy_certificate_status,
         prepare_subscription_proxy_certificate_status_with_file_writes,
         resolve_subscription_certificate_domain, subscription_proxy_certificate_owner_site_id,
-        SubscriptionProxyInboundRequest, SubscriptionProxyRoute, SubscriptionProxyRouteError,
-        SubscriptionProxyServeMode, SubscriptionProxyUpstreamResponse,
+        write_subscription_proxy_file, SubscriptionProxyFileWrite, SubscriptionProxyInboundRequest,
+        SubscriptionProxyRoute, SubscriptionProxyRouteError, SubscriptionProxyServeMode,
+        SubscriptionProxyUpstreamResponse,
         DEFAULT_CHALLENGE_DIR, DEFAULT_HTTPS_LISTEN, DEFAULT_MAX_RESPONSE_BYTES,
     };
     use crate::config::{
@@ -1003,6 +1039,23 @@ mod tests {
     }
 
     #[test]
+    fn writes_subscription_proxy_file_and_parent_dir() {
+        let dir = temp_test_dir("subscription-proxy-write");
+        let path = dir.join("nested").join("token.txt");
+        write_subscription_proxy_file(&SubscriptionProxyFileWrite {
+            path: path.to_string_lossy().to_string(),
+            content: "challenge-token\n".to_string(),
+            mode: 0o644,
+        })
+        .unwrap();
+
+        let content = fs::read_to_string(&path).unwrap();
+        assert_eq!(content, "challenge-token\n");
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn certificate_status_records_file_write_errors() {
         let status = prepare_subscription_proxy_certificate_status_with_file_writes(
             &SubscriptionProxyConfig {
@@ -1228,5 +1281,15 @@ mod tests {
         .unwrap();
 
         assert!(response.body.is_empty());
+    }
+
+    fn temp_test_dir(label: &str) -> std::path::PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("kelinode-rs-{label}-{nanos}"));
+        fs::create_dir_all(&path).unwrap();
+        path
     }
 }

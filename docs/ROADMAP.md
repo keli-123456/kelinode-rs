@@ -81,6 +81,7 @@
 - Subscription proxy ZeroSSL config preservation across direct, machine, and runtime merge paths.
 - Subscription proxy ZeroSSL validation-file and fullchain certificate write planning.
 - Subscription proxy certificate status preparation through an injectable file-write executor.
+- Subscription proxy planned file writer with parent directory creation and Unix mode handling.
 - Compatibility tests around protocol parsing and endpoint construction.
 
 ## Phase 2: Runtime Control
