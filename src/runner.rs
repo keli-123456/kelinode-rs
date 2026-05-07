@@ -14,9 +14,10 @@ use crate::panel::types::UserInfo;
 use crate::port_forward::PortForwardExecutor;
 use crate::process::ProcessSupervisor;
 use crate::realtime::{
-    build_realtime_receipt, RealtimeMessage, RealtimeOptions, RealtimeRuntimeTask,
+    build_realtime_receipt, realtime_runtime_task, RealtimeMessage, RealtimeOptions,
+    RealtimeRuntimeTask,
 };
-use crate::realtime_client::{connect_realtime_transport, serve_realtime_transport};
+use crate::realtime_client::{connect_realtime_transport, RealtimeTransport};
 use crate::runtime::{
     node_config_for_info as runtime_node_config_for_info, rebuild_runtime_plan_with_users,
     RuntimeBootstrapPlan,
@@ -50,10 +51,42 @@ pub enum RuntimeLoopExitReason {
     Signal(RuntimeLoopSignal),
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum RuntimeLoopEvent {
+#[derive(Debug)]
+pub struct RuntimeLoopEvent {
+    pub kind: RuntimeLoopEventKind,
+    reply: Option<tokio::sync::oneshot::Sender<Result<String, String>>>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RuntimeLoopEventKind {
     Reload,
     RefreshUsers,
+}
+
+impl RuntimeLoopEvent {
+    pub fn reload() -> Self {
+        Self {
+            kind: RuntimeLoopEventKind::Reload,
+            reply: None,
+        }
+    }
+
+    pub fn refresh_users() -> Self {
+        Self {
+            kind: RuntimeLoopEventKind::RefreshUsers,
+            reply: None,
+        }
+    }
+
+    fn with_reply(
+        kind: RuntimeLoopEventKind,
+        reply: tokio::sync::oneshot::Sender<Result<String, String>>,
+    ) -> Self {
+        Self {
+            kind,
+            reply: Some(reply),
+        }
+    }
 }
 
 pub struct RealtimeRuntimeWorkers {
@@ -285,50 +318,122 @@ async fn run_realtime_runtime_worker(
 ) {
     loop {
         if let Ok(mut transport) = connect_realtime_transport(&options).await {
-            let events = sender.clone();
-            let _ = serve_realtime_transport(
-                &options,
-                &mut transport,
-                unix_now,
-                |task, source| handle_realtime_runtime_task(&events, task, source, unix_now()),
-            )
-            .await;
+            let _ = serve_realtime_runtime_transport(&options, &mut transport, &sender).await;
         }
         tokio::time::sleep(options.reconnect_delay).await;
     }
 }
 
-fn handle_realtime_runtime_task(
+async fn serve_realtime_runtime_transport<T>(
+    options: &RealtimeOptions,
+    transport: &mut T,
     sender: &tokio::sync::mpsc::UnboundedSender<RuntimeLoopEvent>,
-    task: RealtimeRuntimeTask,
+) -> Result<(), String>
+where
+    T: RealtimeTransport,
+{
+    transport
+        .send(RealtimeMessage::ping(options, unix_now(), None))
+        .await?;
+
+    while let Some(message) = transport.recv().await? {
+        let task = realtime_runtime_task(&message, unix_now());
+        match task {
+            RealtimeRuntimeTask::Pong(pong) => transport.send(pong).await?,
+            task => {
+                let Some((kind, topic, queued_message)) = runtime_loop_event_for_task(&task)
+                else {
+                    continue;
+                };
+                send_realtime_runtime_event(
+                    transport,
+                    sender,
+                    kind,
+                    topic,
+                    &message,
+                    queued_message,
+                )
+                .await?;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+async fn send_realtime_runtime_event<T>(
+    transport: &mut T,
+    sender: &tokio::sync::mpsc::UnboundedSender<RuntimeLoopEvent>,
+    kind: RuntimeLoopEventKind,
+    topic: &str,
     source: &RealtimeMessage,
-    now: i64,
-) -> Vec<RealtimeMessage> {
+    queued_message: &str,
+) -> Result<(), String>
+where
+    T: RealtimeTransport,
+{
+    let now = unix_now();
+    transport
+        .send(build_realtime_receipt(
+            topic,
+            source,
+            "received",
+            queued_message,
+            now,
+        ))
+        .await?;
+
+    let (reply, result) = tokio::sync::oneshot::channel();
+    if sender
+        .send(RuntimeLoopEvent::with_reply(kind, reply))
+        .is_err()
+    {
+        transport
+            .send(build_realtime_receipt(
+                topic,
+                source,
+                "failed",
+                "runtime event receiver closed",
+                unix_now(),
+            ))
+            .await?;
+        return Ok(());
+    }
+
+    let (status, message) = match result.await {
+        Ok(Ok(message)) => ("applied", message),
+        Ok(Err(error)) => ("failed", error),
+        Err(_) => ("failed", "runtime event reply dropped".to_string()),
+    };
+    transport
+        .send(build_realtime_receipt(
+            topic,
+            source,
+            status,
+            &message,
+            unix_now(),
+        ))
+        .await
+}
+
+fn runtime_loop_event_for_task(
+    task: &RealtimeRuntimeTask,
+) -> Option<(RuntimeLoopEventKind, &'static str, &'static str)> {
     match task {
         RealtimeRuntimeTask::ConfigCheck | RealtimeRuntimeTask::ForceReload => {
-            let _ = sender.send(RuntimeLoopEvent::Reload);
-            vec![build_realtime_receipt(
-                "config",
-                source,
-                "received",
-                "reload queued",
-                now,
-            )]
+            Some((RuntimeLoopEventKind::Reload, "config", "reload queued"))
         }
         RealtimeRuntimeTask::UserSync => {
-            let _ = sender.send(RuntimeLoopEvent::RefreshUsers);
-            vec![build_realtime_receipt(
+            Some((
+                RuntimeLoopEventKind::RefreshUsers,
                 "users",
-                source,
-                "received",
                 "user refresh queued",
-                now,
-            )]
+            ))
         }
         RealtimeRuntimeTask::Ignore
         | RealtimeRuntimeTask::Pong(_)
         | RealtimeRuntimeTask::Error(_)
-        | RealtimeRuntimeTask::HelloAck => Vec::new(),
+        | RealtimeRuntimeTask::HelloAck => None,
     }
 }
 
@@ -508,19 +613,38 @@ async fn handle_runtime_loop_event<C>(
 where
     C: AsyncRuntimeLoopCallbacks,
 {
-    match event {
-        RuntimeLoopEvent::Reload => Ok(RuntimeLoopSignal::Reload),
-        RuntimeLoopEvent::RefreshUsers => {
-            let users_by_node_tag = callbacks.refresh_users().await?;
-            callbacks
-                .run_tick(RuntimeTickOptions {
-                    control: options.control.clone(),
-                    report_to_panel: false,
-                    users_by_node_tag,
-                })
-                .await
+    let reply = event.reply;
+    let result = match event.kind {
+        RuntimeLoopEventKind::Reload => {
+            Ok((RuntimeLoopSignal::Reload, "reload queued".to_string()))
         }
+        RuntimeLoopEventKind::RefreshUsers => {
+            match callbacks.refresh_users().await {
+                Ok(users_by_node_tag) => match callbacks
+                    .run_tick(RuntimeTickOptions {
+                        control: options.control.clone(),
+                        report_to_panel: false,
+                        users_by_node_tag,
+                    })
+                    .await
+                {
+                    Ok(signal) => Ok((signal, "user refresh applied".to_string())),
+                    Err(error) => Err(error),
+                },
+                Err(error) => Err(error),
+            }
+        }
+    };
+
+    if let Some(reply) = reply {
+        let _ = reply.send(
+            result
+                .as_ref()
+                .map(|(_, message)| message.clone())
+                .map_err(|error| error.clone()),
+        );
     }
+    result.map(|(signal, _)| signal)
 }
 
 pub async fn load_users_by_node_tag_from_panel(
@@ -647,12 +771,13 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::{
-        handle_realtime_runtime_task, node_config_for_info, refresh_runtime_health,
-        run_runtime_loop,
+        handle_runtime_loop_event, node_config_for_info, refresh_runtime_health,
+        runtime_loop_event_for_task, run_runtime_loop,
         run_runtime_loop_async, run_runtime_loop_async_with_events, should_run,
         user_delta_not_supported,
         AsyncRuntimeLoopCallbacks, PanelRuntimeLoop, RuntimeLoopCallbacks, RuntimeLoopExit,
-        RuntimeLoopEvent, RuntimeLoopExitReason, RuntimeLoopFuture, RuntimeLoopOptions,
+        RuntimeLoopEvent, RuntimeLoopEventKind, RuntimeLoopExitReason, RuntimeLoopFuture,
+        RuntimeLoopOptions,
     };
     use crate::config::{NodeConfig, ResolvedConfig, ResolvedMachineConfig};
     use crate::control::RuntimeControlOptions;
@@ -662,7 +787,7 @@ mod tests {
     use crate::panel::types::{CommonNode, NodeInfo, UserInfo};
     use crate::port_forward::{PortForwardCommand, PortForwardExecutor};
     use crate::process::MemoryProcessSupervisor;
-    use crate::realtime::{RealtimeMessage, RealtimeRuntimeTask};
+    use crate::realtime::RealtimeRuntimeTask;
     use crate::runtime::build_runtime_bootstrap_plan;
     use serde_json::json;
 
@@ -840,7 +965,7 @@ mod tests {
     #[tokio::test]
     async fn async_loop_exits_on_external_reload_event() {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        tx.send(RuntimeLoopEvent::Reload).unwrap();
+        tx.send(RuntimeLoopEvent::reload()).unwrap();
         let mut callbacks = AsyncFakeCallbacks::default();
 
         let exit = run_runtime_loop_async_with_events(
@@ -868,7 +993,7 @@ mod tests {
     #[tokio::test]
     async fn async_loop_refreshes_users_on_external_event() {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        tx.send(RuntimeLoopEvent::RefreshUsers).unwrap();
+        tx.send(RuntimeLoopEvent::refresh_users()).unwrap();
         let mut callbacks = AsyncFakeCallbacks::default();
 
         let exit = run_runtime_loop_async_with_events(
@@ -891,53 +1016,46 @@ mod tests {
         assert!(!callbacks.ticks[1].report_to_panel);
     }
 
-    #[test]
-    fn realtime_runtime_task_queues_reload_and_receipt() {
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let source = RealtimeMessage {
-            event_id: "evt-config".to_string(),
-            reason: "admin.server.saved".to_string(),
-            ..RealtimeMessage::default()
-        };
+    #[tokio::test]
+    async fn runtime_event_replies_after_user_refresh() {
+        let (reply, result) = tokio::sync::oneshot::channel();
+        let mut callbacks = AsyncFakeCallbacks::default();
 
-        let receipts = handle_realtime_runtime_task(
-            &tx,
-            RealtimeRuntimeTask::ConfigCheck,
-            &source,
-            300,
-        );
+        let signal = handle_runtime_loop_event(
+            &mut callbacks,
+            &RuntimeLoopOptions {
+                user_refresh_interval: 0,
+                panel_report_interval: 0,
+                ..RuntimeLoopOptions::default()
+            },
+            RuntimeLoopEvent::with_reply(RuntimeLoopEventKind::RefreshUsers, reply),
+        )
+        .await
+        .unwrap();
 
-        assert_eq!(rx.try_recv().unwrap(), RuntimeLoopEvent::Reload);
-        assert_eq!(receipts.len(), 1);
-        assert_eq!(receipts[0].message_type, "receipt");
-        assert_eq!(receipts[0].topic, "config");
-        assert_eq!(receipts[0].event_id, "evt-config");
-        assert_eq!(receipts[0].status, "received");
-        assert_eq!(receipts[0].ts, 300);
+        assert_eq!(signal, RuntimeLoopSignal::Continue);
+        assert_eq!(result.await.unwrap().unwrap(), "user refresh applied");
+        assert_eq!(callbacks.refreshes, 1);
     }
 
     #[test]
-    fn realtime_runtime_task_queues_user_refresh_and_receipt() {
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let source = RealtimeMessage {
-            event_id: "evt-users".to_string(),
-            reason: "user.delta".to_string(),
-            ..RealtimeMessage::default()
-        };
+    fn realtime_runtime_task_maps_reload_event_metadata() {
+        let (kind, topic, message) =
+            runtime_loop_event_for_task(&RealtimeRuntimeTask::ConfigCheck).unwrap();
 
-        let receipts = handle_realtime_runtime_task(
-            &tx,
-            RealtimeRuntimeTask::UserSync,
-            &source,
-            301,
-        );
+        assert_eq!(kind, RuntimeLoopEventKind::Reload);
+        assert_eq!(topic, "config");
+        assert_eq!(message, "reload queued");
+    }
 
-        assert_eq!(rx.try_recv().unwrap(), RuntimeLoopEvent::RefreshUsers);
-        assert_eq!(receipts.len(), 1);
-        assert_eq!(receipts[0].topic, "users");
-        assert_eq!(receipts[0].event_id, "evt-users");
-        assert_eq!(receipts[0].status, "received");
-        assert_eq!(receipts[0].ts, 301);
+    #[test]
+    fn realtime_runtime_task_maps_user_refresh_event_metadata() {
+        let (kind, topic, message) =
+            runtime_loop_event_for_task(&RealtimeRuntimeTask::UserSync).unwrap();
+
+        assert_eq!(kind, RuntimeLoopEventKind::RefreshUsers);
+        assert_eq!(topic, "users");
+        assert_eq!(message, "user refresh queued");
     }
 
     #[test]

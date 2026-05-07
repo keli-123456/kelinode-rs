@@ -146,6 +146,7 @@ async fn run_agent_once(
             })
         }
     };
+    tokio::task::yield_now().await;
     realtime_workers.abort();
     if shutdown {
         stop_core_for_plan(&mut runner)?;

@@ -50,6 +50,7 @@
 - Concrete `tokio-tungstenite` realtime connector with rustls webpki roots.
 - Async runtime loop event channel for realtime reload and immediate user-refresh triggers.
 - `run` command realtime worker startup with queued reload and user-refresh events.
+- Realtime event replies for applied/failed receipts after runtime user-refresh handling.
 - Linux root disk usage and network byte counter collection for machine status payloads.
 - Linux `/proc/stat` CPU usage sampler with loadavg fallback for machine status payloads.
 - Local/public IPv4/IPv6 candidate snapshot collection for machine status payloads.
