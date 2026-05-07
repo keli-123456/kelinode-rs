@@ -34,6 +34,7 @@ First cut:
 - Let runtime ticks rebuild the core plan from refreshed panel user sets before applying config.
 - Render SOCKS/HTTP account settings and AnyTLS client/padding settings from panel users.
 - Render HY2 bandwidth/obfs stream settings and TUIC congestion/0-RTT settings.
+- Report node traffic/online snapshots through the unified panel endpoint with legacy fallback.
 
 Not implemented yet:
 

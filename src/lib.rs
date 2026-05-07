@@ -9,6 +9,7 @@ pub mod node;
 pub mod panel;
 pub mod port_forward;
 pub mod process;
+pub mod report;
 pub mod runtime;
 pub mod system;
 pub mod upgrade;

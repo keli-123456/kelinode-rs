@@ -40,6 +40,7 @@
 - Runtime tick core-plan rebuild path for refreshed panel user sets.
 - SOCKS/HTTP account rendering and AnyTLS client/padding rendering from panel users.
 - HY2 bandwidth/obfs stream rendering and TUIC congestion/0-RTT rendering.
+- Unified node traffic/online activity reporting with legacy endpoint fallback.
 - Machine node resolution and subscription proxy config merging.
 - Compatibility tests around protocol parsing and endpoint construction.
 
