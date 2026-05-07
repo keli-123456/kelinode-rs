@@ -14,6 +14,8 @@ pub struct AppConfig {
     #[serde(default)]
     pub machine: MachineConfig,
     #[serde(default)]
+    pub agent: AgentConfig,
+    #[serde(default)]
     pub nodes: Vec<NodeConfig>,
 }
 
@@ -81,6 +83,52 @@ pub struct MachineProfileConfig {
     pub timeout: u64,
     #[serde(default)]
     pub config_dir: String,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
+pub struct AgentConfig {
+    #[serde(default)]
+    pub subscription_proxy: SubscriptionProxyConfig,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
+pub struct SubscriptionProxyConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub https_listen: String,
+    #[serde(default)]
+    pub http_listen: String,
+    #[serde(default)]
+    pub cert_file: String,
+    #[serde(default)]
+    pub key_file: String,
+    #[serde(default)]
+    pub certificate_domain: String,
+    #[serde(default)]
+    pub challenge_dir: String,
+    #[serde(default)]
+    pub site_id: String,
+    #[serde(default)]
+    pub upstream_base_url: String,
+    #[serde(default)]
+    pub subscribe_path: String,
+    #[serde(default)]
+    pub allow_http_fallback: bool,
+    #[serde(default)]
+    pub max_response_bytes: u64,
+    #[serde(default)]
+    pub profiles: Vec<SubscriptionProxyProfile>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
+pub struct SubscriptionProxyProfile {
+    #[serde(default)]
+    pub site_id: String,
+    #[serde(default)]
+    pub upstream_base_url: String,
+    #[serde(default)]
+    pub subscribe_path: String,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
@@ -164,5 +212,13 @@ mod tests {
         config.panel.node_id = 7;
 
         assert_eq!(config.direct_node().unwrap().node_id, 7);
+    }
+
+    #[test]
+    fn subscription_proxy_defaults_to_disabled() {
+        let config = AppConfig::default();
+
+        assert!(!config.agent.subscription_proxy.enabled);
+        assert!(config.agent.subscription_proxy.profiles.is_empty());
     }
 }

@@ -5,6 +5,7 @@
 - Configuration model for direct node and machine binding.
 - Panel client with the existing Keli endpoint paths and query parameters.
 - Node/user/alive/traffic payloads compatible with `kelinode`.
+- Machine node resolution and subscription proxy config merging.
 - Compatibility tests around protocol parsing and endpoint construction.
 
 ## Phase 2: Runtime Control
