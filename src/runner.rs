@@ -8,12 +8,13 @@ use crate::control::{
     report_runtime_apply_result_to_panels, run_runtime_tick, runtime_loop_signal,
     RuntimeControlOptions, RuntimeLoopSignal, RuntimeTickOptions,
 };
+use crate::health::ResourceSnapshot;
 use crate::panel::client::{PanelClient, PanelClientOptions};
 use crate::panel::types::UserInfo;
 use crate::port_forward::PortForwardExecutor;
 use crate::process::ProcessSupervisor;
 use crate::runtime::{rebuild_runtime_plan_with_users, RuntimeBootstrapPlan};
-use crate::system::collect_resource_snapshot;
+use crate::system::ResourceSampler;
 use serde_json::Value;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -75,6 +76,7 @@ pub struct PanelRuntimeLoop<'a, P, F> {
     pub version: String,
     pub refresh_health: bool,
     pub upgrade_status: Option<Value>,
+    pub resource_sampler: ResourceSampler,
 }
 
 impl<'a, P, F> PanelRuntimeLoop<'a, P, F>
@@ -96,6 +98,7 @@ where
             version: String::new(),
             refresh_health: false,
             upgrade_status: None,
+            resource_sampler: ResourceSampler::default(),
         }
     }
 
@@ -138,10 +141,12 @@ where
                 options.users_by_node_tag.clear();
             }
             if self.refresh_health {
+                let resources = self.resource_sampler.sample();
                 refresh_runtime_health(
                     &mut options,
                     &self.version,
                     self.upgrade_status.clone(),
+                    resources,
                 );
             }
             let report_to_panel = options.report_to_panel;
@@ -172,9 +177,10 @@ fn refresh_runtime_health(
     options: &mut RuntimeTickOptions,
     version: &str,
     upgrade_status: Option<Value>,
+    resources: ResourceSnapshot,
 ) {
     options.control.health.version = version.to_string();
-    options.control.health.resources = collect_resource_snapshot();
+    options.control.health.resources = resources;
     options.control.health.upgrade = upgrade_status;
 }
 
@@ -366,6 +372,7 @@ mod tests {
     use crate::config::{NodeConfig, ResolvedConfig, ResolvedMachineConfig};
     use crate::control::RuntimeControlOptions;
     use crate::control::{RuntimeLoopSignal, RuntimeTickOptions};
+    use crate::health::ResourceSnapshot;
     use crate::machine::MachineUpgradeCommand;
     use crate::panel::types::{CommonNode, NodeInfo, UserInfo};
     use crate::port_forward::{PortForwardCommand, PortForwardExecutor};
@@ -389,6 +396,10 @@ mod tests {
             &mut options,
             "v-test",
             Some(json!({"status": "running"})),
+            ResourceSnapshot {
+                system: Some(json!({"os": "test"})),
+                ..ResourceSnapshot::default()
+            },
         );
 
         assert_eq!(options.control.health.version, "v-test");

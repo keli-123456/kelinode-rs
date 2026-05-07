@@ -1,24 +1,88 @@
 use std::env;
 use std::fs;
 use std::process::Command;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::{json, Value};
 
 use crate::health::{ResourceSnapshot, UsageSnapshot};
 
-pub fn collect_resource_snapshot() -> ResourceSnapshot {
-    let (mem, swap) = read_linux_memory_snapshot().unwrap_or_default();
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ResourceSampler {
+    network: Option<TimedNetworkSnapshot>,
+}
 
-    ResourceSnapshot {
-        cpu: read_linux_loadavg_cpu_percent().unwrap_or_default(),
-        mem,
-        swap,
-        disk: read_linux_disk_snapshot().unwrap_or_default(),
-        net: read_linux_net_snapshot(),
-        ip: read_local_ip_snapshot(),
-        system: Some(system_info_value()),
-        uptime: read_linux_uptime_seconds(),
-        ..ResourceSnapshot::default()
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct NetworkCounters {
+    pub rx_bytes: u64,
+    pub tx_bytes: u64,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct NetworkSnapshot {
+    pub counters: NetworkCounters,
+    pub interfaces: Vec<Value>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct TimedNetworkSnapshot {
+    at_seconds: f64,
+    counters: NetworkCounters,
+}
+
+pub fn collect_resource_snapshot() -> ResourceSnapshot {
+    ResourceSampler::default().sample()
+}
+
+impl ResourceSampler {
+    pub fn sample(&mut self) -> ResourceSnapshot {
+        self.sample_at(unix_now_seconds())
+    }
+
+    fn sample_at(&mut self, now_seconds: f64) -> ResourceSnapshot {
+        let (mem, swap) = read_linux_memory_snapshot().unwrap_or_default();
+
+        ResourceSnapshot {
+            cpu: read_linux_loadavg_cpu_percent().unwrap_or_default(),
+            mem,
+            swap,
+            disk: read_linux_disk_snapshot().unwrap_or_default(),
+            net: read_linux_net_snapshot()
+                .map(|snapshot| self.sample_network_value(now_seconds, snapshot)),
+            ip: read_local_ip_snapshot(),
+            system: Some(system_info_value()),
+            uptime: read_linux_uptime_seconds(),
+            ..ResourceSnapshot::default()
+        }
+    }
+
+    fn sample_network_value(
+        &mut self,
+        now_seconds: f64,
+        snapshot: NetworkSnapshot,
+    ) -> Value {
+        let mut rx_rate = 0.0;
+        let mut tx_rate = 0.0;
+
+        if let Some(previous) = &self.network {
+            let elapsed = now_seconds - previous.at_seconds;
+            if elapsed > 0.0 {
+                if snapshot.counters.rx_bytes >= previous.counters.rx_bytes {
+                    rx_rate = (snapshot.counters.rx_bytes - previous.counters.rx_bytes) as f64
+                        / elapsed;
+                }
+                if snapshot.counters.tx_bytes >= previous.counters.tx_bytes {
+                    tx_rate = (snapshot.counters.tx_bytes - previous.counters.tx_bytes) as f64
+                        / elapsed;
+                }
+            }
+        }
+
+        self.network = Some(TimedNetworkSnapshot {
+            at_seconds: now_seconds,
+            counters: snapshot.counters,
+        });
+        network_status_value(snapshot, rx_rate, tx_rate)
     }
 }
 
@@ -89,6 +153,11 @@ pub fn parse_df_portable_bytes(input: &str) -> Option<UsageSnapshot> {
 }
 
 pub fn parse_linux_net_dev(input: &str) -> Option<Value> {
+    parse_linux_net_dev_snapshot(input)
+        .map(|snapshot| network_status_value(snapshot, 0.0, 0.0))
+}
+
+pub fn parse_linux_net_dev_snapshot(input: &str) -> Option<NetworkSnapshot> {
     let mut rx_bytes = 0u64;
     let mut tx_bytes = 0u64;
     let mut interfaces = Vec::new();
@@ -119,12 +188,23 @@ pub fn parse_linux_net_dev(input: &str) -> Option<Value> {
     if interfaces.is_empty() {
         None
     } else {
-        Some(json!({
-            "rx_bytes": rx_bytes,
-            "tx_bytes": tx_bytes,
-            "interfaces": interfaces
-        }))
+        Some(NetworkSnapshot {
+            counters: NetworkCounters { rx_bytes, tx_bytes },
+            interfaces,
+        })
     }
+}
+
+fn network_status_value(snapshot: NetworkSnapshot, rx_rate: f64, tx_rate: f64) -> Value {
+    json!({
+        "rx_bytes": snapshot.counters.rx_bytes,
+        "tx_bytes": snapshot.counters.tx_bytes,
+        "rx_rate": rx_rate,
+        "tx_rate": tx_rate,
+        "rx_bps": rx_rate,
+        "tx_bps": tx_rate,
+        "interfaces": snapshot.interfaces
+    })
 }
 
 pub fn parse_hostname_i_addresses(input: &str) -> Option<Value> {
@@ -187,9 +267,9 @@ fn read_local_ip_snapshot() -> Option<Value> {
     parse_hostname_i_addresses(&content)
 }
 
-fn read_linux_net_snapshot() -> Option<Value> {
+fn read_linux_net_snapshot() -> Option<NetworkSnapshot> {
     let content = fs::read_to_string("/proc/net/dev").ok()?;
-    parse_linux_net_dev(&content)
+    parse_linux_net_dev_snapshot(&content)
 }
 
 fn read_linux_uptime_seconds() -> Option<u64> {
@@ -215,14 +295,22 @@ fn hostname() -> String {
         .unwrap_or_else(|| "unknown".to_string())
 }
 
+fn unix_now_seconds() -> f64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs_f64())
+        .unwrap_or_default()
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;
 
     use super::{
-        parse_df_portable_bytes, parse_hostname_i_addresses, parse_linux_loadavg_cpu_percent,
-        parse_linux_meminfo, parse_linux_net_dev, parse_linux_uptime_seconds,
-        system_info_value,
+        parse_df_portable_bytes, parse_hostname_i_addresses,
+        parse_linux_loadavg_cpu_percent, parse_linux_meminfo, parse_linux_net_dev,
+        parse_linux_uptime_seconds, system_info_value, NetworkCounters, NetworkSnapshot,
+        ResourceSampler,
     };
 
     #[test]
@@ -287,7 +375,41 @@ Inter-|   Receive                                                |  Transmit
 
         assert_eq!(value["rx_bytes"], json!(4000));
         assert_eq!(value["tx_bytes"], json!(6000));
+        assert_eq!(value["rx_rate"], json!(0.0));
+        assert_eq!(value["tx_rate"], json!(0.0));
         assert_eq!(value["interfaces"][0]["name"], json!("eth0"));
+    }
+
+    #[test]
+    fn resource_sampler_calculates_network_rates_between_samples() {
+        let mut sampler = ResourceSampler::default();
+
+        let first = sampler.sample_network_value(
+            10.0,
+            NetworkSnapshot {
+                counters: NetworkCounters {
+                    rx_bytes: 1000,
+                    tx_bytes: 2000,
+                },
+                interfaces: Vec::new(),
+            },
+        );
+        let second = sampler.sample_network_value(
+            12.0,
+            NetworkSnapshot {
+                counters: NetworkCounters {
+                    rx_bytes: 1400,
+                    tx_bytes: 2600,
+                },
+                interfaces: Vec::new(),
+            },
+        );
+
+        assert_eq!(first["rx_rate"], json!(0.0));
+        assert_eq!(second["rx_rate"], json!(200.0));
+        assert_eq!(second["tx_rate"], json!(300.0));
+        assert_eq!(second["rx_bps"], json!(200.0));
+        assert_eq!(second["tx_bps"], json!(300.0));
     }
 
     #[test]
