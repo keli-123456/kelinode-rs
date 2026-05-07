@@ -46,6 +46,12 @@ pub struct HysteriaPortForwardStatus {
     pub errors: Vec<String>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PortForwardCommand {
+    pub tool: String,
+    pub args: Vec<String>,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct PortForwardRange {
     start: u16,
@@ -231,6 +237,76 @@ pub fn hysteria_port_forward_needs_repair(
     })
 }
 
+pub fn reconcile_port_forward_commands(
+    tool: &str,
+    rules: &[PortForwardRule],
+    prerouting_output: &str,
+) -> Vec<PortForwardCommand> {
+    let mut commands = delete_port_forward_commands(tool, prerouting_output);
+    commands.push(command(tool, vec!["-t", "nat", "-F", HYSTERIA_PORT_FORWARD_CHAIN]));
+    commands.push(command(tool, vec!["-t", "nat", "-X", HYSTERIA_PORT_FORWARD_CHAIN]));
+
+    for rule in rules {
+        let mut args = vec!["-t", "nat", "-A", "PREROUTING", "-p", "udp"]
+            .into_iter()
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        args.extend(rule.matcher.args.clone());
+        args.extend(
+            [
+                "-m",
+                "comment",
+                "--comment",
+                HYSTERIA_PORT_FORWARD_COMMENT,
+                "-j",
+                "REDIRECT",
+                "--to-ports",
+            ]
+            .into_iter()
+            .map(str::to_string),
+        );
+        args.push(rule.target_port.to_string());
+        commands.push(PortForwardCommand {
+            tool: tool.to_string(),
+            args,
+        });
+    }
+
+    commands
+}
+
+pub fn cleanup_port_forward_commands(
+    tool: &str,
+    prerouting_output: &str,
+) -> Vec<PortForwardCommand> {
+    let mut commands = delete_port_forward_commands(tool, prerouting_output);
+    commands.push(command(tool, vec!["-t", "nat", "-F", HYSTERIA_PORT_FORWARD_CHAIN]));
+    commands.push(command(tool, vec!["-t", "nat", "-X", HYSTERIA_PORT_FORWARD_CHAIN]));
+    commands
+}
+
+pub fn delete_port_forward_commands(
+    tool: &str,
+    prerouting_output: &str,
+) -> Vec<PortForwardCommand> {
+    prerouting_output
+        .lines()
+        .filter_map(|line| {
+            let mut fields = parse_iptables_spec(line.trim());
+            if !is_port_forward_rule_spec(&fields) {
+                return None;
+            }
+            fields[0] = "-D".to_string();
+            let mut args = vec!["-t".to_string(), "nat".to_string()];
+            args.extend(fields);
+            Some(PortForwardCommand {
+                tool: tool.to_string(),
+                args,
+            })
+        })
+        .collect()
+}
+
 pub fn expected_port_forward_specs(rules: &[PortForwardRule]) -> Vec<String> {
     rules
         .iter()
@@ -348,6 +424,13 @@ pub fn normalize_port_forward_spec_fields(fields: &[String]) -> Vec<String> {
 
 pub fn port_forward_fields_key(fields: &[String]) -> String {
     normalize_port_forward_spec_fields(fields).join("\0")
+}
+
+fn command(tool: &str, args: Vec<&str>) -> PortForwardCommand {
+    PortForwardCommand {
+        tool: tool.to_string(),
+        args: args.into_iter().map(str::to_string).collect(),
+    }
 }
 
 pub fn parse_port_forward_matchers(raw: &str) -> Result<Vec<PortForwardMatcher>, String> {
@@ -565,7 +648,7 @@ mod tests {
         build_hysteria_port_forward_rules, expected_port_forward_specs,
         hysteria_port_forward_needs_repair, inspect_port_forward_specs,
         list_port_forward_specs_from_output, new_hysteria_port_forward_status,
-        parse_iptables_spec, parse_port_forward_matchers,
+        parse_iptables_spec, parse_port_forward_matchers, reconcile_port_forward_commands,
     };
     use crate::panel::types::{CommonNode, NodeInfo};
 
@@ -738,6 +821,59 @@ mod tests {
         assert!(tool.extra[0].contains("V2NODE-HY2"));
         assert!(tool.stale_chain);
         assert!(hysteria_port_forward_needs_repair(&status));
+    }
+
+    #[test]
+    fn reconcile_commands_delete_old_specs_and_append_expected_rules() {
+        let infos = vec![
+            node(1, 443, "30000-30002", ""),
+            node(2, 8443, "20000,20001", ""),
+        ];
+        let (rules, errors) = build_hysteria_port_forward_rules(&infos);
+        assert!(errors.is_empty());
+        let output = [
+            "-A PREROUTING -p udp -j V2NODE-HY2",
+            "-A PREROUTING -p udp --dport 10000:10002 -j V2NODE-HY2",
+            "-A PREROUTING -p udp --dport 30000:30002 -m comment --comment \"V2NODE-HY2\" -j REDIRECT --to-ports 443",
+            "-A PREROUTING -p tcp -j OTHER",
+        ]
+        .join("\n");
+
+        let commands = reconcile_port_forward_commands("iptables", &rules, &output);
+        let got = commands
+            .iter()
+            .map(|command| {
+                let mut row = vec![command.tool.clone()];
+                row.extend(command.args.clone());
+                row
+            })
+            .collect::<Vec<_>>();
+        let want = string_rows(vec![
+            vec!["iptables", "-t", "nat", "-D", "PREROUTING", "-p", "udp", "-j", "V2NODE-HY2"],
+            vec![
+                "iptables", "-t", "nat", "-D", "PREROUTING", "-p", "udp", "--dport",
+                "10000:10002", "-j", "V2NODE-HY2",
+            ],
+            vec![
+                "iptables", "-t", "nat", "-D", "PREROUTING", "-p", "udp", "--dport",
+                "30000:30002", "-m", "comment", "--comment", "V2NODE-HY2", "-j",
+                "REDIRECT", "--to-ports", "443",
+            ],
+            vec!["iptables", "-t", "nat", "-F", "V2NODE-HY2"],
+            vec!["iptables", "-t", "nat", "-X", "V2NODE-HY2"],
+            vec![
+                "iptables", "-t", "nat", "-A", "PREROUTING", "-p", "udp", "--dport",
+                "30000:30002", "-m", "comment", "--comment", "V2NODE-HY2", "-j",
+                "REDIRECT", "--to-ports", "443",
+            ],
+            vec![
+                "iptables", "-t", "nat", "-A", "PREROUTING", "-p", "udp", "-m",
+                "multiport", "--dports", "20000,20001", "-m", "comment", "--comment",
+                "V2NODE-HY2", "-j", "REDIRECT", "--to-ports", "8443",
+            ],
+        ]);
+
+        assert_eq!(got, want);
     }
 
     fn node(id: u32, server_port: u16, port: &str, ports: &str) -> NodeInfo {
