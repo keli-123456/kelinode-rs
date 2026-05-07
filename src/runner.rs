@@ -5,7 +5,8 @@ use std::time::Duration;
 
 use crate::config::NodeConfig;
 use crate::control::{
-    run_runtime_tick, RuntimeControlOptions, RuntimeLoopSignal, RuntimeTickOptions,
+    report_runtime_apply_result_to_panels, run_runtime_tick, runtime_loop_signal,
+    RuntimeControlOptions, RuntimeLoopSignal, RuntimeTickOptions,
 };
 use crate::panel::client::{PanelClient, PanelClientOptions};
 use crate::panel::types::UserInfo;
@@ -70,7 +71,7 @@ pub struct PanelRuntimeLoop<'a, P, F> {
     pub plan: RuntimeBootstrapPlan,
     pub process_supervisor: &'a mut P,
     pub port_forward_executor: &'a mut F,
-    pub panel_client: Option<PanelClient>,
+    pub panel_clients: Vec<PanelClient>,
     pub version: String,
     pub refresh_health: bool,
     pub upgrade_status: Option<Value>,
@@ -91,7 +92,7 @@ where
             plan,
             process_supervisor,
             port_forward_executor,
-            panel_client,
+            panel_clients: panel_client.into_iter().collect(),
             version: String::new(),
             refresh_health: false,
             upgrade_status: None,
@@ -106,6 +107,11 @@ where
 
     pub fn with_upgrade_status(mut self, status: Option<Value>) -> Self {
         self.upgrade_status = status;
+        self
+    }
+
+    pub fn with_panel_clients(mut self, clients: Vec<PanelClient>) -> Self {
+        self.panel_clients = clients;
         self
     }
 }
@@ -138,14 +144,25 @@ where
                     self.upgrade_status.clone(),
                 );
             }
+            let report_to_panel = options.report_to_panel;
+            if report_to_panel && self.panel_clients.is_empty() {
+                return Err("runtime tick requested panel report without panel client".to_string());
+            }
+            options.report_to_panel = false;
             let result = run_runtime_tick(
                 &self.plan,
                 &mut *self.process_supervisor,
                 &mut *self.port_forward_executor,
-                self.panel_client.as_ref(),
+                None,
                 options,
             )
             .await?;
+            if report_to_panel {
+                let action =
+                    report_runtime_apply_result_to_panels(&self.panel_clients, &result.apply)
+                        .await?;
+                return Ok(runtime_loop_signal(&action));
+            }
             Ok(result.signal)
         })
     }

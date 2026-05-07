@@ -12,6 +12,7 @@ use crate::port_forward::{
 use crate::process::{core_process_spec, ProcessStatus, ProcessSupervisor};
 use crate::runtime::{rebuild_runtime_plan_with_users, RuntimeBootstrapPlan};
 use crate::upgrade::{UpgradeExecutor, UpgradeManager, UpgradeStatus};
+use serde_json::Value;
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct RuntimeControlOptions {
@@ -116,6 +117,69 @@ pub async fn report_runtime_apply_result(
     report_machine_status_payload(client, result.machine_status.clone()).await
 }
 
+pub async fn report_runtime_apply_result_to_panels(
+    clients: &[PanelClient],
+    result: &RuntimeApplyResult,
+) -> Result<RuntimePanelAction, String> {
+    let mut reported = 0usize;
+    let mut errors = Vec::new();
+    let mut action = RuntimePanelAction::default();
+
+    for client in clients {
+        let payload = machine_status_payload_for_client(&result.machine_status, client);
+        match report_machine_status_payload(client, payload).await {
+            Ok(next) => {
+                reported += 1;
+                action = merge_runtime_panel_action(action, next);
+            }
+            Err(error) => errors.push(format!(
+                "{}#{}: {}",
+                client.options().api_host.trim_end_matches('/'),
+                client.options().machine_id,
+                error
+            )),
+        }
+    }
+
+    if reported == 0 && !errors.is_empty() {
+        return Err(format!(
+            "all machine status reports failed: {}",
+            errors.join("; ")
+        ));
+    }
+
+    Ok(action)
+}
+
+fn machine_status_payload_for_client(
+    payload: &MachineStatusPayload,
+    client: &PanelClient,
+) -> MachineStatusPayload {
+    let mut payload = payload.clone();
+    if client.options().machine_id > 0 {
+        payload.machine_id = client.options().machine_id;
+    }
+
+    let api_host = client.options().api_host.trim_end_matches('/');
+    let machine_id = client.options().machine_id as u64;
+    if let Some(Value::Array(failures)) = payload.status.get_mut("node_failures") {
+        failures.retain(|failure| {
+            let failure_host = failure
+                .get("api_host")
+                .and_then(Value::as_str)
+                .map(|host| host.trim_end_matches('/'))
+                .unwrap_or_default();
+            let failure_machine_id = failure
+                .get("machine_id")
+                .and_then(Value::as_u64)
+                .unwrap_or_default();
+            failure_host == api_host && failure_machine_id == machine_id
+        });
+    }
+
+    payload
+}
+
 pub async fn report_machine_status_payload(
     client: &PanelClient,
     payload: MachineStatusPayload,
@@ -132,6 +196,17 @@ pub fn runtime_panel_action(response: &MachineStatusResponse) -> RuntimePanelAct
         reload: response.reload,
         upgrade: response.upgrade.clone(),
     }
+}
+
+pub fn merge_runtime_panel_action(
+    mut target: RuntimePanelAction,
+    next: RuntimePanelAction,
+) -> RuntimePanelAction {
+    target.reload |= next.reload;
+    if target.upgrade.is_none() {
+        target.upgrade = next.upgrade;
+    }
+    target
 }
 
 pub async fn run_runtime_tick<P, F>(
@@ -212,23 +287,24 @@ pub fn handle_runtime_signal<E: UpgradeExecutor>(
 mod tests {
     use std::collections::{BTreeMap, BTreeSet};
     use std::fs;
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     use serde_json::json;
 
     use crate::config::{NodeConfig, ResolvedConfig, ResolvedMachineConfig};
+    use crate::panel::client::{PanelClient, PanelClientOptions};
     use crate::panel::types::{CommonNode, NodeInfo, UserInfo};
     use crate::port_forward::{PortForwardCommand, PortForwardExecutor};
     use crate::process::MemoryProcessSupervisor;
     use crate::runtime::build_runtime_bootstrap_plan;
 
-    use crate::machine::{MachineStatusResponse, MachineUpgradeCommand};
+    use crate::machine::{MachineStatusPayload, MachineStatusResponse, MachineUpgradeCommand};
     use crate::upgrade::{MemoryUpgradeExecutor, UpgradeManager};
 
     use super::{
-        apply_runtime_plan, handle_runtime_signal, run_runtime_tick, runtime_loop_signal,
-        runtime_panel_action, RuntimeControlOptions, RuntimeLoopSignal, RuntimePanelAction,
-        RuntimeTickOptions,
+        apply_runtime_plan, handle_runtime_signal, machine_status_payload_for_client,
+        merge_runtime_panel_action, run_runtime_tick, runtime_loop_signal, runtime_panel_action,
+        RuntimeControlOptions, RuntimeLoopSignal, RuntimePanelAction, RuntimeTickOptions,
     };
 
     #[test]
@@ -355,6 +431,71 @@ mod tests {
                 target_version: "v0.4.1".to_string(),
             })
         );
+    }
+
+    #[test]
+    fn merged_panel_action_preserves_reload_and_first_upgrade() {
+        let merged = merge_runtime_panel_action(
+            RuntimePanelAction {
+                reload: true,
+                upgrade: None,
+            },
+            RuntimePanelAction {
+                reload: false,
+                upgrade: Some(MachineUpgradeCommand {
+                    id: "upgrade-1".to_string(),
+                    target_version: "v0.4.1".to_string(),
+                }),
+            },
+        );
+        let merged = merge_runtime_panel_action(
+            merged,
+            RuntimePanelAction {
+                reload: false,
+                upgrade: Some(MachineUpgradeCommand {
+                    id: "upgrade-2".to_string(),
+                    target_version: "v0.4.2".to_string(),
+                }),
+            },
+        );
+
+        assert!(merged.reload);
+        assert_eq!(merged.upgrade.unwrap().id, "upgrade-1");
+    }
+
+    #[test]
+    fn machine_status_payload_for_client_filters_node_failures_by_profile() {
+        let mut payload = MachineStatusPayload::new(1);
+        payload.insert_status(
+            "node_failures",
+            json!([
+                {
+                    "api_host": "https://panel-a.example.test",
+                    "machine_id": 1,
+                    "node_id": 7
+                },
+                {
+                    "api_host": "https://panel-b.example.test/",
+                    "machine_id": 2,
+                    "node_id": 8
+                }
+            ]),
+        );
+        let client = PanelClient::new(PanelClientOptions {
+            api_host: "https://panel-b.example.test".to_string(),
+            token: "token-b".to_string(),
+            node_id: 0,
+            machine_id: 2,
+            timeout: Duration::from_secs(1),
+            config_dir: String::new(),
+        })
+        .unwrap();
+
+        let filtered = machine_status_payload_for_client(&payload, &client);
+
+        assert_eq!(filtered.machine_id, 2);
+        assert_eq!(filtered.status["node_failures"].as_array().unwrap().len(), 1);
+        assert_eq!(filtered.status["node_failures"][0]["node_id"], json!(8));
     }
 
     #[tokio::test]

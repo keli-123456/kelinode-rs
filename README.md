@@ -44,6 +44,7 @@ First cut:
 - Add an async runtime loop variant for panel-backed user refresh and report ticks.
 - Add a panel-backed runtime loop adapter that reloads users by node tag before applying ticks.
 - Add a `run` command that keeps the runtime loop alive across reloads and carries upgrade status into machine reports.
+- Report machine status to each configured machine-bound panel profile instead of only the first resolved node.
 
 Not implemented yet:
 

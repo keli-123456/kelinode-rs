@@ -13,6 +13,7 @@ use kelinode_rs::runner::{
 use kelinode_rs::runtime::{bootstrap_from_config, Bootstrap, RuntimeBootstrapPlan};
 use kelinode_rs::upgrade::{SystemUpgradeExecutor, UpgradeManager};
 use serde_json::Value;
+use std::collections::BTreeSet;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 fn main() {
@@ -115,26 +116,41 @@ async fn run_agent_once(
 ) -> Result<RuntimeLoopExit, String> {
     let config = AppConfig::load_from_path(path)?;
     let plan = bootstrap_from_config(&config).await?;
-    let panel_client = machine_panel_client(&plan)?;
-    let options = runtime_loop_options(&plan, panel_client.is_some());
+    let panel_clients = machine_panel_clients(&plan)?;
+    let options = runtime_loop_options(&plan, !panel_clients.is_empty());
     let mut runner = PanelRuntimeLoop::new(
         plan,
         process_supervisor,
         port_forward_executor,
-        panel_client,
+        None,
     )
+    .with_panel_clients(panel_clients)
     .with_health_refresh(agent_version())
     .with_upgrade_status(upgrade_status);
     run_runtime_loop_async(&mut runner, options).await
 }
 
-fn machine_panel_client(plan: &RuntimeBootstrapPlan) -> Result<Option<PanelClient>, String> {
-    let Some(config) = plan.resolved.nodes.iter().find(|config| config.machine_id > 0) else {
-        return Ok(None);
-    };
-    PanelClient::new(PanelClientOptions::from(config))
-        .map(Some)
-        .map_err(|err| err.to_string())
+fn machine_panel_clients(plan: &RuntimeBootstrapPlan) -> Result<Vec<PanelClient>, String> {
+    let mut seen = BTreeSet::new();
+    let mut clients = Vec::new();
+
+    for config in plan.resolved.nodes.iter().filter(|config| config.machine_id > 0) {
+        let key = format!(
+            "{}#{}#{}",
+            config.url.trim_end_matches('/'),
+            config.machine_id,
+            config.token
+        );
+        if !seen.insert(key) {
+            continue;
+        }
+        clients.push(
+            PanelClient::new(PanelClientOptions::from(config))
+                .map_err(|err| err.to_string())?,
+        );
+    }
+
+    Ok(clients)
 }
 
 fn runtime_loop_options(
@@ -213,7 +229,7 @@ fn print_help() {
 
 #[cfg(test)]
 mod tests {
-    use super::{runtime_loop_options, runtime_tick_interval};
+    use super::{machine_panel_clients, runtime_loop_options, runtime_tick_interval};
     use kelinode_rs::config::{NodeConfig, ResolvedConfig, ResolvedMachineConfig};
     use kelinode_rs::panel::types::{CommonNode, NodeInfo};
     use kelinode_rs::runtime::{build_runtime_bootstrap_plan, RuntimeBootstrapPlan};
@@ -251,6 +267,42 @@ mod tests {
         assert_eq!(options.control.machine_id, 0);
         assert_eq!(options.panel_report_interval, 0);
         assert_eq!(runtime_tick_interval(&plan), Duration::from_secs(60));
+    }
+
+    #[test]
+    fn machine_panel_clients_deduplicate_machine_profiles() {
+        let plan = test_plan(
+            Vec::new(),
+            vec![
+                NodeConfig {
+                    url: "https://panel-a.example.test/".to_string(),
+                    token: "token-a".to_string(),
+                    node_id: 7,
+                    machine_id: 1,
+                    ..NodeConfig::default()
+                },
+                NodeConfig {
+                    url: "https://panel-a.example.test".to_string(),
+                    token: "token-a".to_string(),
+                    node_id: 8,
+                    machine_id: 1,
+                    ..NodeConfig::default()
+                },
+                NodeConfig {
+                    url: "https://panel-b.example.test".to_string(),
+                    token: "token-b".to_string(),
+                    node_id: 9,
+                    machine_id: 2,
+                    ..NodeConfig::default()
+                },
+            ],
+        );
+
+        let clients = machine_panel_clients(&plan).unwrap();
+
+        assert_eq!(clients.len(), 2);
+        assert_eq!(clients[0].options().machine_id, 1);
+        assert_eq!(clients[1].options().machine_id, 2);
     }
 
     fn test_plan(nodes: Vec<NodeInfo>, configs: Vec<NodeConfig>) -> RuntimeBootstrapPlan {
