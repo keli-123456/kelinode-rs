@@ -46,6 +46,12 @@ pub enum RuntimeLoopExitReason {
     Signal(RuntimeLoopSignal),
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RuntimeLoopEvent {
+    Reload,
+    RefreshUsers,
+}
+
 pub trait RuntimeLoopCallbacks {
     fn refresh_users(&mut self) -> Result<BTreeMap<String, Vec<UserInfo>>, String>;
     fn run_tick(&mut self, options: RuntimeTickOptions) -> Result<RuntimeLoopSignal, String>;
@@ -317,6 +323,95 @@ where
     }
 }
 
+pub async fn run_runtime_loop_async_with_events<C>(
+    callbacks: &mut C,
+    options: RuntimeLoopOptions,
+    events: &mut tokio::sync::mpsc::UnboundedReceiver<RuntimeLoopEvent>,
+) -> Result<RuntimeLoopExit, String>
+where
+    C: AsyncRuntimeLoopCallbacks,
+{
+    let mut ticks = 0usize;
+    loop {
+        if let Some(max_ticks) = options.max_ticks {
+            if ticks >= max_ticks {
+                return Ok(RuntimeLoopExit {
+                    ticks,
+                    reason: RuntimeLoopExitReason::MaxTicks,
+                });
+            }
+        }
+
+        ticks += 1;
+        let users_by_node_tag = if should_run(ticks, options.user_refresh_interval) {
+            callbacks.refresh_users().await?
+        } else {
+            BTreeMap::new()
+        };
+        let signal = callbacks
+            .run_tick(RuntimeTickOptions {
+                control: options.control.clone(),
+                report_to_panel: should_run(ticks, options.panel_report_interval),
+                users_by_node_tag,
+            })
+            .await?;
+        if signal != RuntimeLoopSignal::Continue {
+            return Ok(RuntimeLoopExit {
+                ticks,
+                reason: RuntimeLoopExitReason::Signal(signal),
+            });
+        }
+        if let Some(max_ticks) = options.max_ticks {
+            if ticks >= max_ticks {
+                return Ok(RuntimeLoopExit {
+                    ticks,
+                    reason: RuntimeLoopExitReason::MaxTicks,
+                });
+            }
+        }
+
+        if options.tick_interval > Duration::from_secs(0) {
+            tokio::select! {
+                _ = tokio::time::sleep(options.tick_interval) => {}
+                event = events.recv() => {
+                    if let Some(event) = event {
+                        let signal = handle_runtime_loop_event(callbacks, &options, event).await?;
+                        if signal != RuntimeLoopSignal::Continue {
+                            return Ok(RuntimeLoopExit {
+                                ticks,
+                                reason: RuntimeLoopExitReason::Signal(signal),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+async fn handle_runtime_loop_event<C>(
+    callbacks: &mut C,
+    options: &RuntimeLoopOptions,
+    event: RuntimeLoopEvent,
+) -> Result<RuntimeLoopSignal, String>
+where
+    C: AsyncRuntimeLoopCallbacks,
+{
+    match event {
+        RuntimeLoopEvent::Reload => Ok(RuntimeLoopSignal::Reload),
+        RuntimeLoopEvent::RefreshUsers => {
+            let users_by_node_tag = callbacks.refresh_users().await?;
+            callbacks
+                .run_tick(RuntimeTickOptions {
+                    control: options.control.clone(),
+                    report_to_panel: false,
+                    users_by_node_tag,
+                })
+                .await
+        }
+    }
+}
+
 pub async fn load_users_by_node_tag_from_panel(
     plan: &RuntimeBootstrapPlan,
 ) -> Result<BTreeMap<String, Vec<UserInfo>>, String> {
@@ -435,9 +530,10 @@ mod tests {
 
     use super::{
         node_config_for_info, refresh_runtime_health, run_runtime_loop,
-        run_runtime_loop_async, should_run, user_delta_not_supported,
+        run_runtime_loop_async, run_runtime_loop_async_with_events, should_run,
+        user_delta_not_supported,
         AsyncRuntimeLoopCallbacks, PanelRuntimeLoop, RuntimeLoopCallbacks, RuntimeLoopExit,
-        RuntimeLoopExitReason, RuntimeLoopFuture, RuntimeLoopOptions,
+        RuntimeLoopEvent, RuntimeLoopExitReason, RuntimeLoopFuture, RuntimeLoopOptions,
     };
     use crate::config::{NodeConfig, ResolvedConfig, ResolvedMachineConfig};
     use crate::control::RuntimeControlOptions;
@@ -619,6 +715,60 @@ mod tests {
         assert!(callbacks.ticks[0].users_by_node_tag.is_empty());
         assert!(!callbacks.ticks[1].users_by_node_tag.is_empty());
         assert!(callbacks.ticks[2].report_to_panel);
+    }
+
+    #[tokio::test]
+    async fn async_loop_exits_on_external_reload_event() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        tx.send(RuntimeLoopEvent::Reload).unwrap();
+        let mut callbacks = AsyncFakeCallbacks::default();
+
+        let exit = run_runtime_loop_async_with_events(
+            &mut callbacks,
+            RuntimeLoopOptions {
+                max_ticks: Some(5),
+                tick_interval: Duration::from_secs(60),
+                user_refresh_interval: 0,
+                panel_report_interval: 0,
+                ..RuntimeLoopOptions::default()
+            },
+            &mut rx,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            exit.reason,
+            RuntimeLoopExitReason::Signal(RuntimeLoopSignal::Reload)
+        );
+        assert_eq!(exit.ticks, 1);
+        assert_eq!(callbacks.ticks.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn async_loop_refreshes_users_on_external_event() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        tx.send(RuntimeLoopEvent::RefreshUsers).unwrap();
+        let mut callbacks = AsyncFakeCallbacks::default();
+
+        let exit = run_runtime_loop_async_with_events(
+            &mut callbacks,
+            RuntimeLoopOptions {
+                max_ticks: Some(2),
+                tick_interval: Duration::from_millis(1),
+                user_refresh_interval: 0,
+                panel_report_interval: 0,
+                ..RuntimeLoopOptions::default()
+            },
+            &mut rx,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(exit.reason, RuntimeLoopExitReason::MaxTicks);
+        assert_eq!(callbacks.refreshes, 1);
+        assert!(!callbacks.ticks[1].users_by_node_tag.is_empty());
+        assert!(!callbacks.ticks[1].report_to_panel);
     }
 
     #[test]

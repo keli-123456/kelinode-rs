@@ -43,6 +43,7 @@ First cut:
 - Map realtime inbound messages into runtime tasks for pong, config checks, forced reloads, and user sync.
 - Add a transport-neutral realtime session worker for initial ping, pong replies, and task dispatch.
 - Add a `tokio-tungstenite` realtime connector with rustls webpki roots.
+- Let the async runtime loop react to external realtime reload and user-refresh events.
 - Collect Linux root disk usage and network byte counters for machine status payloads.
 - Compute Linux CPU usage from `/proc/stat` samples, with `/proc/loadavg` as a fallback.
 - Collect local and public IPv4/IPv6 candidates for machine status payloads without external network calls.
