@@ -6,5 +6,6 @@ pub mod machine;
 pub mod node;
 pub mod panel;
 pub mod port_forward;
+pub mod process;
 pub mod runtime;
 pub mod user;

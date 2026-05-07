@@ -22,6 +22,7 @@
 - HY2 port-forward executor abstraction for inspect/repair/cleanup.
 - Runtime bootstrap plan combining resolved config, node bootstrap, core plan, and HY2 status.
 - External core config file layout, Xray JSON rendering skeleton, and atomic writes.
+- Core process spec and supervisor abstraction for start/reload/stop/status.
 - Machine node resolution and subscription proxy config merging.
 - Compatibility tests around protocol parsing and endpoint construction.
 
