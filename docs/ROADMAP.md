@@ -20,6 +20,7 @@
 - HY2 port-forward status/spec drift detection helpers.
 - HY2 port-forward repair/cleanup command planner.
 - HY2 port-forward executor abstraction for inspect/repair/cleanup.
+- Runtime bootstrap plan combining resolved config, node bootstrap, core plan, and HY2 status.
 - Machine node resolution and subscription proxy config merging.
 - Compatibility tests around protocol parsing and endpoint construction.
 

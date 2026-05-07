@@ -1,5 +1,14 @@
+use std::path::PathBuf;
+
 use crate::config::{AgentConfig, AppConfig, ResolvedConfig, SubscriptionProxyConfig};
+use crate::core::{CoreKind, CorePlan};
 use crate::machine::{resolve_machine_profiles_from_panel, MachineResolveSummary};
+use crate::node::{NodeFailure, NodeManager, NodeManagerOptions};
+use crate::panel::types::NodeInfo;
+use crate::port_forward::{
+    build_hysteria_port_forward_rules, new_hysteria_port_forward_status,
+    HysteriaPortForwardStatus,
+};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RuntimeMode {
@@ -15,6 +24,17 @@ pub struct Bootstrap {
     pub machine_profile_count: usize,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RuntimeBootstrapPlan {
+    pub bootstrap: Bootstrap,
+    pub resolved: ResolvedConfig,
+    pub node_count: usize,
+    pub node_failures: Vec<NodeFailure>,
+    pub core_plan: Option<CorePlan>,
+    pub hy2_port_forward: HysteriaPortForwardStatus,
+    pub subscription_proxy_only: bool,
+}
+
 impl Bootstrap {
     pub fn from_config(config: &AppConfig) -> Self {
         let Ok(resolved) = config.resolve_runtime() else {
@@ -25,6 +45,10 @@ impl Bootstrap {
             };
         };
 
+        Self::from_resolved(&resolved)
+    }
+
+    pub fn from_resolved(resolved: &ResolvedConfig) -> Self {
         let mode = if resolved.machine.enabled {
             RuntimeMode::MachineBinding
         } else if !resolved.nodes.is_empty() {
@@ -39,6 +63,22 @@ impl Bootstrap {
             machine_profile_count: resolved.machine.profiles.len(),
         }
     }
+}
+
+pub async fn bootstrap_from_config(
+    config: &AppConfig,
+) -> Result<RuntimeBootstrapPlan, String> {
+    let resolved = resolve_runtime_with_machine_profiles(config).await?;
+    let options = NodeManagerOptions {
+        continue_on_error: resolved.machine.continue_on_error,
+    };
+    let manager = NodeManager::build_from_panel(&resolved.nodes, resolved.realtime.clone(), options)
+        .await?;
+    build_runtime_bootstrap_plan(
+        resolved,
+        manager.node_infos(),
+        manager.failures().to_vec(),
+    )
 }
 
 pub async fn resolve_runtime_with_machine_profiles(
@@ -56,6 +96,39 @@ pub async fn resolve_runtime_with_machine_profiles(
     .await?;
     apply_machine_summary(&mut resolved, summary);
     Ok(resolved)
+}
+
+pub fn build_runtime_bootstrap_plan(
+    resolved: ResolvedConfig,
+    node_infos: Vec<NodeInfo>,
+    node_failures: Vec<NodeFailure>,
+) -> Result<RuntimeBootstrapPlan, String> {
+    let subscription_proxy_only =
+        node_infos.is_empty() && resolved.agent.subscription_proxy.enabled;
+    let core_plan = if node_infos.is_empty() {
+        None
+    } else {
+        Some(
+            CorePlan::from_nodes(CoreKind::Xray, core_config_path(&resolved), &node_infos)
+                .map_err(|err| err.message)?,
+        )
+    };
+    let (hy2_rules, hy2_errors) = build_hysteria_port_forward_rules(&node_infos);
+    let bootstrap = Bootstrap::from_resolved(&resolved);
+
+    Ok(RuntimeBootstrapPlan {
+        bootstrap,
+        resolved,
+        node_count: node_infos.len(),
+        node_failures,
+        core_plan,
+        hy2_port_forward: new_hysteria_port_forward_status(&hy2_rules, &hy2_errors, false),
+        subscription_proxy_only,
+    })
+}
+
+pub fn core_config_path(resolved: &ResolvedConfig) -> PathBuf {
+    PathBuf::from(&resolved.kernel.config_dir).join("config.json")
 }
 
 pub fn apply_machine_summary(
@@ -118,13 +191,19 @@ fn fill_if_empty(target: &mut String, value: &str) {
 
 #[cfg(test)]
 mod tests {
+    use serde_json::json;
+
     use crate::config::{
         AgentConfig, AppConfig, MachineProfileConfig, NodeConfig, ResolvedConfig,
         ResolvedMachineConfig, SubscriptionProxyConfig, SubscriptionProxyProfile,
     };
     use crate::machine::MachineResolveSummary;
+    use crate::panel::types::{CommonNode, NodeInfo};
 
-    use super::{apply_machine_summary, Bootstrap, RuntimeMode};
+    use super::{
+        apply_machine_summary, build_runtime_bootstrap_plan, core_config_path, Bootstrap,
+        RuntimeMode,
+    };
 
     #[test]
     fn detects_machine_mode_before_direct_node() {
@@ -201,5 +280,94 @@ mod tests {
         assert_eq!(resolved.agent.subscription_proxy.https_listen, "0.0.0.0:443");
         assert_eq!(resolved.agent.subscription_proxy.http_listen, "0.0.0.0:80");
         assert_eq!(resolved.agent.subscription_proxy.profiles.len(), 2);
+    }
+
+    #[test]
+    fn builds_runtime_bootstrap_plan_with_core_and_hy2_status() {
+        let resolved = ResolvedConfig {
+            kernel: Default::default(),
+            realtime: Default::default(),
+            machine: ResolvedMachineConfig {
+                enabled: false,
+                continue_on_error: false,
+                profiles: Vec::new(),
+            },
+            agent: AgentConfig::default(),
+            nodes: vec![NodeConfig {
+                url: "https://panel.example.test".to_string(),
+                node_id: 7,
+                ..NodeConfig::default()
+            }],
+        };
+        let node = test_node("hysteria2", 7, 443, "30000-30002");
+
+        let plan = build_runtime_bootstrap_plan(resolved, vec![node], Vec::new()).unwrap();
+
+        assert_eq!(plan.bootstrap.mode, RuntimeMode::DirectNode);
+        assert_eq!(plan.node_count, 1);
+        assert_eq!(plan.core_plan.as_ref().unwrap().inbounds.len(), 1);
+        assert_eq!(plan.hy2_port_forward.expected_rules.len(), 1);
+        assert!(!plan.subscription_proxy_only);
+    }
+
+    #[test]
+    fn builds_subscription_proxy_only_bootstrap_plan() {
+        let resolved = ResolvedConfig {
+            kernel: Default::default(),
+            realtime: Default::default(),
+            machine: ResolvedMachineConfig {
+                enabled: true,
+                continue_on_error: true,
+                profiles: Vec::new(),
+            },
+            agent: AgentConfig {
+                subscription_proxy: SubscriptionProxyConfig {
+                    enabled: true,
+                    site_id: "site".to_string(),
+                    upstream_base_url: "https://site.example.test".to_string(),
+                    ..SubscriptionProxyConfig::default()
+                },
+            },
+            nodes: Vec::new(),
+        };
+
+        let plan = build_runtime_bootstrap_plan(resolved, Vec::new(), Vec::new()).unwrap();
+
+        assert_eq!(plan.bootstrap.mode, RuntimeMode::MachineBinding);
+        assert_eq!(plan.node_count, 0);
+        assert!(plan.core_plan.is_none());
+        assert!(plan.subscription_proxy_only);
+    }
+
+    #[test]
+    fn core_config_path_uses_kernel_config_dir() {
+        let mut resolved = ResolvedConfig {
+            kernel: Default::default(),
+            realtime: Default::default(),
+            machine: ResolvedMachineConfig {
+                enabled: false,
+                continue_on_error: false,
+                profiles: Vec::new(),
+            },
+            agent: AgentConfig::default(),
+            nodes: Vec::new(),
+        };
+        resolved.kernel.config_dir = "/srv/v2node".to_string();
+
+        assert_eq!(
+            core_config_path(&resolved),
+            std::path::PathBuf::from("/srv/v2node").join("config.json")
+        );
+    }
+
+    fn test_node(protocol: &str, node_id: u32, server_port: u16, port: &str) -> NodeInfo {
+        let common: CommonNode = serde_json::from_value(json!({
+            "protocol": protocol,
+            "server_port": server_port,
+            "port": port
+        }))
+        .unwrap();
+
+        NodeInfo::from_common("https://panel.example.test", node_id, common).unwrap()
     }
 }
