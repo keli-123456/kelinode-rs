@@ -41,6 +41,7 @@ First cut:
 - Add realtime message, receipt, URL, and invalidate-action models compatible with the Go agent worker behavior.
 - Resolve realtime runtime options from local config, panel node base config, and node identity.
 - Map realtime inbound messages into runtime tasks for pong, config checks, forced reloads, and user sync.
+- Add a transport-neutral realtime session worker for initial ping, pong replies, and task dispatch.
 - Collect Linux root disk usage and network byte counters for machine status payloads.
 - Compute Linux CPU usage from `/proc/stat` samples, with `/proc/loadavg` as a fallback.
 - Collect local and public IPv4/IPv6 candidates for machine status payloads without external network calls.
@@ -54,7 +55,7 @@ First cut:
 
 Not implemented yet:
 
-- Realtime websocket transport workers.
+- Concrete websocket connector for the realtime transport worker.
 - External public IP discovery when local interface addresses are not enough.
 - Complete per-protocol user options for bandwidth limits, device-limit enforcement, and advanced protocol-specific credentials.
 - Download verification and rollback around self-upgrade execution.
