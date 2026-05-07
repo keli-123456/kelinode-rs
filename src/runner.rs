@@ -15,6 +15,10 @@ use crate::port_forward::PortForwardExecutor;
 use crate::process::ProcessSupervisor;
 use crate::runtime::{rebuild_runtime_plan_with_users, RuntimeBootstrapPlan};
 use crate::system::ResourceSampler;
+use crate::user::{
+    apply_full_user_list, apply_user_delta_body, load_user_sync_state, save_user_sync_state,
+    user_sync_state_path, UserSyncState,
+};
 use serde_json::Value;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -78,6 +82,14 @@ pub struct PanelRuntimeLoop<'a, P, F> {
     pub refresh_health: bool,
     pub upgrade_status: Option<Value>,
     pub resource_sampler: ResourceSampler,
+    user_sync: BTreeMap<String, RuntimeUserSyncEntry>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct RuntimeUserSyncEntry {
+    state: UserSyncState,
+    delta_supported: bool,
+    path: String,
 }
 
 impl<'a, P, F> PanelRuntimeLoop<'a, P, F>
@@ -100,6 +112,7 @@ where
             refresh_health: false,
             upgrade_status: None,
             resource_sampler: ResourceSampler::default(),
+            user_sync: BTreeMap::new(),
         }
     }
 
@@ -128,7 +141,9 @@ where
     fn refresh_users<'a>(
         &'a mut self,
     ) -> RuntimeLoopFuture<'a, Result<BTreeMap<String, Vec<UserInfo>>, String>> {
-        Box::pin(async move { load_users_by_node_tag_from_panel(&self.plan).await })
+        Box::pin(async move {
+            load_users_by_node_tag_from_panel_with_state(&self.plan, &mut self.user_sync).await
+        })
     }
 
     fn run_tick<'a>(
@@ -302,6 +317,14 @@ where
 pub async fn load_users_by_node_tag_from_panel(
     plan: &RuntimeBootstrapPlan,
 ) -> Result<BTreeMap<String, Vec<UserInfo>>, String> {
+    let mut state = BTreeMap::new();
+    load_users_by_node_tag_from_panel_with_state(plan, &mut state).await
+}
+
+async fn load_users_by_node_tag_from_panel_with_state(
+    plan: &RuntimeBootstrapPlan,
+    sync_state: &mut BTreeMap<String, RuntimeUserSyncEntry>,
+) -> Result<BTreeMap<String, Vec<UserInfo>>, String> {
     let mut users_by_tag = BTreeMap::new();
     for node in &plan.node_infos {
         let Some(config) = node_config_for_info(plan, node.id, &node.tag) else {
@@ -309,21 +332,82 @@ pub async fn load_users_by_node_tag_from_panel(
         };
         let options = PanelClientOptions::from(config);
         let mut client = PanelClient::new(options).map_err(|err| err.to_string())?;
-        let users = client
-            .get_user_list()
-            .await
-            .map_err(|err| {
-                format!(
-                    "get user list [{}-{}] error: {}",
-                    config.url.trim_end_matches('/'),
-                    config.node_id,
-                    err
-                )
-            })?
-            .unwrap_or_default();
+        let entry = sync_state
+            .entry(node.tag.clone())
+            .or_insert_with(|| load_runtime_user_sync_entry(config));
+        let users = load_users_for_node(config, entry, &mut client).await?;
         users_by_tag.insert(node.tag.clone(), users);
     }
     Ok(users_by_tag)
+}
+
+async fn load_users_for_node(
+    config: &NodeConfig,
+    entry: &mut RuntimeUserSyncEntry,
+    client: &mut PanelClient,
+) -> Result<Vec<UserInfo>, String> {
+    if entry.delta_supported {
+        match client.get_user_delta(entry.state.revision).await {
+            Ok(delta) => {
+                let result = apply_user_delta_body(&entry.state, &delta);
+                entry.state = result.state;
+                save_runtime_user_sync_entry(entry);
+                return Ok(entry.state.users.clone());
+            }
+            Err(err) if user_delta_not_supported(&err.to_string()) => {
+                entry.delta_supported = false;
+            }
+            Err(err) => {
+                return Err(format!(
+                    "get user delta [{}-{}] error: {}",
+                    config.url.trim_end_matches('/'),
+                    config.node_id,
+                    err
+                ));
+            }
+        }
+    }
+
+    let users = client
+        .get_user_list()
+        .await
+        .map_err(|err| {
+            format!(
+                "get user list [{}-{}] error: {}",
+                config.url.trim_end_matches('/'),
+                config.node_id,
+                err
+            )
+        })?
+        .unwrap_or_else(|| entry.state.users.clone());
+    let result = apply_full_user_list(&entry.state, &users);
+    entry.state = result.state;
+    save_runtime_user_sync_entry(entry);
+    Ok(entry.state.users.clone())
+}
+
+fn load_runtime_user_sync_entry(config: &NodeConfig) -> RuntimeUserSyncEntry {
+    let path = user_sync_state_path(&config.config_dir, &config.url, config.node_id);
+    let state = load_user_sync_state(&path).unwrap_or_default();
+    RuntimeUserSyncEntry {
+        state,
+        delta_supported: true,
+        path,
+    }
+}
+
+fn save_runtime_user_sync_entry(entry: &RuntimeUserSyncEntry) {
+    if !entry.path.trim().is_empty() {
+        let _ = save_user_sync_state(&entry.path, &entry.state);
+    }
+}
+
+fn user_delta_not_supported(error: &str) -> bool {
+    let error = error.to_ascii_lowercase();
+    error.contains("404")
+        || error.contains("405")
+        || error.contains("not found")
+        || error.contains("method not allowed")
 }
 
 fn node_config_for_info<'a>(
@@ -366,9 +450,9 @@ mod tests {
 
     use super::{
         node_config_for_info, refresh_runtime_health, run_runtime_loop,
-        run_runtime_loop_async, should_run, AsyncRuntimeLoopCallbacks, PanelRuntimeLoop,
-        RuntimeLoopCallbacks, RuntimeLoopExit, RuntimeLoopExitReason, RuntimeLoopFuture,
-        RuntimeLoopOptions,
+        run_runtime_loop_async, should_run, user_delta_not_supported,
+        AsyncRuntimeLoopCallbacks, PanelRuntimeLoop, RuntimeLoopCallbacks, RuntimeLoopExit,
+        RuntimeLoopExitReason, RuntimeLoopFuture, RuntimeLoopOptions,
     };
     use crate::config::{NodeConfig, ResolvedConfig, ResolvedMachineConfig};
     use crate::control::RuntimeControlOptions;
@@ -409,6 +493,13 @@ mod tests {
             options.control.health.upgrade,
             Some(json!({"status": "running"}))
         );
+    }
+
+    #[test]
+    fn user_delta_unsupported_matches_legacy_panel_errors() {
+        assert!(user_delta_not_supported("user delta request failed: 404 Not Found"));
+        assert!(user_delta_not_supported("405 Method Not Allowed"));
+        assert!(!user_delta_not_supported("403 Forbidden"));
     }
 
     #[test]
