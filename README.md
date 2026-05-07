@@ -23,11 +23,12 @@ First cut:
 - Run a single runtime tick that applies local state, optionally reports to the panel, and returns a continue/reload/upgrade signal.
 - Track machine self-upgrade status and launch the existing installer through a systemd-run or detached-shell boundary.
 - Feed upgrade signals into the self-upgrade state machine so the next status report can include running/failed/succeeded state.
+- Collect basic host resource snapshots for system metadata, Linux memory/swap, and uptime.
 
 Not implemented yet:
 
 - A long-running async loop for polling config changes, periodic reports, realtime invalidations, and shutdown.
-- Real host metric collection for CPU, memory, disk, network, IP, and system fields.
+- Full host metric collection for CPU, disk, network, and public/local IP fields.
 - User-authenticated external core config generation.
 - Realtime websocket workers.
 - Download verification and rollback around self-upgrade execution.

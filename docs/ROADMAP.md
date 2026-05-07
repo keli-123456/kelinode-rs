@@ -29,6 +29,7 @@
 - Runtime tick skeleton with apply/report/signal phases for the long-running loop.
 - Machine self-upgrade state and launcher abstraction compatible with Go agent behavior.
 - Runtime signal handler that connects upgrade actions to the self-upgrade state machine.
+- Host resource snapshot basics for system metadata, Linux memory/swap, and uptime.
 - Machine node resolution and subscription proxy config merging.
 - Compatibility tests around protocol parsing and endpoint construction.
 
