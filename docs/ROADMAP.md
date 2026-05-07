@@ -47,6 +47,7 @@
 - Linux loadavg-based CPU percentage estimate for machine status payloads.
 - Local IPv4/IPv6 address snapshot collection for machine status payloads.
 - Runtime loop scheduler for periodic user refresh, panel reports, and reload/upgrade signal exits.
+- Async runtime loop variant for panel-backed user refresh and report ticks.
 - Machine node resolution and subscription proxy config merging.
 - Compatibility tests around protocol parsing and endpoint construction.
 
