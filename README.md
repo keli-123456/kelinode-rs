@@ -68,6 +68,7 @@ First cut:
 - Report machine status to each configured machine-bound panel profile instead of only the first resolved node.
 - Stop the active core process when the `run` command receives Ctrl-C or SIGTERM.
 - Normalize subscription proxy profiles and build upstream subscription URLs compatible with the Go agent.
+- Plan subscription proxy `/health` and `/sub/{site}/{token}` requests with Go-compatible header forwarding.
 
 Not implemented yet:
 

@@ -74,6 +74,7 @@
 - Command shutdown signal handling that stops the active core process before exiting.
 - Machine node resolution and subscription proxy config merging.
 - Subscription proxy profile normalization and upstream subscription URL construction.
+- Subscription proxy request routing for health checks and upstream subscription forwarding.
 - Compatibility tests around protocol parsing and endpoint construction.
 
 ## Phase 2: Runtime Control

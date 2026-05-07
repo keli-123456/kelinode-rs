@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 
 use crate::config::{SubscriptionProxyConfig, SubscriptionProxyProfile};
@@ -5,6 +6,46 @@ use crate::config::{SubscriptionProxyConfig, SubscriptionProxyProfile};
 pub const DEFAULT_HTTPS_LISTEN: &str = "0.0.0.0:443";
 pub const DEFAULT_CHALLENGE_DIR: &str = "/etc/v2node/subproxy/challenges";
 pub const DEFAULT_MAX_RESPONSE_BYTES: u64 = 10 * 1024 * 1024;
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SubscriptionProxyInboundRequest {
+    pub method: String,
+    pub path: String,
+    pub raw_query: String,
+    pub host: String,
+    pub remote_addr: String,
+    pub headers: BTreeMap<String, String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SubscriptionProxyUpstreamRequest {
+    pub url: String,
+    pub headers: BTreeMap<String, String>,
+    pub head_only: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SubscriptionProxyRoute {
+    Health,
+    Upstream(SubscriptionProxyUpstreamRequest),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SubscriptionProxyRouteError {
+    NotFound,
+    MethodNotAllowed,
+    BadGateway(String),
+}
+
+impl SubscriptionProxyRouteError {
+    pub fn status_code(&self) -> u16 {
+        match self {
+            Self::NotFound => 404,
+            Self::MethodNotAllowed => 405,
+            Self::BadGateway(_) => 502,
+        }
+    }
+}
 
 pub fn normalize_subscription_proxy_config(
     source: &SubscriptionProxyConfig,
@@ -61,6 +102,59 @@ pub fn normalize_subscription_proxy_config(
     }
 
     Ok(config)
+}
+
+pub fn plan_subscription_proxy_request(
+    profiles: &[SubscriptionProxyProfile],
+    request: &SubscriptionProxyInboundRequest,
+) -> Result<SubscriptionProxyRoute, SubscriptionProxyRouteError> {
+    let method = request.method.trim().to_ascii_uppercase();
+    if method != "GET" && method != "HEAD" {
+        return Err(SubscriptionProxyRouteError::MethodNotAllowed);
+    }
+
+    if request.path == "/health" {
+        return Ok(SubscriptionProxyRoute::Health);
+    }
+
+    let Some(rest) = request.path.strip_prefix("/sub/") else {
+        return Err(SubscriptionProxyRouteError::NotFound);
+    };
+    let Some((site_id, token_part)) = rest.split_once('/') else {
+        return Err(SubscriptionProxyRouteError::NotFound);
+    };
+    if site_id.trim().is_empty() || token_part.trim().is_empty() {
+        return Err(SubscriptionProxyRouteError::NotFound);
+    }
+    let Some(profile) = profiles
+        .iter()
+        .find(|profile| profile.site_id.eq_ignore_ascii_case(site_id))
+    else {
+        return Err(SubscriptionProxyRouteError::NotFound);
+    };
+    let token = percent_decode_path_segment(token_part)
+        .map_err(SubscriptionProxyRouteError::BadGateway)?;
+    if token.trim().is_empty() {
+        return Err(SubscriptionProxyRouteError::NotFound);
+    }
+
+    let url = build_subscription_upstream_url(profile, &token, &request.raw_query)
+        .map_err(SubscriptionProxyRouteError::BadGateway)?;
+    let mut headers = forwarded_headers(&request.headers);
+    if !request.host.trim().is_empty() {
+        headers.insert("X-Forwarded-Host".to_string(), request.host.trim().to_string());
+    }
+    if let Some(ip) = client_ip(&request.remote_addr) {
+        headers.insert("X-Forwarded-For".to_string(), ip);
+    }
+
+    Ok(SubscriptionProxyRoute::Upstream(
+        SubscriptionProxyUpstreamRequest {
+            url,
+            headers,
+            head_only: method == "HEAD",
+        },
+    ))
 }
 
 pub fn build_subscription_upstream_url(
@@ -139,11 +233,88 @@ fn percent_encode_path_segment(value: &str) -> String {
     output
 }
 
+fn percent_decode_path_segment(value: &str) -> Result<String, String> {
+    let mut output = Vec::with_capacity(value.len());
+    let bytes = value.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' {
+            if index + 2 >= bytes.len() {
+                return Err("invalid escaped token".to_string());
+            }
+            let hi = hex_value(bytes[index + 1])
+                .ok_or_else(|| "invalid escaped token".to_string())?;
+            let lo = hex_value(bytes[index + 2])
+                .ok_or_else(|| "invalid escaped token".to_string())?;
+            output.push((hi << 4) | lo);
+            index += 3;
+        } else {
+            output.push(bytes[index]);
+            index += 1;
+        }
+    }
+    String::from_utf8(output).map_err(|_| "invalid escaped token".to_string())
+}
+
+fn hex_value(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
+fn forwarded_headers(source: &BTreeMap<String, String>) -> BTreeMap<String, String> {
+    source
+        .iter()
+        .filter(|(key, _)| !is_hop_by_hop_header(key) && !key.eq_ignore_ascii_case("host"))
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect()
+}
+
+fn is_hop_by_hop_header(key: &str) -> bool {
+    matches!(
+        key.to_ascii_lowercase().as_str(),
+        "connection"
+            | "keep-alive"
+            | "proxy-authenticate"
+            | "proxy-authorization"
+            | "te"
+            | "trailer"
+            | "transfer-encoding"
+            | "upgrade"
+    )
+}
+
+fn client_ip(remote_addr: &str) -> Option<String> {
+    let text = remote_addr.trim();
+    if text.is_empty() {
+        return None;
+    }
+    if let Some(rest) = text.strip_prefix('[') {
+        if let Some((host, _)) = rest.split_once(']') {
+            return Some(host.to_string());
+        }
+    }
+    if text.matches(':').count() == 1 {
+        let (host, port) = text.rsplit_once(':')?;
+        if !host.is_empty() && port.chars().all(|character| character.is_ascii_digit()) {
+            return Some(host.to_string());
+        }
+    }
+    Some(text.to_string())
+}
+
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use super::{
         build_subscription_upstream_url, normalize_subscription_proxy_config,
-        DEFAULT_CHALLENGE_DIR, DEFAULT_HTTPS_LISTEN, DEFAULT_MAX_RESPONSE_BYTES,
+        plan_subscription_proxy_request, SubscriptionProxyInboundRequest,
+        SubscriptionProxyRoute, SubscriptionProxyRouteError, DEFAULT_CHALLENGE_DIR,
+        DEFAULT_HTTPS_LISTEN, DEFAULT_MAX_RESPONSE_BYTES,
     };
     use crate::config::{SubscriptionProxyConfig, SubscriptionProxyProfile};
 
@@ -225,5 +396,90 @@ mod tests {
             url,
             "https://panel.example.test/root/answer/land/token%20123?flag=sing-box"
         );
+    }
+
+    #[test]
+    fn plans_health_request() {
+        let route = plan_subscription_proxy_request(
+            &[],
+            &SubscriptionProxyInboundRequest {
+                method: "GET".to_string(),
+                path: "/health".to_string(),
+                ..SubscriptionProxyInboundRequest::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(route, SubscriptionProxyRoute::Health);
+    }
+
+    #[test]
+    fn plans_subscription_upstream_request_and_forwarded_headers() {
+        let mut headers = BTreeMap::new();
+        headers.insert("User-Agent".to_string(), "Hiddify".to_string());
+        headers.insert("Connection".to_string(), "close".to_string());
+        headers.insert("Host".to_string(), "proxy.example.test".to_string());
+        let route = plan_subscription_proxy_request(
+            &[SubscriptionProxyProfile {
+                site_id: "site-a".to_string(),
+                upstream_base_url: "https://panel.example.test".to_string(),
+                subscribe_path: "answer/land".to_string(),
+            }],
+            &SubscriptionProxyInboundRequest {
+                method: "HEAD".to_string(),
+                path: "/sub/site-a/token%20123".to_string(),
+                raw_query: "flag=sing-box".to_string(),
+                host: "proxy.example.test".to_string(),
+                remote_addr: "198.51.100.8:51234".to_string(),
+                headers,
+            },
+        )
+        .unwrap();
+
+        let SubscriptionProxyRoute::Upstream(upstream) = route else {
+            panic!("expected upstream route");
+        };
+        assert!(upstream.head_only);
+        assert_eq!(
+            upstream.url,
+            "https://panel.example.test/answer/land/token%20123?flag=sing-box"
+        );
+        assert_eq!(upstream.headers["User-Agent"], "Hiddify");
+        assert_eq!(upstream.headers["X-Forwarded-Host"], "proxy.example.test");
+        assert_eq!(upstream.headers["X-Forwarded-For"], "198.51.100.8");
+        assert!(!upstream.headers.contains_key("Connection"));
+        assert!(!upstream.headers.contains_key("Host"));
+    }
+
+    #[test]
+    fn rejects_unknown_site_and_methods_like_go_handler() {
+        let profile = SubscriptionProxyProfile {
+            site_id: "site-a".to_string(),
+            upstream_base_url: "https://panel.example.test".to_string(),
+            subscribe_path: "s".to_string(),
+        };
+
+        let err = plan_subscription_proxy_request(
+            &[profile.clone()],
+            &SubscriptionProxyInboundRequest {
+                method: "POST".to_string(),
+                path: "/sub/site-a/token".to_string(),
+                ..SubscriptionProxyInboundRequest::default()
+            },
+        )
+        .unwrap_err();
+        assert_eq!(err.status_code(), 405);
+
+        let err = plan_subscription_proxy_request(
+            &[profile],
+            &SubscriptionProxyInboundRequest {
+                method: "GET".to_string(),
+                path: "/sub/missing/token".to_string(),
+                ..SubscriptionProxyInboundRequest::default()
+            },
+        )
+        .unwrap_err();
+        assert_eq!(err, SubscriptionProxyRouteError::NotFound);
+        assert_eq!(err.status_code(), 404);
     }
 }
