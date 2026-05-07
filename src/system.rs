@@ -9,7 +9,14 @@ use crate::health::{ResourceSnapshot, UsageSnapshot};
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ResourceSampler {
+    cpu: Option<CpuCounters>,
     network: Option<TimedNetworkSnapshot>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct CpuCounters {
+    pub total: u64,
+    pub idle: u64,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -43,7 +50,7 @@ impl ResourceSampler {
         let (mem, swap) = read_linux_memory_snapshot().unwrap_or_default();
 
         ResourceSnapshot {
-            cpu: read_linux_loadavg_cpu_percent().unwrap_or_default(),
+            cpu: self.sample_cpu_percent(),
             mem,
             swap,
             disk: read_linux_disk_snapshot().unwrap_or_default(),
@@ -54,6 +61,26 @@ impl ResourceSampler {
             uptime: read_linux_uptime_seconds(),
             ..ResourceSnapshot::default()
         }
+    }
+
+    fn sample_cpu_percent(&mut self) -> f64 {
+        let Some(current) = read_linux_cpu_counters() else {
+            return read_linux_loadavg_cpu_percent().unwrap_or_default();
+        };
+        self.sample_cpu_percent_from_counters(current)
+    }
+
+    fn sample_cpu_percent_from_counters(&mut self, current: CpuCounters) -> f64 {
+        let mut percent = 0.0;
+        if let Some(previous) = self.cpu {
+            let total_delta = current.total.saturating_sub(previous.total);
+            let idle_delta = current.idle.saturating_sub(previous.idle);
+            if total_delta > 0 && idle_delta <= total_delta {
+                percent = ((total_delta - idle_delta) as f64 * 100.0) / total_delta as f64;
+            }
+        }
+        self.cpu = Some(current);
+        percent
     }
 
     fn sample_network_value(
@@ -136,6 +163,25 @@ pub fn parse_linux_loadavg_cpu_percent(input: &str, cpu_count: usize) -> Option<
         return None;
     }
     Some(((one_minute / cpu_count as f64) * 100.0).max(0.0))
+}
+
+pub fn parse_linux_proc_stat_cpu(input: &str) -> Option<CpuCounters> {
+    let line = input.lines().find(|line| line.trim_start().starts_with("cpu "))?;
+    let fields = line.split_whitespace().collect::<Vec<_>>();
+    if fields.len() < 5 || fields[0] != "cpu" {
+        return None;
+    }
+    let values = fields[1..]
+        .iter()
+        .map(|value| value.parse::<u64>().ok())
+        .collect::<Option<Vec<_>>>()?;
+    let total = values.iter().fold(0u64, |total, value| total.saturating_add(*value));
+    let idle = values
+        .get(3)
+        .copied()
+        .unwrap_or_default()
+        .saturating_add(values.get(4).copied().unwrap_or_default());
+    Some(CpuCounters { total, idle })
 }
 
 pub fn parse_df_portable_bytes(input: &str) -> Option<UsageSnapshot> {
@@ -258,6 +304,11 @@ fn read_linux_loadavg_cpu_percent() -> Option<f64> {
     parse_linux_loadavg_cpu_percent(&content, cpu_count)
 }
 
+fn read_linux_cpu_counters() -> Option<CpuCounters> {
+    let content = fs::read_to_string("/proc/stat").ok()?;
+    parse_linux_proc_stat_cpu(&content)
+}
+
 fn read_local_ip_snapshot() -> Option<Value> {
     let output = Command::new("hostname").arg("-I").output().ok()?;
     if !output.status.success() {
@@ -309,8 +360,8 @@ mod tests {
     use super::{
         parse_df_portable_bytes, parse_hostname_i_addresses,
         parse_linux_loadavg_cpu_percent, parse_linux_meminfo, parse_linux_net_dev,
-        parse_linux_uptime_seconds, system_info_value, NetworkCounters, NetworkSnapshot,
-        ResourceSampler,
+        parse_linux_proc_stat_cpu, parse_linux_uptime_seconds, system_info_value,
+        CpuCounters, NetworkCounters, NetworkSnapshot, ResourceSampler,
     };
 
     #[test]
@@ -344,6 +395,37 @@ SwapFree:        500 kB
         );
         assert_eq!(parse_linux_loadavg_cpu_percent("2.00", 0), None);
         assert_eq!(parse_linux_loadavg_cpu_percent("", 4), None);
+    }
+
+    #[test]
+    fn parses_proc_stat_cpu_counters() {
+        let counters = parse_linux_proc_stat_cpu(
+            r#"
+cpu  100 0 50 800 100 0 0 0 0 0
+cpu0 50 0 25 400 50 0 0 0 0 0
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(counters.total, 1050);
+        assert_eq!(counters.idle, 900);
+    }
+
+    #[test]
+    fn resource_sampler_calculates_cpu_percent_between_samples() {
+        let mut sampler = ResourceSampler::default();
+
+        let first = sampler.sample_cpu_percent_from_counters(CpuCounters {
+            total: 1000,
+            idle: 800,
+        });
+        let second = sampler.sample_cpu_percent_from_counters(CpuCounters {
+            total: 1100,
+            idle: 850,
+        });
+
+        assert_eq!(first, 0.0);
+        assert_eq!(second, 50.0);
     }
 
     #[test]

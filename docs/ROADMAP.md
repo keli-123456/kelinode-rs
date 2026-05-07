@@ -44,7 +44,7 @@
 - Per-node activity batch reporting keyed by runtime tag for multi-node machines.
 - User sync state advancement for delta and full-list responses with empty-list no-change semantics.
 - Linux root disk usage and network byte counter collection for machine status payloads.
-- Linux loadavg-based CPU percentage estimate for machine status payloads.
+- Linux `/proc/stat` CPU usage sampler with loadavg fallback for machine status payloads.
 - Local IPv4/IPv6 address snapshot collection for machine status payloads.
 - Runtime resource sampler that derives network byte rates between machine status samples.
 - Runtime loop scheduler for periodic user refresh, panel reports, and reload/upgrade signal exits.
