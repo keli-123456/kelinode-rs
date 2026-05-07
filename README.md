@@ -32,6 +32,7 @@ First cut:
 - Render PROXY protocol socket options from panel network settings.
 - Render VLESS flow and Shadowsocks cipher/method options from panel node fields.
 - Render supported VLESS encryption decryption strings instead of silently forcing `none`.
+- Render Shadowsocks HTTP obfs transport headers and TCP-only network mode.
 - Render Xray DNS, block, protocol, and custom outbound route rules from panel node routes.
 - Let runtime ticks rebuild the core plan from refreshed panel user sets before applying config.
 - Render SOCKS/HTTP account settings and AnyTLS client/padding settings from panel users.

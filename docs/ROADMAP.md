@@ -37,6 +37,7 @@
 - PROXY protocol socket option rendering from panel network settings.
 - VLESS flow and Shadowsocks cipher/method rendering from panel node fields.
 - VLESS supported encryption/decryption string rendering with unsupported values rejected.
+- Shadowsocks HTTP obfs transport headers and TCP-only network mode.
 - Xray route rendering for DNS servers, block rules, protocol rules, and custom outbound rules.
 - Runtime tick core-plan rebuild path for refreshed panel user sets.
 - SOCKS/HTTP account rendering and AnyTLS client/padding rendering from panel users.

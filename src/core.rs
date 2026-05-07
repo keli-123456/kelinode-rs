@@ -696,7 +696,14 @@ fn render_xray_shadowsocks_client(inbound: &InboundPlan, user: &InboundUserPlan)
 fn render_xray_shadowsocks_settings(inbound: &InboundPlan, clients: Vec<Value>) -> Value {
     let mut settings = Map::new();
     settings.insert("clients".to_string(), Value::Array(clients));
-    settings.insert("network".to_string(), json!("tcp,udp"));
+    settings.insert(
+        "network".to_string(),
+        if shadowsocks_has_http_obfs(inbound) {
+            json!("tcp")
+        } else {
+            json!("tcp,udp")
+        },
+    );
     if !inbound.cipher.trim().is_empty() {
         settings.insert("method".to_string(), json!(&inbound.cipher));
     }
@@ -819,6 +826,10 @@ fn render_xray_stream_settings(inbound: &InboundPlan) -> Map<String, Value> {
             stream.insert(key.to_string(), value);
         }
     }
+    if let Some(tcp_settings) = render_shadowsocks_tcp_stream_settings(inbound) {
+        stream.insert("network".to_string(), json!("tcp"));
+        stream.insert("tcpSettings".to_string(), tcp_settings);
+    }
     if accepts_proxy_protocol(&inbound.network_settings) {
         stream.insert(
             "sockopt".to_string(),
@@ -910,11 +921,65 @@ fn render_xray_network_settings(
     Some((key, settings.clone()))
 }
 
+fn render_shadowsocks_tcp_stream_settings(inbound: &InboundPlan) -> Option<Value> {
+    if inbound.protocol != "shadowsocks" {
+        return None;
+    }
+
+    let accept_proxy_protocol = accepts_proxy_protocol(&inbound.network_settings);
+    let path = network_setting_string(&inbound.network_settings, &["path"]);
+    let host = network_setting_string(&inbound.network_settings, &["Host", "host"]);
+    if !accept_proxy_protocol && path.is_none() && host.is_none() {
+        return None;
+    }
+
+    let mut settings = Map::new();
+    if accept_proxy_protocol {
+        settings.insert("acceptProxyProtocol".to_string(), json!(true));
+    }
+    if path.is_some() || host.is_some() {
+        let path = path.unwrap_or_else(|| "/".to_string());
+        let mut request = Map::new();
+        request.insert("path".to_string(), json!([path]));
+        if let Some(host) = host {
+            request.insert(
+                "headers".to_string(),
+                json!({
+                    "Host": [host]
+                }),
+            );
+        }
+        settings.insert(
+            "header".to_string(),
+            json!({
+                "type": "http",
+                "request": request
+            }),
+        );
+    }
+
+    Some(Value::Object(settings))
+}
+
+fn shadowsocks_has_http_obfs(inbound: &InboundPlan) -> bool {
+    inbound.protocol == "shadowsocks"
+        && (network_setting_string(&inbound.network_settings, &["path"]).is_some()
+            || network_setting_string(&inbound.network_settings, &["Host", "host"]).is_some())
+}
+
 fn accepts_proxy_protocol(settings: &Value) -> bool {
     settings
         .get("acceptProxyProtocol")
         .and_then(Value::as_bool)
         .unwrap_or(false)
+}
+
+fn network_setting_string(settings: &Value, keys: &[&str]) -> Option<String> {
+    keys.iter()
+        .find_map(|key| settings.get(*key).and_then(Value::as_str))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
 }
 
 fn render_xray_tls_settings(inbound: &InboundPlan) -> Value {
@@ -1349,6 +1414,39 @@ mod tests {
             "MDEyMzQ1Njc4OWFiY2RlZg=="
         );
         assert!(config["inbounds"][0]["settings"]["clients"][0]["method"].is_null());
+    }
+
+    #[test]
+    fn renders_shadowsocks_http_obfs_as_tcp_header() {
+        let mut node = test_node("shadowsocks", 27, "");
+        node.common.network_settings = json!({
+            "path": "/ss",
+            "Host": "edge.example.test"
+        });
+        let plan = CorePlan::from_nodes(
+            CoreKind::Xray,
+            PathBuf::from("/srv/v2node/config.json"),
+            &[node],
+        )
+        .unwrap();
+
+        let config = render_core_config(&plan).unwrap();
+
+        assert_eq!(config["inbounds"][0]["settings"]["network"], "tcp");
+        assert_eq!(config["inbounds"][0]["streamSettings"]["network"], "tcp");
+        assert_eq!(
+            config["inbounds"][0]["streamSettings"]["tcpSettings"]["header"]["type"],
+            "http"
+        );
+        assert_eq!(
+            config["inbounds"][0]["streamSettings"]["tcpSettings"]["header"]["request"]["path"][0],
+            "/ss"
+        );
+        assert_eq!(
+            config["inbounds"][0]["streamSettings"]["tcpSettings"]["header"]["request"]
+                ["headers"]["Host"][0],
+            "edge.example.test"
+        );
     }
 
     #[test]
