@@ -83,6 +83,7 @@
 - Subscription proxy certificate status preparation through an injectable file-write executor.
 - Subscription proxy planned file writer with parent directory creation and Unix mode handling.
 - Runtime subscription proxy status mapping into machine health payloads.
+- Stable subscription proxy fingerprint generation for reload decisions.
 - Compatibility tests around protocol parsing and endpoint construction.
 
 ## Phase 2: Runtime Control

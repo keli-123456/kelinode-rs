@@ -504,6 +504,32 @@ pub fn write_subscription_proxy_file(write: &SubscriptionProxyFileWrite) -> Resu
     Ok(())
 }
 
+pub fn subscription_proxy_fingerprint(config: &SubscriptionProxyConfig) -> String {
+    let mut parts = vec![
+        config.https_listen.trim().to_string(),
+        config.http_listen.trim().to_string(),
+        config.cert_file.trim().to_string(),
+        config.key_file.trim().to_string(),
+        config.certificate_domain.trim().to_string(),
+        config.challenge_dir.trim().to_string(),
+        config.zerossl.certificate_id.trim().to_string(),
+        config.zerossl.validation_path.trim().to_string(),
+        config.zerossl.validation_content.trim().to_string(),
+        config.zerossl.certificate_pem.trim().to_string(),
+        config.zerossl.ca_bundle_pem.trim().to_string(),
+        config.allow_http_fallback.to_string(),
+        config.max_response_bytes.to_string(),
+    ];
+    let mut profiles = config.profiles.clone();
+    profiles.sort_by(|left, right| left.site_id.cmp(&right.site_id));
+    for profile in profiles {
+        parts.push(profile.site_id.trim().to_string());
+        parts.push(profile.upstream_base_url.trim_end_matches('/').to_string());
+        parts.push(profile.subscribe_path.trim_matches('/').to_string());
+    }
+    parts.join("\0")
+}
+
 fn first_non_empty(value: &str, fallback: &str) -> String {
     if value.is_empty() {
         fallback.to_string()
@@ -698,9 +724,9 @@ mod tests {
         plan_subscription_proxy_validation_file, prepare_subscription_proxy_certificate_status,
         prepare_subscription_proxy_certificate_status_with_file_writes,
         resolve_subscription_certificate_domain, subscription_proxy_certificate_owner_site_id,
-        write_subscription_proxy_file, SubscriptionProxyFileWrite, SubscriptionProxyInboundRequest,
-        SubscriptionProxyRoute, SubscriptionProxyRouteError, SubscriptionProxyServeMode,
-        SubscriptionProxyUpstreamResponse,
+        subscription_proxy_fingerprint, write_subscription_proxy_file, SubscriptionProxyFileWrite,
+        SubscriptionProxyInboundRequest, SubscriptionProxyRoute, SubscriptionProxyRouteError,
+        SubscriptionProxyServeMode, SubscriptionProxyUpstreamResponse,
         DEFAULT_CHALLENGE_DIR, DEFAULT_HTTPS_LISTEN, DEFAULT_MAX_RESPONSE_BYTES,
     };
     use crate::config::{
@@ -1053,6 +1079,45 @@ mod tests {
         assert_eq!(content, "challenge-token\n");
 
         let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn subscription_proxy_fingerprint_is_stable_for_profile_order() {
+        let mut left = SubscriptionProxyConfig {
+            https_listen: "0.0.0.0:443".to_string(),
+            cert_file: "/etc/v2node/fullchain.pem".to_string(),
+            zerossl: SubscriptionProxyZeroSslConfig {
+                certificate_id: "cert-1".to_string(),
+                validation_content: "challenge".to_string(),
+                ..SubscriptionProxyZeroSslConfig::default()
+            },
+            profiles: vec![
+                SubscriptionProxyProfile {
+                    site_id: "site-b".to_string(),
+                    upstream_base_url: "https://b.example.test/".to_string(),
+                    subscribe_path: "/s/".to_string(),
+                },
+                SubscriptionProxyProfile {
+                    site_id: "site-a".to_string(),
+                    upstream_base_url: "https://a.example.test".to_string(),
+                    subscribe_path: "answer/land".to_string(),
+                },
+            ],
+            ..SubscriptionProxyConfig::default()
+        };
+        let mut right = left.clone();
+        right.profiles.reverse();
+
+        assert_eq!(
+            subscription_proxy_fingerprint(&left),
+            subscription_proxy_fingerprint(&right)
+        );
+
+        left.zerossl.certificate_pem = "new cert".to_string();
+        assert_ne!(
+            subscription_proxy_fingerprint(&left),
+            subscription_proxy_fingerprint(&right)
+        );
     }
 
     #[test]

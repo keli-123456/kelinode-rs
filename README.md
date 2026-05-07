@@ -77,6 +77,7 @@ First cut:
 - Prepare subscription proxy certificate status through an injectable file-write executor.
 - Write planned subscription proxy files with parent directory creation and Unix mode handling.
 - Map runtime subscription proxy status into the machine health payload.
+- Generate stable subscription proxy fingerprints for reload decisions.
 
 Not implemented yet:
 
