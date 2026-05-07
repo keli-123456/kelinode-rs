@@ -1,6 +1,8 @@
 use std::env;
 use std::fs;
+use std::net::{Ipv4Addr, Ipv6Addr};
 use std::process::Command;
+use std::str::FromStr;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::{json, Value};
@@ -257,6 +259,8 @@ pub fn parse_hostname_i_addresses(input: &str) -> Option<Value> {
     let mut local = Vec::new();
     let mut local_ipv4 = Vec::new();
     let mut local_ipv6 = Vec::new();
+    let mut public_ipv4 = String::new();
+    let mut public_ipv6 = String::new();
 
     for value in input.split_whitespace().map(str::trim) {
         if value.is_empty() {
@@ -265,8 +269,14 @@ pub fn parse_hostname_i_addresses(input: &str) -> Option<Value> {
         local.push(value.to_string());
         if value.contains(':') {
             local_ipv6.push(value.to_string());
+            if public_ipv6.is_empty() && is_public_ipv6(value) {
+                public_ipv6 = value.to_string();
+            }
         } else {
             local_ipv4.push(value.to_string());
+            if public_ipv4.is_empty() && is_public_ipv4(value) {
+                public_ipv4 = value.to_string();
+            }
         }
     }
 
@@ -276,9 +286,50 @@ pub fn parse_hostname_i_addresses(input: &str) -> Option<Value> {
         Some(json!({
             "local": local,
             "local_ipv4": local_ipv4,
-            "local_ipv6": local_ipv6
+            "local_ipv6": local_ipv6,
+            "public_ipv4": public_ipv4,
+            "public_ipv6": public_ipv6
         }))
     }
+}
+
+fn is_public_ipv4(value: &str) -> bool {
+    let Ok(addr) = Ipv4Addr::from_str(value) else {
+        return false;
+    };
+    let octets = addr.octets();
+    if octets[0] == 0
+        || octets[0] == 10
+        || octets[0] == 127
+        || octets[0] >= 224
+        || (octets[0] == 100 && (64..=127).contains(&octets[1]))
+        || (octets[0] == 169 && octets[1] == 254)
+        || (octets[0] == 172 && (16..=31).contains(&octets[1]))
+        || (octets[0] == 192 && octets[1] == 168)
+        || (octets[0] == 192 && octets[1] == 0 && octets[2] == 2)
+        || (octets[0] == 198 && octets[1] == 51 && octets[2] == 100)
+        || (octets[0] == 203 && octets[1] == 0 && octets[2] == 113)
+    {
+        return false;
+    }
+    true
+}
+
+fn is_public_ipv6(value: &str) -> bool {
+    let Ok(addr) = Ipv6Addr::from_str(value) else {
+        return false;
+    };
+    let segments = addr.segments();
+    let first = segments[0];
+    if addr.is_loopback()
+        || addr.is_unspecified()
+        || (first & 0xffc0) == 0xfe80
+        || (first & 0xfe00) == 0xfc00
+        || (first & 0xff00) == 0xff00
+    {
+        return false;
+    }
+    (first & 0xe000) == 0x2000
 }
 
 fn read_linux_memory_snapshot() -> Option<(UsageSnapshot, UsageSnapshot)> {
@@ -496,11 +547,15 @@ Inter-|   Receive                                                |  Transmit
 
     #[test]
     fn parses_hostname_i_addresses_by_family() {
-        let value = parse_hostname_i_addresses("192.0.2.10 2001:db8::10 ").unwrap();
+        let value =
+            parse_hostname_i_addresses("192.168.1.10 2.56.116.39 fe80::1 2001:4860::8888 ")
+                .unwrap();
 
-        assert_eq!(value["local"][0], json!("192.0.2.10"));
-        assert_eq!(value["local_ipv4"][0], json!("192.0.2.10"));
-        assert_eq!(value["local_ipv6"][0], json!("2001:db8::10"));
+        assert_eq!(value["local"][0], json!("192.168.1.10"));
+        assert_eq!(value["local_ipv4"][0], json!("192.168.1.10"));
+        assert_eq!(value["local_ipv6"][0], json!("fe80::1"));
+        assert_eq!(value["public_ipv4"], json!("2.56.116.39"));
+        assert_eq!(value["public_ipv6"], json!("2001:4860::8888"));
     }
 
     #[test]

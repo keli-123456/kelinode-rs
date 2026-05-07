@@ -39,7 +39,7 @@ First cut:
 - Advance cached user sync state from delta or full-list responses with Go-compatible empty-list semantics.
 - Collect Linux root disk usage and network byte counters for machine status payloads.
 - Compute Linux CPU usage from `/proc/stat` samples, with `/proc/loadavg` as a fallback.
-- Collect local IPv4/IPv6 addresses for machine status payloads without external network calls.
+- Collect local and public IPv4/IPv6 candidates for machine status payloads without external network calls.
 - Compute network byte rates across runtime loop samples for machine status payloads.
 - Add a runtime loop scheduler for periodic user refresh, panel reports, and reload/upgrade signal exits.
 - Add an async runtime loop variant for panel-backed user refresh and report ticks.
@@ -51,7 +51,7 @@ First cut:
 Not implemented yet:
 
 - Realtime invalidation workers.
-- Full host metric collection for public IP fields.
+- External public IP discovery when local interface addresses are not enough.
 - Complete per-protocol user options for bandwidth limits, device-limit enforcement, and advanced protocol-specific credentials.
 - Realtime websocket workers.
 - Download verification and rollback around self-upgrade execution.
