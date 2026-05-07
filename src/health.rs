@@ -6,6 +6,7 @@ use crate::node::NodeFailure;
 use crate::port_forward::{HysteriaPortForwardStatus, HysteriaPortForwardToolStatus};
 use crate::process::{ProcessState, ProcessStatus};
 use crate::runtime::{RuntimeBootstrapPlan, RuntimeMode};
+use crate::subscription_proxy::SubscriptionProxyStatus;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct UsageSnapshot {
@@ -30,6 +31,7 @@ pub struct HealthReportInput {
     pub version: String,
     pub resources: ResourceSnapshot,
     pub core: Option<ProcessStatus>,
+    pub subscription_proxy: Option<SubscriptionProxyStatus>,
     pub upgrade: Option<Value>,
 }
 
@@ -39,6 +41,7 @@ pub fn build_machine_status_payload(
     input: HealthReportInput,
 ) -> MachineStatusPayload {
     let mut payload = MachineStatusPayload::new(machine_id);
+    let subscription_proxy = input.subscription_proxy.as_ref();
     let resources = input.resources;
 
     payload.insert_status("cpu", json!(resources.cpu));
@@ -64,7 +67,7 @@ pub fn build_machine_status_payload(
         json!(node_failure_payloads(&plan.node_failures, machine_id)),
     );
 
-    let agent = agent_value(&plan.resolved.agent);
+    let agent = agent_value(&plan.resolved.agent, subscription_proxy);
     if !agent.is_null() {
         payload.insert_status("agent", agent);
     }
@@ -189,7 +192,16 @@ fn hy2_tool_value(status: &HysteriaPortForwardToolStatus) -> Value {
     })
 }
 
-fn agent_value(agent: &AgentConfig) -> Value {
+fn agent_value(
+    agent: &AgentConfig,
+    subscription_proxy: Option<&SubscriptionProxyStatus>,
+) -> Value {
+    if let Some(status) = subscription_proxy {
+        return json!({
+            "subscription_proxy": subscription_proxy_status_value(status)
+        });
+    }
+
     let proxy = &agent.subscription_proxy;
     if !proxy.enabled {
         return Value::Null;
@@ -217,6 +229,25 @@ fn agent_value(agent: &AgentConfig) -> Value {
             "subscribe_path": &proxy.subscribe_path,
             "profiles": profiles
         }
+    })
+}
+
+fn subscription_proxy_status_value(status: &SubscriptionProxyStatus) -> Value {
+    json!({
+        "status": &status.status,
+        "enabled": status.enabled,
+        "running": status.running,
+        "mode": &status.mode,
+        "https_listen": &status.https_listen,
+        "profiles": status.profiles,
+        "certificate_domain": &status.certificate_domain,
+        "certificate_owner_site_id": &status.certificate_owner_site_id,
+        "certificate_id": &status.certificate_id,
+        "need_certificate": status.need_certificate,
+        "csr_pem": &status.csr_pem,
+        "validation_ready": status.validation_ready,
+        "cert_not_after": &status.cert_not_after,
+        "last_error": &status.last_error
     })
 }
 
@@ -248,6 +279,7 @@ mod tests {
     use crate::panel::types::{CommonNode, NodeInfo};
     use crate::process::ProcessStatus;
     use crate::runtime::build_runtime_bootstrap_plan;
+    use crate::subscription_proxy::SubscriptionProxyStatus;
 
     use super::{
         build_machine_status_payload, node_failure_payloads, HealthReportInput,
@@ -288,6 +320,7 @@ mod tests {
                     ..ResourceSnapshot::default()
                 },
                 core: Some(ProcessStatus::running("core:xray", 42)),
+                subscription_proxy: None,
                 upgrade: None,
             },
         );
@@ -341,6 +374,54 @@ mod tests {
             payload.status["agent"]["subscription_proxy"]["profiles"][0]["site_id"],
             json!("site-a")
         );
+    }
+
+    #[test]
+    fn runtime_subscription_proxy_status_overrides_config_snapshot() {
+        let resolved = ResolvedConfig {
+            kernel: Default::default(),
+            realtime: Default::default(),
+            machine: ResolvedMachineConfig {
+                enabled: true,
+                continue_on_error: true,
+                profiles: Vec::new(),
+            },
+            agent: AgentConfig::default(),
+            nodes: Vec::new(),
+        };
+        let plan = build_runtime_bootstrap_plan(resolved, Vec::new(), Vec::new()).unwrap();
+
+        let payload = build_machine_status_payload(
+            9,
+            &plan,
+            HealthReportInput {
+                subscription_proxy: Some(SubscriptionProxyStatus {
+                    status: "running".to_string(),
+                    enabled: true,
+                    running: true,
+                    mode: "https".to_string(),
+                    https_listen: "0.0.0.0:443".to_string(),
+                    profiles: 2,
+                    certificate_domain: "proxy.example.test".to_string(),
+                    certificate_owner_site_id: "site-a".to_string(),
+                    certificate_id: "cert-1".to_string(),
+                    need_certificate: true,
+                    csr_pem: "csr".to_string(),
+                    validation_ready: true,
+                    cert_not_after: "2026-06-01T00:00:00Z".to_string(),
+                    last_error: String::new(),
+                }),
+                ..HealthReportInput::default()
+            },
+        );
+
+        let proxy = &payload.status["agent"]["subscription_proxy"];
+        assert_eq!(proxy["status"], json!("running"));
+        assert_eq!(proxy["mode"], json!("https"));
+        assert_eq!(proxy["profiles"], json!(2));
+        assert_eq!(proxy["certificate_owner_site_id"], json!("site-a"));
+        assert_eq!(proxy["need_certificate"], json!(true));
+        assert_eq!(proxy["validation_ready"], json!(true));
     }
 
     #[test]

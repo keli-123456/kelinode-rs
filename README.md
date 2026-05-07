@@ -76,6 +76,7 @@ First cut:
 - Plan ZeroSSL validation-file and fullchain certificate writes without touching the filesystem.
 - Prepare subscription proxy certificate status through an injectable file-write executor.
 - Write planned subscription proxy files with parent directory creation and Unix mode handling.
+- Map runtime subscription proxy status into the machine health payload.
 
 Not implemented yet:
 
