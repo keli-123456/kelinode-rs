@@ -15,6 +15,7 @@ pub fn collect_resource_snapshot() -> ResourceSnapshot {
         swap,
         disk: read_linux_disk_snapshot().unwrap_or_default(),
         net: read_linux_net_snapshot(),
+        ip: read_local_ip_snapshot(),
         system: Some(system_info_value()),
         uptime: read_linux_uptime_seconds(),
         ..ResourceSnapshot::default()
@@ -126,6 +127,34 @@ pub fn parse_linux_net_dev(input: &str) -> Option<Value> {
     }
 }
 
+pub fn parse_hostname_i_addresses(input: &str) -> Option<Value> {
+    let mut local = Vec::new();
+    let mut local_ipv4 = Vec::new();
+    let mut local_ipv6 = Vec::new();
+
+    for value in input.split_whitespace().map(str::trim) {
+        if value.is_empty() {
+            continue;
+        }
+        local.push(value.to_string());
+        if value.contains(':') {
+            local_ipv6.push(value.to_string());
+        } else {
+            local_ipv4.push(value.to_string());
+        }
+    }
+
+    if local.is_empty() {
+        None
+    } else {
+        Some(json!({
+            "local": local,
+            "local_ipv4": local_ipv4,
+            "local_ipv6": local_ipv6
+        }))
+    }
+}
+
 fn read_linux_memory_snapshot() -> Option<(UsageSnapshot, UsageSnapshot)> {
     let content = fs::read_to_string("/proc/meminfo").ok()?;
     Some(parse_linux_meminfo(&content))
@@ -147,6 +176,15 @@ fn read_linux_loadavg_cpu_percent() -> Option<f64> {
     let content = fs::read_to_string("/proc/loadavg").ok()?;
     let cpu_count = std::thread::available_parallelism().ok()?.get();
     parse_linux_loadavg_cpu_percent(&content, cpu_count)
+}
+
+fn read_local_ip_snapshot() -> Option<Value> {
+    let output = Command::new("hostname").arg("-I").output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let content = String::from_utf8(output.stdout).ok()?;
+    parse_hostname_i_addresses(&content)
 }
 
 fn read_linux_net_snapshot() -> Option<Value> {
@@ -182,8 +220,9 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        parse_df_portable_bytes, parse_linux_loadavg_cpu_percent, parse_linux_meminfo,
-        parse_linux_net_dev, parse_linux_uptime_seconds, system_info_value,
+        parse_df_portable_bytes, parse_hostname_i_addresses, parse_linux_loadavg_cpu_percent,
+        parse_linux_meminfo, parse_linux_net_dev, parse_linux_uptime_seconds,
+        system_info_value,
     };
 
     #[test]
@@ -249,6 +288,15 @@ Inter-|   Receive                                                |  Transmit
         assert_eq!(value["rx_bytes"], json!(4000));
         assert_eq!(value["tx_bytes"], json!(6000));
         assert_eq!(value["interfaces"][0]["name"], json!("eth0"));
+    }
+
+    #[test]
+    fn parses_hostname_i_addresses_by_family() {
+        let value = parse_hostname_i_addresses("192.0.2.10 2001:db8::10 ").unwrap();
+
+        assert_eq!(value["local"][0], json!("192.0.2.10"));
+        assert_eq!(value["local_ipv4"][0], json!("192.0.2.10"));
+        assert_eq!(value["local_ipv6"][0], json!("2001:db8::10"));
     }
 
     #[test]
