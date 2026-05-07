@@ -21,6 +21,7 @@ First cut:
 - Apply a runtime plan by writing core config, reconciling HY2 forwarding state, starting/reloading core, and building the machine status payload.
 - Report machine status to `keliboard` and normalize returned reload/upgrade commands for the runtime loop.
 - Run a single runtime tick that applies local state, optionally reports to the panel, and returns a continue/reload/upgrade signal.
+- Track machine self-upgrade status and launch the existing installer through a systemd-run or detached-shell boundary.
 
 Not implemented yet:
 
@@ -28,7 +29,7 @@ Not implemented yet:
 - Real host metric collection for CPU, memory, disk, network, IP, and system fields.
 - User-authenticated external core config generation.
 - Realtime websocket workers.
-- Machine self-upgrade execution.
+- Download verification and rollback around self-upgrade execution.
 - Subscription reverse proxy.
 
 ## Compatibility Targets
