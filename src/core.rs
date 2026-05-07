@@ -446,12 +446,30 @@ fn render_xray_config(plan: &CorePlan) -> Value {
         "outbounds".to_string(),
         Value::Array(render_xray_outbounds(plan)),
     );
+    config.insert("stats".to_string(), json!({}));
+    config.insert("policy".to_string(), render_xray_policy());
     config.insert("routing".to_string(), render_xray_routing(plan));
     if let Some(dns) = render_xray_dns(plan) {
         config.insert("dns".to_string(), dns);
     }
 
     Value::Object(config)
+}
+
+fn render_xray_policy() -> Value {
+    json!({
+        "levels": {
+            "0": {
+                "statsUserUplink": true,
+                "statsUserDownlink": true,
+                "handshake": 4,
+                "connIdle": 120,
+                "uplinkOnly": 2,
+                "downlinkOnly": 4,
+                "bufferSize": 128
+            }
+        }
+    })
 }
 
 fn render_xray_outbounds(plan: &CorePlan) -> Vec<Value> {
@@ -1222,6 +1240,24 @@ mod tests {
         assert_eq!(config["dns"]["queryStrategy"], "UseIPv4");
         assert_eq!(config["dns"]["servers"][0]["address"], "1.1.1.1");
         assert_eq!(config["dns"]["servers"][1]["address"], "8.8.8.8");
+    }
+
+    #[test]
+    fn renders_stats_policy_for_user_traffic() {
+        let node = test_node("vless", 31, "");
+        let plan = CorePlan::from_nodes(
+            CoreKind::Xray,
+            PathBuf::from("/srv/v2node/config.json"),
+            &[node],
+        )
+        .unwrap();
+
+        let config = render_core_config(&plan).unwrap();
+
+        assert!(config["stats"].is_object());
+        assert_eq!(config["policy"]["levels"]["0"]["statsUserUplink"], true);
+        assert_eq!(config["policy"]["levels"]["0"]["statsUserDownlink"], true);
+        assert_eq!(config["policy"]["levels"]["0"]["connIdle"], 120);
     }
 
     #[test]
