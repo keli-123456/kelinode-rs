@@ -35,6 +35,7 @@ pub struct RuntimeLoopExit {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RuntimeLoopExitReason {
     MaxTicks,
+    Shutdown,
     Signal(RuntimeLoopSignal),
 }
 

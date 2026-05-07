@@ -52,6 +52,7 @@
 - Panel-backed runtime loop adapter that refreshes users by node tag before applying ticks.
 - Runtime `run` command that rebuilds bootstrap state after reload signals and reports upgrade state after upgrade commands.
 - Multi-panel machine status reporting for machine-bound deployments with more than one site profile.
+- Command shutdown signal handling that stops the active core process before exiting.
 - Machine node resolution and subscription proxy config merging.
 - Compatibility tests around protocol parsing and endpoint construction.
 

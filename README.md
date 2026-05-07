@@ -46,10 +46,11 @@ First cut:
 - Add a panel-backed runtime loop adapter that reloads users by node tag before applying ticks.
 - Add a `run` command that keeps the runtime loop alive across reloads and carries upgrade status into machine reports.
 - Report machine status to each configured machine-bound panel profile instead of only the first resolved node.
+- Stop the active core process when the `run` command receives Ctrl-C or SIGTERM.
 
 Not implemented yet:
 
-- Realtime invalidation workers and graceful shutdown handling.
+- Realtime invalidation workers.
 - Full host metric collection for public IP fields and precise CPU sampling.
 - Complete per-protocol user options for bandwidth limits, device-limit enforcement, and advanced protocol-specific credentials.
 - Realtime websocket workers.

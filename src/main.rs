@@ -5,7 +5,7 @@ use kelinode_rs::control::{handle_runtime_signal, RuntimeControlOptions, Runtime
 use kelinode_rs::panel::client::{PanelClient, PanelClientOptions};
 use kelinode_rs::panel::contract::NODE_API_CONTRACT_VERSION;
 use kelinode_rs::port_forward::SystemPortForwardExecutor;
-use kelinode_rs::process::SystemProcessSupervisor;
+use kelinode_rs::process::{core_process_spec, ProcessSupervisor, SystemProcessSupervisor};
 use kelinode_rs::runner::{
     run_runtime_loop_async, PanelRuntimeLoop, RuntimeLoopExit, RuntimeLoopExitReason,
     RuntimeLoopOptions,
@@ -88,6 +88,7 @@ async fn run_agent(path: &str) -> Result<(), String> {
 
         match exit.reason {
             RuntimeLoopExitReason::MaxTicks => return Ok(()),
+            RuntimeLoopExitReason::Shutdown => return Ok(()),
             RuntimeLoopExitReason::Signal(RuntimeLoopSignal::Continue) => {}
             RuntimeLoopExitReason::Signal(RuntimeLoopSignal::Reload) => {
                 println!("runtime reload requested; rebuilding bootstrap plan");
@@ -127,7 +128,60 @@ async fn run_agent_once(
     .with_panel_clients(panel_clients)
     .with_health_refresh(agent_version())
     .with_upgrade_status(upgrade_status);
-    run_runtime_loop_async(&mut runner, options).await
+    let mut shutdown = false;
+    let result = tokio::select! {
+        result = run_runtime_loop_async(&mut runner, options) => result,
+        signal = wait_shutdown_signal() => {
+            signal?;
+            shutdown = true;
+            Ok(RuntimeLoopExit {
+                ticks: 0,
+                reason: RuntimeLoopExitReason::Shutdown,
+            })
+        }
+    };
+    if shutdown {
+        stop_core_for_plan(&mut runner)?;
+    }
+    result
+}
+
+fn stop_core_for_plan<P, F>(runner: &mut PanelRuntimeLoop<'_, P, F>) -> Result<(), String>
+where
+    P: ProcessSupervisor,
+    F: kelinode_rs::port_forward::PortForwardExecutor,
+{
+    let Some(core_plan) = runner.plan.core_plan.as_ref() else {
+        return Ok(());
+    };
+    let spec = core_process_spec(core_plan, None).map_err(|err| err.message)?;
+    runner
+        .process_supervisor
+        .stop(&spec.name)
+        .map_err(|err| err.message)?;
+    Ok(())
+}
+
+async fn wait_shutdown_signal() -> Result<(), String> {
+    #[cfg(unix)]
+    {
+        let mut terminate =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                .map_err(|err| format!("register SIGTERM handler: {err}"))?;
+        tokio::select! {
+            result = tokio::signal::ctrl_c() => {
+                result.map_err(|err| format!("listen for Ctrl-C: {err}"))
+            }
+            _ = terminate.recv() => Ok(()),
+        }
+    }
+
+    #[cfg(not(unix))]
+    {
+        tokio::signal::ctrl_c()
+            .await
+            .map_err(|err| format!("listen for Ctrl-C: {err}"))
+    }
 }
 
 fn machine_panel_clients(plan: &RuntimeBootstrapPlan) -> Result<Vec<PanelClient>, String> {
