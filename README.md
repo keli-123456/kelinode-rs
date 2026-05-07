@@ -32,6 +32,7 @@ First cut:
 - Render supported VLESS encryption decryption strings instead of silently forcing `none`.
 - Render Xray DNS, block, protocol, and custom outbound route rules from panel node routes.
 - Let runtime ticks rebuild the core plan from refreshed panel user sets before applying config.
+- Render SOCKS/HTTP account settings and AnyTLS client/padding settings from panel users.
 
 Not implemented yet:
 

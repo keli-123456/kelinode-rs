@@ -38,6 +38,7 @@
 - VLESS supported encryption/decryption string rendering with unsupported values rejected.
 - Xray route rendering for DNS servers, block rules, protocol rules, and custom outbound rules.
 - Runtime tick core-plan rebuild path for refreshed panel user sets.
+- SOCKS/HTTP account rendering and AnyTLS client/padding rendering from panel users.
 - Machine node resolution and subscription proxy config merging.
 - Compatibility tests around protocol parsing and endpoint construction.
 

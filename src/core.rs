@@ -34,6 +34,7 @@ pub struct InboundPlan {
     pub flow: String,
     pub cipher: String,
     pub vless_decryption: String,
+    pub padding_scheme: Vec<String>,
     pub alpn: Vec<String>,
     pub fallback_to_ipv4: bool,
     pub cert_file: String,
@@ -251,6 +252,13 @@ pub fn build_inbound_plan_with_users(
         flow: node.common.flow.trim().to_string(),
         cipher: node.common.cipher.trim().to_string(),
         vless_decryption: resolve_vless_decryption(node)?,
+        padding_scheme: node
+            .common
+            .padding_scheme
+            .iter()
+            .map(|item| item.trim().to_string())
+            .filter(|item| !item.is_empty())
+            .collect(),
         alpn: resolve_tls_alpn(node),
         fallback_to_ipv4: should_fallback_node_listen_ip(&node.common.listen_ip),
         cert_file: cert.map(cert_file).unwrap_or_default(),
@@ -597,6 +605,9 @@ fn render_xray_inbound_settings(inbound: &InboundPlan) -> Value {
             "clients": clients
         }),
         "shadowsocks" => render_xray_shadowsocks_settings(inbound, clients),
+        "socks" => render_xray_socks_settings(inbound),
+        "http" => render_xray_http_settings(inbound),
+        "anytls" => render_xray_anytls_settings(inbound, clients),
         "hysteria" | "tuic" => json!({
             "clients": clients
         }),
@@ -618,7 +629,7 @@ fn render_xray_clients(inbound: &InboundPlan) -> Vec<Value> {
         .iter()
         .map(|user| match inbound.protocol.as_str() {
             "shadowsocks" => render_xray_shadowsocks_client(inbound, user),
-            "trojan" | "hysteria" | "tuic" => json!({
+            "trojan" | "hysteria" | "tuic" | "anytls" => json!({
                 "password": &user.uuid,
                 "email": &user.email
             }),
@@ -666,6 +677,51 @@ fn render_xray_shadowsocks_settings(inbound: &InboundPlan, clients: Vec<Value>) 
     settings.insert("network".to_string(), json!("tcp,udp"));
     if !inbound.cipher.trim().is_empty() {
         settings.insert("method".to_string(), json!(&inbound.cipher));
+    }
+    Value::Object(settings)
+}
+
+fn render_xray_socks_settings(inbound: &InboundPlan) -> Value {
+    let accounts = inbound
+        .users
+        .iter()
+        .map(|user| {
+            json!({
+                "user": &user.uuid,
+                "pass": &user.uuid
+            })
+        })
+        .collect::<Vec<_>>();
+
+    json!({
+        "auth": "password",
+        "accounts": accounts,
+        "udp": true
+    })
+}
+
+fn render_xray_http_settings(inbound: &InboundPlan) -> Value {
+    let accounts = inbound
+        .users
+        .iter()
+        .map(|user| {
+            json!({
+                "user": &user.uuid,
+                "pass": &user.uuid
+            })
+        })
+        .collect::<Vec<_>>();
+
+    json!({
+        "accounts": accounts
+    })
+}
+
+fn render_xray_anytls_settings(inbound: &InboundPlan, clients: Vec<Value>) -> Value {
+    let mut settings = Map::new();
+    settings.insert("clients".to_string(), Value::Array(clients));
+    if !inbound.padding_scheme.is_empty() {
+        settings.insert("paddingScheme".to_string(), json!(&inbound.padding_scheme));
     }
     Value::Object(settings)
 }
@@ -1106,6 +1162,111 @@ mod tests {
         assert_eq!(
             config["inbounds"][0]["settings"]["clients"][0]["method"],
             "aes-128-gcm"
+        );
+    }
+
+    #[test]
+    fn renders_socks_accounts_from_users() {
+        let node = test_node("socks", 20, "");
+        let tag = node.tag.clone();
+        let mut users = std::collections::BTreeMap::new();
+        users.insert(
+            tag,
+            vec![UserInfo {
+                id: 20,
+                uuid: "socks-secret".to_string(),
+                speed_limit: 0,
+                device_limit: 0,
+            }],
+        );
+        let plan = CorePlan::from_nodes_with_users(
+            CoreKind::Xray,
+            PathBuf::from("/srv/v2node/config.json"),
+            &[node],
+            &users,
+        )
+        .unwrap();
+
+        let config = render_core_config(&plan).unwrap();
+
+        assert_eq!(config["inbounds"][0]["settings"]["auth"], "password");
+        assert_eq!(
+            config["inbounds"][0]["settings"]["accounts"][0]["user"],
+            "socks-secret"
+        );
+        assert_eq!(
+            config["inbounds"][0]["settings"]["accounts"][0]["pass"],
+            "socks-secret"
+        );
+        assert_eq!(config["inbounds"][0]["settings"]["udp"], true);
+    }
+
+    #[test]
+    fn renders_http_accounts_from_users() {
+        let node = test_node("http", 21, "");
+        let tag = node.tag.clone();
+        let mut users = std::collections::BTreeMap::new();
+        users.insert(
+            tag,
+            vec![UserInfo {
+                id: 21,
+                uuid: "http-secret".to_string(),
+                speed_limit: 0,
+                device_limit: 0,
+            }],
+        );
+        let plan = CorePlan::from_nodes_with_users(
+            CoreKind::Xray,
+            PathBuf::from("/srv/v2node/config.json"),
+            &[node],
+            &users,
+        )
+        .unwrap();
+
+        let config = render_core_config(&plan).unwrap();
+
+        assert_eq!(
+            config["inbounds"][0]["settings"]["accounts"][0]["user"],
+            "http-secret"
+        );
+        assert_eq!(
+            config["inbounds"][0]["settings"]["accounts"][0]["pass"],
+            "http-secret"
+        );
+    }
+
+    #[test]
+    fn renders_anytls_padding_and_clients() {
+        let mut node = test_node("anytls", 22, "");
+        node.common.padding_scheme = vec!["stop=8".to_string(), " ".to_string()];
+        let tag = node.tag.clone();
+        let mut users = std::collections::BTreeMap::new();
+        users.insert(
+            tag,
+            vec![UserInfo {
+                id: 22,
+                uuid: "anytls-password".to_string(),
+                speed_limit: 0,
+                device_limit: 0,
+            }],
+        );
+        let plan = CorePlan::from_nodes_with_users(
+            CoreKind::Xray,
+            PathBuf::from("/srv/v2node/config.json"),
+            &[node],
+            &users,
+        )
+        .unwrap();
+
+        let config = render_core_config(&plan).unwrap();
+
+        assert_eq!(
+            config["inbounds"][0]["settings"]["clients"][0]["password"],
+            "anytls-password"
+        );
+        assert_eq!(
+            config["inbounds"][0]["settings"]["paddingScheme"][0],
+            "stop=8"
         );
     }
 
