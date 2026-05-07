@@ -33,6 +33,7 @@ pub struct InboundPlan {
     pub network_settings: Value,
     pub flow: String,
     pub cipher: String,
+    pub vless_decryption: String,
     pub alpn: Vec<String>,
     pub fallback_to_ipv4: bool,
     pub cert_file: String,
@@ -240,6 +241,7 @@ pub fn build_inbound_plan_with_users(
         network_settings: node.common.network_settings.clone(),
         flow: node.common.flow.trim().to_string(),
         cipher: node.common.cipher.trim().to_string(),
+        vless_decryption: resolve_vless_decryption(node)?,
         alpn: resolve_tls_alpn(node),
         fallback_to_ipv4: should_fallback_node_listen_ip(&node.common.listen_ip),
         cert_file: cert.map(cert_file).unwrap_or_default(),
@@ -332,6 +334,36 @@ fn security_name(security: Security) -> String {
     }
 }
 
+fn resolve_vless_decryption(node: &NodeInfo) -> Result<String, CoreError> {
+    if node.protocol != Protocol::Vless {
+        return Ok(String::new());
+    }
+
+    let encryption = node.common.encryption.trim();
+    if encryption.is_empty() {
+        return Ok("none".to_string());
+    }
+
+    match encryption {
+        "mlkem768x25519plus" => {
+            let settings = &node.common.encryption_settings;
+            let mut parts = vec![
+                encryption.to_string(),
+                settings.mode.trim().to_string(),
+                settings.ticket.trim().to_string(),
+            ];
+            if !settings.server_padding.trim().is_empty() {
+                parts.push(settings.server_padding.trim().to_string());
+            }
+            parts.push(settings.private_key.trim().to_string());
+            Ok(parts.join("."))
+        }
+        _ => Err(CoreError::new(format!(
+            "vless decryption method {encryption} is not support"
+        ))),
+    }
+}
+
 fn render_xray_config(plan: &CorePlan) -> Value {
     let inbounds = plan
         .inbounds
@@ -381,7 +413,7 @@ fn render_xray_inbound_settings(inbound: &InboundPlan) -> Value {
     match inbound.protocol.as_str() {
         "vless" => json!({
             "clients": clients,
-            "decryption": "none"
+            "decryption": render_vless_decryption(inbound)
         }),
         "vmess" | "trojan" => json!({
             "clients": clients
@@ -391,6 +423,14 @@ fn render_xray_inbound_settings(inbound: &InboundPlan) -> Value {
             "clients": clients
         }),
         _ => json!({}),
+    }
+}
+
+fn render_vless_decryption(inbound: &InboundPlan) -> &str {
+    if inbound.vless_decryption.trim().is_empty() {
+        "none"
+    } else {
+        inbound.vless_decryption.as_str()
     }
 }
 
@@ -768,6 +808,41 @@ mod tests {
             config["inbounds"][0]["settings"]["clients"][0]["flow"],
             "xtls-rprx-vision"
         );
+    }
+
+    #[test]
+    fn renders_supported_vless_encryption_decryption() {
+        let mut node = test_node("vless", 15, "");
+        node.common.encryption = "mlkem768x25519plus".to_string();
+        node.common.encryption_settings.mode = "0rtt".to_string();
+        node.common.encryption_settings.ticket = "ticket-value".to_string();
+        node.common.encryption_settings.server_padding = "padding".to_string();
+        node.common.encryption_settings.private_key = "private-key".to_string();
+        let plan = CorePlan::from_nodes(
+            CoreKind::Xray,
+            PathBuf::from("/srv/v2node/config.json"),
+            &[node],
+        )
+        .unwrap();
+
+        let config = render_core_config(&plan).unwrap();
+
+        assert_eq!(
+            config["inbounds"][0]["settings"]["decryption"],
+            "mlkem768x25519plus.0rtt.ticket-value.padding.private-key"
+        );
+    }
+
+    #[test]
+    fn rejects_unsupported_vless_encryption() {
+        let mut node = test_node("vless", 16, "");
+        node.common.encryption = "unsupported".to_string();
+
+        let err = build_inbound_plan(&node).unwrap_err();
+
+        assert!(err
+            .message
+            .contains("vless decryption method unsupported is not support"));
     }
 
     #[test]
