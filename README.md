@@ -14,12 +14,17 @@ First cut:
 - Pull machine-bound nodes and report machine status through the same machine endpoints.
 - Keep Docker direct node mode and binary machine binding as explicit compatibility targets.
 - Define a core adapter boundary before choosing whether each protocol is external-core, sidecar, or Rust-native.
+- Plan and inspect HY2 port-forward rules, with repair/cleanup executor boundaries.
+- Build runtime bootstrap plans that combine resolved config, node bootstrap, core config planning, and HY2 status.
+- Render an Xray-compatible core config skeleton and write it through a stable file layout.
+- Provide process supervisor and health payload aggregation layers for runtime integration.
 
 Not implemented yet:
 
-- Running Xray/sing-box/mihomo configs.
+- A full runtime event loop that wires config writes, core process start/reload, reports, and shutdown together.
+- Real host metric collection for CPU, memory, disk, network, IP, and system fields.
+- User-authenticated external core config generation.
 - Realtime websocket workers.
-- HY2 port-forward reconciliation.
 - Machine self-upgrade execution.
 - Subscription reverse proxy.
 
