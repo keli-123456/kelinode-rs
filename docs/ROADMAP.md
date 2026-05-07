@@ -79,6 +79,7 @@
 - Subscription proxy certificate domain normalization with IPv6-to-public-IPv4 fallback planning.
 - Subscription proxy certificate status, owner site selection, and serve-mode fallback planning.
 - Subscription proxy ZeroSSL config preservation across direct, machine, and runtime merge paths.
+- Subscription proxy ZeroSSL validation-file and fullchain certificate write planning.
 - Compatibility tests around protocol parsing and endpoint construction.
 
 ## Phase 2: Runtime Control

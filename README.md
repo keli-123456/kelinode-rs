@@ -73,6 +73,7 @@ First cut:
 - Resolve IPv6 subscription proxy certificate domains through an injectable public IPv4 detector.
 - Plan subscription proxy certificate status, owner site selection, and HTTP fallback mode.
 - Preserve subscription proxy ZeroSSL certificate, validation, and expiry fields from panel configs.
+- Plan ZeroSSL validation-file and fullchain certificate writes without touching the filesystem.
 
 Not implemented yet:
 

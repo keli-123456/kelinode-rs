@@ -41,6 +41,13 @@ pub struct SubscriptionProxyClientResponse {
     pub body: Vec<u8>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SubscriptionProxyFileWrite {
+    pub path: String,
+    pub content: String,
+    pub mode: u32,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct SubscriptionProxyStatus {
     pub status: String,
@@ -371,6 +378,52 @@ where
     ))
 }
 
+pub fn plan_subscription_proxy_validation_file(
+    config: &SubscriptionProxyConfig,
+) -> Result<Option<SubscriptionProxyFileWrite>, String> {
+    let validation_path = config.zerossl.validation_path.trim();
+    let validation_content = config.zerossl.validation_content.trim();
+    if validation_path.is_empty() || validation_content.is_empty() {
+        return Ok(None);
+    }
+
+    let file_name = validation_file_name(validation_path)
+        .ok_or_else(|| format!("invalid validation path: {validation_path}"))?;
+    let challenge_dir = first_non_empty(config.challenge_dir.trim(), DEFAULT_CHALLENGE_DIR);
+    Ok(Some(SubscriptionProxyFileWrite {
+        path: join_posix_path(&challenge_dir, &file_name),
+        content: validation_content_string(validation_content),
+        mode: 0o644,
+    }))
+}
+
+pub fn plan_subscription_proxy_certificate_file(
+    config: &SubscriptionProxyConfig,
+) -> Result<Option<SubscriptionProxyFileWrite>, String> {
+    let certificate = config.zerossl.certificate_pem.trim();
+    if certificate.is_empty() {
+        return Ok(None);
+    }
+    let cert_file = config.cert_file.trim();
+    if cert_file.is_empty() {
+        return Err("subscription proxy cert file is empty".to_string());
+    }
+
+    let ca_bundle = config.zerossl.ca_bundle_pem.trim();
+    let mut fullchain = certificate.to_string();
+    if !ca_bundle.is_empty() {
+        fullchain.push('\n');
+        fullchain.push_str(ca_bundle);
+    }
+    fullchain.push('\n');
+
+    Ok(Some(SubscriptionProxyFileWrite {
+        path: cert_file.to_string(),
+        content: fullchain,
+        mode: 0o644,
+    }))
+}
+
 fn first_non_empty(value: &str, fallback: &str) -> String {
     if value.is_empty() {
         fallback.to_string()
@@ -385,6 +438,27 @@ fn trim_subscription_path(value: &str) -> String {
 
 fn trim_trailing_slashes(value: &str) -> String {
     value.trim_end_matches('/').to_string()
+}
+
+fn join_posix_path(root: &str, child: &str) -> String {
+    format!(
+        "{}/{}",
+        root.trim_end_matches('/'),
+        child.trim_start_matches('/')
+    )
+}
+
+fn validation_file_name(path: &str) -> Option<String> {
+    let cleaned = path.trim().trim_end_matches('/');
+    let name = cleaned.rsplit('/').next()?.trim();
+    if name.is_empty() || name == "." || name == ".." || name.contains('\\') {
+        return None;
+    }
+    Some(name.to_string())
+}
+
+fn validation_content_string(content: &str) -> String {
+    format!("{}\n", content.trim())
 }
 
 fn is_valid_upstream_base_url(value: &str) -> bool {
@@ -524,7 +598,8 @@ mod tests {
         build_subscription_upstream_url, normalize_subscription_proxy_config,
         normalize_subscription_proxy_config_with_public_ipv4,
         plan_subscription_proxy_request, plan_subscription_proxy_response,
-        plan_subscription_proxy_serve_mode, prepare_subscription_proxy_certificate_status,
+        plan_subscription_proxy_certificate_file, plan_subscription_proxy_serve_mode,
+        plan_subscription_proxy_validation_file, prepare_subscription_proxy_certificate_status,
         resolve_subscription_certificate_domain, subscription_proxy_certificate_owner_site_id,
         SubscriptionProxyInboundRequest, SubscriptionProxyRoute, SubscriptionProxyRouteError,
         SubscriptionProxyServeMode, SubscriptionProxyUpstreamResponse,
@@ -739,6 +814,88 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.contains("certificate files are not readable"));
+    }
+
+    #[test]
+    fn plans_validation_file_write_from_zerossl_challenge() {
+        let write = plan_subscription_proxy_validation_file(&SubscriptionProxyConfig {
+            challenge_dir: " /var/lib/v2node/challenges/ ".to_string(),
+            zerossl: SubscriptionProxyZeroSslConfig {
+                validation_path: "/.well-known/pki-validation/token.txt".to_string(),
+                validation_content: " challenge-token ".to_string(),
+                ..SubscriptionProxyZeroSslConfig::default()
+            },
+            ..SubscriptionProxyConfig::default()
+        })
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(write.path, "/var/lib/v2node/challenges/token.txt");
+        assert_eq!(write.content, "challenge-token\n");
+        assert_eq!(write.mode, 0o644);
+    }
+
+    #[test]
+    fn skips_or_rejects_invalid_validation_file_plans() {
+        let none = plan_subscription_proxy_validation_file(&SubscriptionProxyConfig {
+            zerossl: SubscriptionProxyZeroSslConfig {
+                validation_path: "/.well-known/pki-validation/token.txt".to_string(),
+                ..SubscriptionProxyZeroSslConfig::default()
+            },
+            ..SubscriptionProxyConfig::default()
+        })
+        .unwrap();
+        assert!(none.is_none());
+
+        let err = plan_subscription_proxy_validation_file(&SubscriptionProxyConfig {
+            zerossl: SubscriptionProxyZeroSslConfig {
+                validation_path: "/".to_string(),
+                validation_content: "challenge-token".to_string(),
+                ..SubscriptionProxyZeroSslConfig::default()
+            },
+            ..SubscriptionProxyConfig::default()
+        })
+        .unwrap_err();
+        assert!(err.contains("invalid validation path"));
+    }
+
+    #[test]
+    fn plans_certificate_fullchain_write_from_zerossl_payload() {
+        let write = plan_subscription_proxy_certificate_file(&SubscriptionProxyConfig {
+            cert_file: " /etc/v2node/fullchain.pem ".to_string(),
+            zerossl: SubscriptionProxyZeroSslConfig {
+                certificate_pem: " -----BEGIN CERTIFICATE-----\nleaf ".to_string(),
+                ca_bundle_pem: " -----BEGIN CERTIFICATE-----\nca ".to_string(),
+                ..SubscriptionProxyZeroSslConfig::default()
+            },
+            ..SubscriptionProxyConfig::default()
+        })
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(write.path, "/etc/v2node/fullchain.pem");
+        assert_eq!(
+            write.content,
+            "-----BEGIN CERTIFICATE-----\nleaf\n-----BEGIN CERTIFICATE-----\nca\n"
+        );
+        assert_eq!(write.mode, 0o644);
+    }
+
+    #[test]
+    fn certificate_file_plan_requires_cert_path_only_when_payload_exists() {
+        let none = plan_subscription_proxy_certificate_file(&SubscriptionProxyConfig::default())
+            .unwrap();
+        assert!(none.is_none());
+
+        let err = plan_subscription_proxy_certificate_file(&SubscriptionProxyConfig {
+            zerossl: SubscriptionProxyZeroSslConfig {
+                certificate_pem: "-----BEGIN CERTIFICATE-----".to_string(),
+                ..SubscriptionProxyZeroSslConfig::default()
+            },
+            ..SubscriptionProxyConfig::default()
+        })
+        .unwrap_err();
+        assert!(err.contains("cert file is empty"));
     }
 
     #[test]
