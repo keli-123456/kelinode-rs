@@ -358,6 +358,66 @@ where
     status
 }
 
+pub fn prepare_subscription_proxy_certificate_status_with_file_writes<F, G, H, I>(
+    config: &SubscriptionProxyConfig,
+    mut certificate_not_after: F,
+    mut ensure_csr: G,
+    mut file_readable: H,
+    mut write_file: I,
+) -> SubscriptionProxyStatus
+where
+    F: FnMut(&str) -> String,
+    G: FnMut(&str, &str) -> Result<String, String>,
+    H: FnMut(&str) -> bool,
+    I: FnMut(&SubscriptionProxyFileWrite) -> Result<(), String>,
+{
+    let cert_file = config.cert_file.trim();
+    let key_file = config.key_file.trim();
+    let certificate_domain = config.certificate_domain.trim();
+    let mut status = SubscriptionProxyStatus {
+        certificate_domain: certificate_domain.to_string(),
+        certificate_id: config.zerossl.certificate_id.trim().to_string(),
+        cert_not_after: certificate_not_after(cert_file),
+        ..SubscriptionProxyStatus::default()
+    };
+
+    match plan_subscription_proxy_validation_file(config) {
+        Ok(Some(write)) => match write_file(&write) {
+            Ok(()) => status.validation_ready = true,
+            Err(err) => status.last_error = err,
+        },
+        Ok(None) => {}
+        Err(err) => status.last_error = err,
+    }
+
+    match plan_subscription_proxy_certificate_file(config) {
+        Ok(Some(write)) => match write_file(&write) {
+            Ok(()) => status.cert_not_after = certificate_not_after(cert_file),
+            Err(err) => status.last_error = err,
+        },
+        Ok(None) => {}
+        Err(err) => status.last_error = err,
+    }
+
+    if certificate_domain.is_empty() {
+        return status;
+    }
+
+    match ensure_csr(key_file, certificate_domain) {
+        Ok(csr_pem) => status.csr_pem = csr_pem,
+        Err(err) => {
+            status.last_error = err;
+            return status;
+        }
+    }
+
+    if !file_readable(cert_file) || !file_readable(key_file) {
+        status.need_certificate = true;
+    }
+
+    status
+}
+
 pub fn plan_subscription_proxy_serve_mode<F>(
     config: &SubscriptionProxyConfig,
     mut file_readable: F,
@@ -592,6 +652,7 @@ fn client_ip(remote_addr: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::RefCell;
     use std::collections::BTreeMap;
 
     use super::{
@@ -600,6 +661,7 @@ mod tests {
         plan_subscription_proxy_request, plan_subscription_proxy_response,
         plan_subscription_proxy_certificate_file, plan_subscription_proxy_serve_mode,
         plan_subscription_proxy_validation_file, prepare_subscription_proxy_certificate_status,
+        prepare_subscription_proxy_certificate_status_with_file_writes,
         resolve_subscription_certificate_domain, subscription_proxy_certificate_owner_site_id,
         SubscriptionProxyInboundRequest, SubscriptionProxyRoute, SubscriptionProxyRouteError,
         SubscriptionProxyServeMode, SubscriptionProxyUpstreamResponse,
@@ -896,6 +958,73 @@ mod tests {
         })
         .unwrap_err();
         assert!(err.contains("cert file is empty"));
+    }
+
+    #[test]
+    fn prepares_certificate_status_with_file_write_executor() {
+        let writes = RefCell::new(Vec::new());
+        let status = prepare_subscription_proxy_certificate_status_with_file_writes(
+            &SubscriptionProxyConfig {
+                cert_file: "/etc/v2node/fullchain.pem".to_string(),
+                key_file: "/etc/v2node/private.key".to_string(),
+                certificate_domain: "sub.example.test".to_string(),
+                challenge_dir: "/var/lib/v2node/challenges".to_string(),
+                zerossl: SubscriptionProxyZeroSslConfig {
+                    certificate_id: "cert-1".to_string(),
+                    validation_path: "/.well-known/pki-validation/token.txt".to_string(),
+                    validation_content: "challenge-token".to_string(),
+                    certificate_pem: "-----BEGIN CERTIFICATE-----\nleaf".to_string(),
+                    ca_bundle_pem: "-----BEGIN CERTIFICATE-----\nca".to_string(),
+                    ..SubscriptionProxyZeroSslConfig::default()
+                },
+                ..SubscriptionProxyConfig::default()
+            },
+            |path| format!("not-after:{path}"),
+            |_, _| Ok("csr".to_string()),
+            |_| false,
+            |write| {
+                writes.borrow_mut().push(write.clone());
+                Ok(())
+            },
+        );
+
+        assert!(status.validation_ready);
+        assert!(status.need_certificate);
+        assert_eq!(status.certificate_id, "cert-1");
+        assert_eq!(status.cert_not_after, "not-after:/etc/v2node/fullchain.pem");
+        assert_eq!(status.csr_pem, "csr");
+        assert!(status.last_error.is_empty());
+        assert_eq!(writes.borrow().len(), 2);
+        assert_eq!(
+            writes.borrow()[0].path,
+            "/var/lib/v2node/challenges/token.txt"
+        );
+        assert_eq!(writes.borrow()[1].path, "/etc/v2node/fullchain.pem");
+    }
+
+    #[test]
+    fn certificate_status_records_file_write_errors() {
+        let status = prepare_subscription_proxy_certificate_status_with_file_writes(
+            &SubscriptionProxyConfig {
+                certificate_domain: "sub.example.test".to_string(),
+                challenge_dir: "/var/lib/v2node/challenges".to_string(),
+                zerossl: SubscriptionProxyZeroSslConfig {
+                    validation_path: "/.well-known/pki-validation/token.txt".to_string(),
+                    validation_content: "challenge-token".to_string(),
+                    ..SubscriptionProxyZeroSslConfig::default()
+                },
+                ..SubscriptionProxyConfig::default()
+            },
+            |_| String::new(),
+            |_, _| Ok("csr".to_string()),
+            |_| false,
+            |_| Err("write failed".to_string()),
+        );
+
+        assert_eq!(status.last_error, "write failed");
+        assert!(!status.validation_ready);
+        assert_eq!(status.csr_pem, "csr");
+        assert!(status.need_certificate);
     }
 
     #[test]

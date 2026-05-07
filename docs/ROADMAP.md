@@ -80,6 +80,7 @@
 - Subscription proxy certificate status, owner site selection, and serve-mode fallback planning.
 - Subscription proxy ZeroSSL config preservation across direct, machine, and runtime merge paths.
 - Subscription proxy ZeroSSL validation-file and fullchain certificate write planning.
+- Subscription proxy certificate status preparation through an injectable file-write executor.
 - Compatibility tests around protocol parsing and endpoint construction.
 
 ## Phase 2: Runtime Control

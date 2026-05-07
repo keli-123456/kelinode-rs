@@ -74,6 +74,7 @@ First cut:
 - Plan subscription proxy certificate status, owner site selection, and HTTP fallback mode.
 - Preserve subscription proxy ZeroSSL certificate, validation, and expiry fields from panel configs.
 - Plan ZeroSSL validation-file and fullchain certificate writes without touching the filesystem.
+- Prepare subscription proxy certificate status through an injectable file-write executor.
 
 Not implemented yet:
 
