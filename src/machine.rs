@@ -1,11 +1,12 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::config::{
-    AgentConfig, MachineProfileConfig, NodeConfig, SubscriptionProxyConfig as RuntimeSubscriptionProxyConfig,
-    SubscriptionProxyProfile, DEFAULT_CONFIG_DIR,
+    AgentConfig, MachineProfileConfig, NodeConfig,
+    SubscriptionProxyConfig as RuntimeSubscriptionProxyConfig, SubscriptionProxyProfile,
+    DEFAULT_CONFIG_DIR,
 };
 use crate::panel::types::RealtimeBaseConfig;
 
@@ -117,6 +118,38 @@ pub struct NodeFailurePayload {
 pub struct MachineResolveResult {
     pub nodes: Vec<NodeConfig>,
     pub agent: AgentConfig,
+    pub realtime: Option<MachineProfileRealtime>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct MachineProfileInput {
+    pub profile: MachineProfileConfig,
+    pub result: Result<MachineNodesResponse, String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct MachineResolveSummary {
+    pub nodes: Vec<NodeConfig>,
+    pub agent: AgentConfig,
+    pub realtime: Vec<MachineProfileRealtime>,
+    pub failures: Vec<MachineResolveFailure>,
+    pub subscription_proxy_only: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MachineResolveFailure {
+    pub profile: String,
+    pub machine_id: u32,
+    pub error: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MachineProfileRealtime {
+    pub profile: String,
+    pub machine_id: u32,
+    pub enabled: bool,
+    pub url: String,
+    pub ping_interval: u64,
 }
 
 impl NodeFailurePayload {
@@ -161,7 +194,84 @@ pub fn resolve_machine_profile_result(
         }
     }
 
-    MachineResolveResult { nodes, agent }
+    MachineResolveResult {
+        nodes,
+        agent,
+        realtime: machine_profile_realtime(profile, response),
+    }
+}
+
+pub fn resolve_machine_profiles(
+    inputs: Vec<MachineProfileInput>,
+    continue_on_error: bool,
+) -> Result<MachineResolveSummary, String> {
+    let mut summary = MachineResolveSummary::default();
+    let mut seen_nodes = BTreeSet::new();
+    let mut successes = 0usize;
+
+    for input in inputs {
+        let profile_label = machine_profile_label(&input.profile);
+        let response = match input.result {
+            Ok(response) => {
+                successes += 1;
+                response
+            }
+            Err(error) => {
+                let failure = MachineResolveFailure {
+                    profile: profile_label,
+                    machine_id: input.profile.machine_id,
+                    error,
+                };
+                if !continue_on_error {
+                    return Err(failure.error);
+                }
+                summary.failures.push(failure);
+                continue;
+            }
+        };
+
+        let resolved = resolve_machine_profile_result(&input.profile, &response);
+        merge_runtime_agent(&mut summary.agent, resolved.agent);
+        if let Some(realtime) = resolved.realtime {
+            summary.realtime.push(realtime);
+        }
+
+        for node in resolved.nodes {
+            let key = machine_node_key(&node);
+            if !seen_nodes.insert(key.clone()) {
+                let failure = MachineResolveFailure {
+                    profile: profile_label.clone(),
+                    machine_id: input.profile.machine_id,
+                    error: format!("duplicate machine profile node: {key}"),
+                };
+                if !continue_on_error {
+                    return Err(failure.error);
+                }
+                summary.failures.push(failure);
+                continue;
+            }
+            summary.nodes.push(node);
+        }
+    }
+
+    if summary.nodes.is_empty() {
+        if successes > 0 && can_run_subscription_proxy_only(&summary.agent) {
+            summary.subscription_proxy_only = true;
+            return Ok(summary);
+        }
+        if !summary.failures.is_empty() {
+            let details = summary
+                .failures
+                .iter()
+                .map(|failure| format!("{}: {}", failure.profile, failure.error))
+                .collect::<Vec<_>>()
+                .join("; ");
+            return Err(format!("no machine nodes resolved: {details}"));
+        }
+        return Err("no machine nodes resolved".to_string());
+    }
+
+    Ok(summary)
 }
 
 pub fn merge_subscription_proxy(
@@ -242,6 +352,20 @@ pub fn machine_profile_label(profile: &MachineProfileConfig) -> String {
     profile.url.trim_end_matches('/').to_string()
 }
 
+pub fn machine_profile_realtime(
+    profile: &MachineProfileConfig,
+    response: &MachineNodesResponse,
+) -> Option<MachineProfileRealtime> {
+    let realtime = response.base_config.as_ref()?.realtime.as_ref()?;
+    Some(MachineProfileRealtime {
+        profile: machine_profile_label(profile),
+        machine_id: profile.machine_id,
+        enabled: realtime.enabled,
+        url: realtime.url.trim().to_string(),
+        ping_interval: machine_realtime_interval_seconds(&realtime.ping_interval),
+    })
+}
+
 pub fn sanitize_machine_profile_name(name: &str) -> String {
     let mut output = String::with_capacity(name.len());
     let mut last_dash = false;
@@ -277,6 +401,100 @@ fn fill_if_empty(target: &mut String, value: &str) {
     }
 }
 
+fn merge_runtime_agent(target: &mut AgentConfig, source: AgentConfig) {
+    let source_proxy = source.subscription_proxy;
+    if !source_proxy.enabled {
+        return;
+    }
+
+    if !target.subscription_proxy.enabled {
+        target.subscription_proxy = source_proxy;
+        return;
+    }
+
+    fill_if_empty(
+        &mut target.subscription_proxy.https_listen,
+        &source_proxy.https_listen,
+    );
+    fill_if_empty(
+        &mut target.subscription_proxy.http_listen,
+        &source_proxy.http_listen,
+    );
+    fill_if_empty(&mut target.subscription_proxy.cert_file, &source_proxy.cert_file);
+    fill_if_empty(&mut target.subscription_proxy.key_file, &source_proxy.key_file);
+    fill_if_empty(
+        &mut target.subscription_proxy.certificate_domain,
+        &source_proxy.certificate_domain,
+    );
+    fill_if_empty(
+        &mut target.subscription_proxy.challenge_dir,
+        &source_proxy.challenge_dir,
+    );
+    if target.subscription_proxy.max_response_bytes == 0 {
+        target.subscription_proxy.max_response_bytes = source_proxy.max_response_bytes;
+    }
+
+    for profile in source_proxy.profiles {
+        if target
+            .subscription_proxy
+            .profiles
+            .iter()
+            .any(|existing| existing.site_id.eq_ignore_ascii_case(&profile.site_id))
+        {
+            continue;
+        }
+        target.subscription_proxy.profiles.push(profile);
+    }
+}
+
+fn can_run_subscription_proxy_only(agent: &AgentConfig) -> bool {
+    if !agent.subscription_proxy.enabled {
+        return false;
+    }
+    if valid_subscription_proxy_profile(
+        &agent.subscription_proxy.site_id,
+        &agent.subscription_proxy.upstream_base_url,
+    ) {
+        return true;
+    }
+    agent
+        .subscription_proxy
+        .profiles
+        .iter()
+        .any(|profile| {
+            valid_subscription_proxy_profile(&profile.site_id, &profile.upstream_base_url)
+        })
+}
+
+fn valid_subscription_proxy_profile(site_id: &str, upstream_base_url: &str) -> bool {
+    let site_id = site_id.trim();
+    let upstream = upstream_base_url.trim_end_matches('/');
+    if site_id.is_empty() || upstream.is_empty() {
+        return false;
+    }
+    let Some((scheme, rest)) = upstream.split_once("://") else {
+        return false;
+    };
+    !scheme.is_empty() && !rest.trim_matches('/').is_empty()
+}
+
+fn machine_realtime_interval_seconds(value: &Value) -> u64 {
+    match value {
+        Value::Number(number) => number.as_u64().unwrap_or_default(),
+        Value::String(text) => text.trim().parse::<u64>().unwrap_or_default(),
+        _ => 0,
+    }
+}
+
+fn machine_node_key(node: &NodeConfig) -> String {
+    format!(
+        "{}#{}#{}",
+        node.url.trim_end_matches('/'),
+        node.machine_id,
+        node.node_id
+    )
+}
+
 impl MachineNodesEnvelope {
     pub fn into_response(self) -> MachineNodesResponse {
         if let Some(data) = self.data {
@@ -309,11 +527,13 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        machine_profile_node_config_dir, resolve_machine_profile_result, sanitize_machine_profile_name,
-        MachineNodesEnvelope, MachineNodesResponse, MachinePanelNode, MachineStatusPayload,
-        NodeFailurePayload, SubscriptionProxyConfig,
+        machine_profile_node_config_dir, resolve_machine_profile_result,
+        resolve_machine_profiles, sanitize_machine_profile_name, MachineNodesEnvelope,
+        MachineNodesResponse, MachinePanelNode, MachineProfileBaseConfig, MachineProfileInput,
+        MachineStatusPayload, NodeFailurePayload, SubscriptionProxyConfig,
     };
     use crate::config::MachineProfileConfig;
+    use crate::panel::types::RealtimeBaseConfig;
 
     #[test]
     fn node_failure_uses_v2node_type() {
@@ -436,5 +656,180 @@ mod tests {
     fn sanitizes_machine_profile_names() {
         assert_eq!(sanitize_machine_profile_name("Site A / Prod"), "Site-A-Prod");
         assert_eq!(sanitize_machine_profile_name("///"), "machine");
+    }
+
+    #[test]
+    fn aggregates_multiple_machine_profiles() {
+        let first = MachineProfileConfig {
+            name: "site-a".to_string(),
+            url: "https://site-a.example.test".to_string(),
+            token: "token-a".to_string(),
+            machine_id: 1,
+            ..MachineProfileConfig::default()
+        };
+        let second = MachineProfileConfig {
+            name: "site-b".to_string(),
+            url: "https://site-b.example.test".to_string(),
+            token: "token-b".to_string(),
+            machine_id: 2,
+            ..MachineProfileConfig::default()
+        };
+
+        let summary = resolve_machine_profiles(
+            vec![
+                MachineProfileInput {
+                    profile: first,
+                    result: Ok(machine_response(10, "site-a")),
+                },
+                MachineProfileInput {
+                    profile: second,
+                    result: Ok(machine_response(20, "site-b")),
+                },
+            ],
+            true,
+        )
+        .unwrap();
+
+        assert_eq!(summary.nodes.len(), 2);
+        assert_eq!(summary.agent.subscription_proxy.profiles.len(), 2);
+        assert!(summary.failures.is_empty());
+        assert_eq!(summary.realtime.len(), 2);
+    }
+
+    #[test]
+    fn continues_after_profile_error_when_allowed() {
+        let ok = MachineProfileConfig {
+            name: "ok".to_string(),
+            url: "https://ok.example.test".to_string(),
+            token: "ok-token".to_string(),
+            machine_id: 2,
+            ..MachineProfileConfig::default()
+        };
+        let failed = MachineProfileConfig {
+            name: "failed".to_string(),
+            url: "https://failed.example.test".to_string(),
+            token: "bad-token".to_string(),
+            machine_id: 1,
+            ..MachineProfileConfig::default()
+        };
+
+        let summary = resolve_machine_profiles(
+            vec![
+                MachineProfileInput {
+                    profile: failed,
+                    result: Err("unauthorized".to_string()),
+                },
+                MachineProfileInput {
+                    profile: ok,
+                    result: Ok(machine_response(21, "ok")),
+                },
+            ],
+            true,
+        )
+        .unwrap();
+
+        assert_eq!(summary.nodes.len(), 1);
+        assert_eq!(summary.failures.len(), 1);
+        assert_eq!(summary.failures[0].profile, "failed");
+    }
+
+    #[test]
+    fn rejects_duplicate_machine_nodes_without_continue_on_error() {
+        let first = MachineProfileConfig {
+            name: "first".to_string(),
+            url: "https://same.example.test/".to_string(),
+            token: "token".to_string(),
+            machine_id: 9,
+            ..MachineProfileConfig::default()
+        };
+        let second = MachineProfileConfig {
+            name: "second".to_string(),
+            url: "https://same.example.test".to_string(),
+            token: "token".to_string(),
+            machine_id: 9,
+            ..MachineProfileConfig::default()
+        };
+
+        let err = resolve_machine_profiles(
+            vec![
+                MachineProfileInput {
+                    profile: first,
+                    result: Ok(machine_response(30, "one")),
+                },
+                MachineProfileInput {
+                    profile: second,
+                    result: Ok(machine_response(30, "two")),
+                },
+            ],
+            false,
+        )
+        .unwrap_err();
+
+        assert!(err.contains("duplicate machine profile node"));
+    }
+
+    #[test]
+    fn allows_subscription_proxy_only_when_no_nodes_returned() {
+        let profile = MachineProfileConfig {
+            name: "site-only".to_string(),
+            url: "https://site-only.example.test".to_string(),
+            token: "token".to_string(),
+            machine_id: 6,
+            ..MachineProfileConfig::default()
+        };
+        let response = MachineNodesResponse {
+            nodes: Vec::new(),
+            agent: Some(super::MachineAgentConfig {
+                subscription_proxy: Some(SubscriptionProxyConfig {
+                    enabled: true,
+                    site_id: "site-only".to_string(),
+                    upstream_base_url: "https://site-only.example.test".to_string(),
+                    subscribe_path: "s".to_string(),
+                    ..SubscriptionProxyConfig::default()
+                }),
+            }),
+            ..MachineNodesResponse::default()
+        };
+
+        let summary = resolve_machine_profiles(
+            vec![MachineProfileInput {
+                profile,
+                result: Ok(response),
+            }],
+            true,
+        )
+        .unwrap();
+
+        assert!(summary.nodes.is_empty());
+        assert!(summary.subscription_proxy_only);
+        assert_eq!(summary.agent.subscription_proxy.profiles.len(), 1);
+    }
+
+    fn machine_response(node_id: u32, site_id: &str) -> MachineNodesResponse {
+        MachineNodesResponse {
+            nodes: vec![MachinePanelNode {
+                id: node_id,
+                code: String::new(),
+                node_type: "vless".to_string(),
+                name: format!("node-{node_id}"),
+                updated_at: json!(null),
+            }],
+            base_config: Some(MachineProfileBaseConfig {
+                realtime: Some(RealtimeBaseConfig {
+                    enabled: true,
+                    url: "wss://panel.example.test/ws/node".to_string(),
+                    ping_interval: json!(15),
+                }),
+            }),
+            agent: Some(super::MachineAgentConfig {
+                subscription_proxy: Some(SubscriptionProxyConfig {
+                    enabled: true,
+                    site_id: site_id.to_string(),
+                    upstream_base_url: format!("https://{site_id}.example.test"),
+                    subscribe_path: "s".to_string(),
+                    ..SubscriptionProxyConfig::default()
+                }),
+            }),
+        }
     }
 }
