@@ -7,8 +7,8 @@ use kelinode_rs::panel::contract::NODE_API_CONTRACT_VERSION;
 use kelinode_rs::port_forward::SystemPortForwardExecutor;
 use kelinode_rs::process::{core_process_spec, ProcessSupervisor, SystemProcessSupervisor};
 use kelinode_rs::runner::{
-    run_runtime_loop_async, PanelRuntimeLoop, RuntimeLoopExit, RuntimeLoopExitReason,
-    RuntimeLoopOptions,
+    run_runtime_loop_async_with_events, start_realtime_runtime_workers, PanelRuntimeLoop,
+    RuntimeLoopExit, RuntimeLoopExitReason, RuntimeLoopOptions,
 };
 use kelinode_rs::runtime::{bootstrap_from_config, Bootstrap, RuntimeBootstrapPlan};
 use kelinode_rs::upgrade::{SystemUpgradeExecutor, UpgradeManager};
@@ -119,6 +119,7 @@ async fn run_agent_once(
     let plan = bootstrap_from_config(&config).await?;
     let panel_clients = machine_panel_clients(&plan)?;
     let options = runtime_loop_options(&plan, !panel_clients.is_empty());
+    let realtime_options = plan.realtime_options.clone();
     let mut runner = PanelRuntimeLoop::new(
         plan,
         process_supervisor,
@@ -128,9 +129,14 @@ async fn run_agent_once(
     .with_panel_clients(panel_clients)
     .with_health_refresh(agent_version())
     .with_upgrade_status(upgrade_status);
+    let mut realtime_workers = start_realtime_runtime_workers(realtime_options);
     let mut shutdown = false;
     let result = tokio::select! {
-        result = run_runtime_loop_async(&mut runner, options) => result,
+        result = run_runtime_loop_async_with_events(
+            &mut runner,
+            options,
+            realtime_workers.events(),
+        ) => result,
         signal = wait_shutdown_signal() => {
             signal?;
             shutdown = true;
@@ -140,6 +146,7 @@ async fn run_agent_once(
             })
         }
     };
+    realtime_workers.abort();
     if shutdown {
         stop_core_for_plan(&mut runner)?;
     }

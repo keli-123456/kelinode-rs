@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::future::Future;
 use std::pin::Pin;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::config::NodeConfig;
 use crate::control::{
@@ -13,6 +13,10 @@ use crate::panel::client::{PanelClient, PanelClientOptions};
 use crate::panel::types::UserInfo;
 use crate::port_forward::PortForwardExecutor;
 use crate::process::ProcessSupervisor;
+use crate::realtime::{
+    build_realtime_receipt, RealtimeMessage, RealtimeOptions, RealtimeRuntimeTask,
+};
+use crate::realtime_client::{connect_realtime_transport, serve_realtime_transport};
 use crate::runtime::{
     node_config_for_info as runtime_node_config_for_info, rebuild_runtime_plan_with_users,
     RuntimeBootstrapPlan,
@@ -50,6 +54,39 @@ pub enum RuntimeLoopExitReason {
 pub enum RuntimeLoopEvent {
     Reload,
     RefreshUsers,
+}
+
+pub struct RealtimeRuntimeWorkers {
+    _sender: tokio::sync::mpsc::UnboundedSender<RuntimeLoopEvent>,
+    events: tokio::sync::mpsc::UnboundedReceiver<RuntimeLoopEvent>,
+    handles: Vec<tokio::task::JoinHandle<()>>,
+}
+
+impl RealtimeRuntimeWorkers {
+    pub fn events(&mut self) -> &mut tokio::sync::mpsc::UnboundedReceiver<RuntimeLoopEvent> {
+        &mut self.events
+    }
+
+    pub fn abort(&mut self) {
+        for handle in &self.handles {
+            handle.abort();
+        }
+        self.handles.clear();
+    }
+
+    pub fn len(&self) -> usize {
+        self.handles.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.handles.is_empty()
+    }
+}
+
+impl Drop for RealtimeRuntimeWorkers {
+    fn drop(&mut self) {
+        self.abort();
+    }
 }
 
 pub trait RuntimeLoopCallbacks {
@@ -218,6 +255,80 @@ impl Default for RuntimeLoopOptions {
             user_refresh_interval: 1,
             panel_report_interval: 1,
         }
+    }
+}
+
+pub fn start_realtime_runtime_workers(
+    options: Vec<RealtimeOptions>,
+) -> RealtimeRuntimeWorkers {
+    let (sender, events) = tokio::sync::mpsc::unbounded_channel();
+    let handles = options
+        .into_iter()
+        .map(|option| {
+            let sender = sender.clone();
+            tokio::spawn(async move {
+                run_realtime_runtime_worker(option, sender).await;
+            })
+        })
+        .collect();
+
+    RealtimeRuntimeWorkers {
+        _sender: sender,
+        events,
+        handles,
+    }
+}
+
+async fn run_realtime_runtime_worker(
+    options: RealtimeOptions,
+    sender: tokio::sync::mpsc::UnboundedSender<RuntimeLoopEvent>,
+) {
+    loop {
+        if let Ok(mut transport) = connect_realtime_transport(&options).await {
+            let events = sender.clone();
+            let _ = serve_realtime_transport(
+                &options,
+                &mut transport,
+                unix_now,
+                |task, source| handle_realtime_runtime_task(&events, task, source, unix_now()),
+            )
+            .await;
+        }
+        tokio::time::sleep(options.reconnect_delay).await;
+    }
+}
+
+fn handle_realtime_runtime_task(
+    sender: &tokio::sync::mpsc::UnboundedSender<RuntimeLoopEvent>,
+    task: RealtimeRuntimeTask,
+    source: &RealtimeMessage,
+    now: i64,
+) -> Vec<RealtimeMessage> {
+    match task {
+        RealtimeRuntimeTask::ConfigCheck | RealtimeRuntimeTask::ForceReload => {
+            let _ = sender.send(RuntimeLoopEvent::Reload);
+            vec![build_realtime_receipt(
+                "config",
+                source,
+                "received",
+                "reload queued",
+                now,
+            )]
+        }
+        RealtimeRuntimeTask::UserSync => {
+            let _ = sender.send(RuntimeLoopEvent::RefreshUsers);
+            vec![build_realtime_receipt(
+                "users",
+                source,
+                "received",
+                "user refresh queued",
+                now,
+            )]
+        }
+        RealtimeRuntimeTask::Ignore
+        | RealtimeRuntimeTask::Pong(_)
+        | RealtimeRuntimeTask::Error(_)
+        | RealtimeRuntimeTask::HelloAck => Vec::new(),
     }
 }
 
@@ -520,6 +631,13 @@ pub fn should_run(tick: usize, interval: usize) -> bool {
     interval > 0 && tick % interval == 0
 }
 
+fn unix_now() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs() as i64)
+        .unwrap_or_default()
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
@@ -529,7 +647,8 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::{
-        node_config_for_info, refresh_runtime_health, run_runtime_loop,
+        handle_realtime_runtime_task, node_config_for_info, refresh_runtime_health,
+        run_runtime_loop,
         run_runtime_loop_async, run_runtime_loop_async_with_events, should_run,
         user_delta_not_supported,
         AsyncRuntimeLoopCallbacks, PanelRuntimeLoop, RuntimeLoopCallbacks, RuntimeLoopExit,
@@ -543,6 +662,7 @@ mod tests {
     use crate::panel::types::{CommonNode, NodeInfo, UserInfo};
     use crate::port_forward::{PortForwardCommand, PortForwardExecutor};
     use crate::process::MemoryProcessSupervisor;
+    use crate::realtime::{RealtimeMessage, RealtimeRuntimeTask};
     use crate::runtime::build_runtime_bootstrap_plan;
     use serde_json::json;
 
@@ -769,6 +889,55 @@ mod tests {
         assert_eq!(callbacks.refreshes, 1);
         assert!(!callbacks.ticks[1].users_by_node_tag.is_empty());
         assert!(!callbacks.ticks[1].report_to_panel);
+    }
+
+    #[test]
+    fn realtime_runtime_task_queues_reload_and_receipt() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let source = RealtimeMessage {
+            event_id: "evt-config".to_string(),
+            reason: "admin.server.saved".to_string(),
+            ..RealtimeMessage::default()
+        };
+
+        let receipts = handle_realtime_runtime_task(
+            &tx,
+            RealtimeRuntimeTask::ConfigCheck,
+            &source,
+            300,
+        );
+
+        assert_eq!(rx.try_recv().unwrap(), RuntimeLoopEvent::Reload);
+        assert_eq!(receipts.len(), 1);
+        assert_eq!(receipts[0].message_type, "receipt");
+        assert_eq!(receipts[0].topic, "config");
+        assert_eq!(receipts[0].event_id, "evt-config");
+        assert_eq!(receipts[0].status, "received");
+        assert_eq!(receipts[0].ts, 300);
+    }
+
+    #[test]
+    fn realtime_runtime_task_queues_user_refresh_and_receipt() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let source = RealtimeMessage {
+            event_id: "evt-users".to_string(),
+            reason: "user.delta".to_string(),
+            ..RealtimeMessage::default()
+        };
+
+        let receipts = handle_realtime_runtime_task(
+            &tx,
+            RealtimeRuntimeTask::UserSync,
+            &source,
+            301,
+        );
+
+        assert_eq!(rx.try_recv().unwrap(), RuntimeLoopEvent::RefreshUsers);
+        assert_eq!(receipts.len(), 1);
+        assert_eq!(receipts[0].topic, "users");
+        assert_eq!(receipts[0].event_id, "evt-users");
+        assert_eq!(receipts[0].status, "received");
+        assert_eq!(receipts[0].ts, 301);
     }
 
     #[test]

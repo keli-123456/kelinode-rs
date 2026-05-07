@@ -44,6 +44,7 @@ First cut:
 - Add a transport-neutral realtime session worker for initial ping, pong replies, and task dispatch.
 - Add a `tokio-tungstenite` realtime connector with rustls webpki roots.
 - Let the async runtime loop react to external realtime reload and user-refresh events.
+- Start realtime workers from the `run` command and queue reload/user-refresh runtime events.
 - Collect Linux root disk usage and network byte counters for machine status payloads.
 - Compute Linux CPU usage from `/proc/stat` samples, with `/proc/loadavg` as a fallback.
 - Collect local and public IPv4/IPv6 candidates for machine status payloads without external network calls.
@@ -57,7 +58,7 @@ First cut:
 
 Not implemented yet:
 
-- Runtime integration that starts realtime websocket workers for active nodes.
+- Realtime receipts currently acknowledge queued work; final applied/failed receipts still need to be tied to runtime outcomes.
 - External public IP discovery when local interface addresses are not enough.
 - Complete per-protocol user options for bandwidth limits, device-limit enforcement, and advanced protocol-specific credentials.
 - Download verification and rollback around self-upgrade execution.
