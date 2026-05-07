@@ -23,6 +23,7 @@
 - Runtime bootstrap plan combining resolved config, node bootstrap, core plan, and HY2 status.
 - External core config file layout, Xray JSON rendering skeleton, and atomic writes.
 - Core process spec and supervisor abstraction for start/reload/stop/status.
+- Health and machine status payload aggregation matching keliboard status contract.
 - Machine node resolution and subscription proxy config merging.
 - Compatibility tests around protocol parsing and endpoint construction.
 

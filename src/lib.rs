@@ -2,6 +2,7 @@
 
 pub mod config;
 pub mod core;
+pub mod health;
 pub mod machine;
 pub mod node;
 pub mod panel;
