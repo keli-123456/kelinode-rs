@@ -35,6 +35,13 @@ pub struct InboundPlan {
     pub cipher: String,
     pub vless_decryption: String,
     pub padding_scheme: Vec<String>,
+    pub congestion_control: String,
+    pub zero_rtt_handshake: bool,
+    pub up_mbps: u32,
+    pub down_mbps: u32,
+    pub obfs: String,
+    pub obfs_password: String,
+    pub ignore_client_bandwidth: bool,
     pub alpn: Vec<String>,
     pub fallback_to_ipv4: bool,
     pub cert_file: String,
@@ -259,6 +266,13 @@ pub fn build_inbound_plan_with_users(
             .map(|item| item.trim().to_string())
             .filter(|item| !item.is_empty())
             .collect(),
+        congestion_control: node.common.congestion_control.trim().to_string(),
+        zero_rtt_handshake: node.common.zero_rtt_handshake,
+        up_mbps: node.common.up_mbps,
+        down_mbps: node.common.down_mbps,
+        obfs: node.common.obfs.trim().to_string(),
+        obfs_password: node.common.obfs_password.trim().to_string(),
+        ignore_client_bandwidth: node.common.ignore_client_bandwidth,
         alpn: resolve_tls_alpn(node),
         fallback_to_ipv4: should_fallback_node_listen_ip(&node.common.listen_ip),
         cert_file: cert.map(cert_file).unwrap_or_default(),
@@ -608,9 +622,8 @@ fn render_xray_inbound_settings(inbound: &InboundPlan) -> Value {
         "socks" => render_xray_socks_settings(inbound),
         "http" => render_xray_http_settings(inbound),
         "anytls" => render_xray_anytls_settings(inbound, clients),
-        "hysteria" | "tuic" => json!({
-            "clients": clients
-        }),
+        "hysteria" => render_xray_hysteria_settings(clients),
+        "tuic" => render_xray_tuic_settings(inbound, clients),
         _ => json!({}),
     }
 }
@@ -726,6 +739,28 @@ fn render_xray_anytls_settings(inbound: &InboundPlan, clients: Vec<Value>) -> Va
     Value::Object(settings)
 }
 
+fn render_xray_hysteria_settings(clients: Vec<Value>) -> Value {
+    json!({
+        "version": 2,
+        "clients": clients
+    })
+}
+
+fn render_xray_tuic_settings(inbound: &InboundPlan, clients: Vec<Value>) -> Value {
+    let mut settings = Map::new();
+    settings.insert("clients".to_string(), Value::Array(clients));
+    if !inbound.congestion_control.trim().is_empty() {
+        settings.insert(
+            "congestionControl".to_string(),
+            json!(&inbound.congestion_control),
+        );
+    }
+    if inbound.zero_rtt_handshake {
+        settings.insert("zeroRttHandshake".to_string(), json!(true));
+    }
+    Value::Object(settings)
+}
+
 fn render_xray_stream_settings(inbound: &InboundPlan) -> Map<String, Value> {
     let mut stream = Map::new();
     if !inbound.network.trim().is_empty() {
@@ -752,8 +787,49 @@ fn render_xray_stream_settings(inbound: &InboundPlan) -> Map<String, Value> {
         }
         _ => {}
     }
+    if inbound.protocol == "hysteria" {
+        stream.insert(
+            "hysteriaSettings".to_string(),
+            render_xray_hysteria_stream_settings(inbound),
+        );
+    }
 
     stream
+}
+
+fn render_xray_hysteria_stream_settings(inbound: &InboundPlan) -> Value {
+    let mut settings = Map::new();
+    settings.insert("version".to_string(), json!(2));
+
+    let mut final_mask = Map::new();
+    if !inbound.ignore_client_bandwidth && (inbound.up_mbps > 0 || inbound.down_mbps > 0) {
+        final_mask.insert(
+            "quicParams".to_string(),
+            json!({
+                "congestion": "force-brutal",
+                "brutalUp": format!("{}mbps", inbound.up_mbps),
+                "brutalDown": format!("{}mbps", inbound.down_mbps)
+            }),
+        );
+    }
+    if !inbound.obfs.is_empty() && !inbound.obfs_password.is_empty() {
+        final_mask.insert(
+            "udp".to_string(),
+            json!([
+                {
+                    "type": &inbound.obfs,
+                    "settings": {
+                        "password": &inbound.obfs_password
+                    }
+                }
+            ]),
+        );
+    }
+    if !final_mask.is_empty() {
+        settings.insert("finalMask".to_string(), Value::Object(final_mask));
+    }
+
+    Value::Object(settings)
 }
 
 fn render_xray_network_settings(
@@ -1267,6 +1343,91 @@ mod tests {
         assert_eq!(
             config["inbounds"][0]["settings"]["paddingScheme"][0],
             "stop=8"
+        );
+    }
+
+    #[test]
+    fn renders_hysteria2_bandwidth_and_obfs_settings() {
+        let mut node = test_node("hysteria2", 23, "");
+        node.common.up_mbps = 100;
+        node.common.down_mbps = 200;
+        node.common.obfs = "salamander".to_string();
+        node.common.obfs_password = "obfs-secret".to_string();
+        let tag = node.tag.clone();
+        let mut users = std::collections::BTreeMap::new();
+        users.insert(
+            tag,
+            vec![UserInfo {
+                id: 23,
+                uuid: "hy2-password".to_string(),
+                speed_limit: 0,
+                device_limit: 0,
+            }],
+        );
+        let plan = CorePlan::from_nodes_with_users(
+            CoreKind::Xray,
+            PathBuf::from("/srv/v2node/config.json"),
+            &[node],
+            &users,
+        )
+        .unwrap();
+
+        let config = render_core_config(&plan).unwrap();
+
+        assert_eq!(config["inbounds"][0]["settings"]["version"], 2);
+        assert_eq!(
+            config["inbounds"][0]["settings"]["clients"][0]["password"],
+            "hy2-password"
+        );
+        assert_eq!(
+            config["inbounds"][0]["streamSettings"]["hysteriaSettings"]["finalMask"]
+                ["quicParams"]["brutalUp"],
+            "100mbps"
+        );
+        assert_eq!(
+            config["inbounds"][0]["streamSettings"]["hysteriaSettings"]["finalMask"]["udp"]
+                [0]["settings"]["password"],
+            "obfs-secret"
+        );
+    }
+
+    #[test]
+    fn renders_tuic_congestion_and_zero_rtt_settings() {
+        let mut node = test_node("tuic", 24, "");
+        node.common.congestion_control = "bbr".to_string();
+        node.common.zero_rtt_handshake = true;
+        let tag = node.tag.clone();
+        let mut users = std::collections::BTreeMap::new();
+        users.insert(
+            tag,
+            vec![UserInfo {
+                id: 24,
+                uuid: "tuic-password".to_string(),
+                speed_limit: 0,
+                device_limit: 0,
+            }],
+        );
+        let plan = CorePlan::from_nodes_with_users(
+            CoreKind::Xray,
+            PathBuf::from("/srv/v2node/config.json"),
+            &[node],
+            &users,
+        )
+        .unwrap();
+
+        let config = render_core_config(&plan).unwrap();
+
+        assert_eq!(
+            config["inbounds"][0]["settings"]["congestionControl"],
+            "bbr"
+        );
+        assert_eq!(
+            config["inbounds"][0]["settings"]["zeroRttHandshake"],
+            true
+        );
+        assert_eq!(
+            config["inbounds"][0]["settings"]["clients"][0]["password"],
+            "tuic-password"
         );
     }
 
