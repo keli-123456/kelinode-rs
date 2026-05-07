@@ -7,6 +7,7 @@
 - Panel client with the existing Keli endpoint paths and query parameters.
 - Node/user/alive/traffic payloads compatible with `kelinode`.
 - Node manager initialization skeleton with machine-mode failure accounting.
+- Panel-backed node manager bootstrap path.
 - Machine node resolution and subscription proxy config merging.
 - Compatibility tests around protocol parsing and endpoint construction.
 

@@ -1,4 +1,5 @@
 use crate::config::{NodeConfig, RealtimeConfig};
+use crate::panel::client::{PanelClient, PanelClientOptions};
 use crate::panel::types::NodeInfo;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -27,6 +28,43 @@ pub struct NodeManager {
 }
 
 impl NodeManager {
+    pub async fn build_from_panel(
+        nodes: &[NodeConfig],
+        realtime: RealtimeConfig,
+        options: NodeManagerOptions,
+    ) -> Result<Self, String> {
+        let mut manager = Self {
+            runtimes: Vec::with_capacity(nodes.len()),
+            failures: Vec::new(),
+            realtime,
+            continue_on_error: options.continue_on_error,
+        };
+
+        for config in nodes {
+            match load_panel_node_info(config).await {
+                Ok(Some(info)) => manager.runtimes.push(NodeRuntime {
+                    config: config.clone(),
+                    info,
+                }),
+                Ok(None) => {
+                    let error = "received empty node info".to_string();
+                    if !options.continue_on_error {
+                        return Err(format_node_error("get node info", config, &error));
+                    }
+                    manager.record_failure(config, error);
+                }
+                Err(error) => {
+                    if !options.continue_on_error {
+                        return Err(format_node_error("get node info", config, &error));
+                    }
+                    manager.record_failure(config, error);
+                }
+            }
+        }
+
+        Ok(manager)
+    }
+
     pub fn build_with_loader<F>(
         nodes: &[NodeConfig],
         realtime: RealtimeConfig,
@@ -108,6 +146,15 @@ impl NodeManager {
             error,
         });
     }
+}
+
+async fn load_panel_node_info(config: &NodeConfig) -> Result<Option<NodeInfo>, String> {
+    let options = PanelClientOptions::from(config);
+    let mut client = PanelClient::new(options).map_err(|err| err.to_string())?;
+    client
+        .get_node_info()
+        .await
+        .map_err(|err| err.to_string())
 }
 
 fn format_node_error(action: &str, config: &NodeConfig, error: &str) -> String {
