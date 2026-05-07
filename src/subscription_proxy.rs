@@ -1,5 +1,7 @@
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
+use std::net::IpAddr;
+use std::net::Ipv4Addr;
 
 use crate::config::{SubscriptionProxyConfig, SubscriptionProxyProfile};
 
@@ -117,6 +119,50 @@ pub fn normalize_subscription_proxy_config(
     }
 
     Ok(config)
+}
+
+pub fn normalize_subscription_proxy_config_with_public_ipv4<F>(
+    source: &SubscriptionProxyConfig,
+    mut detect_public_ipv4: F,
+) -> Result<SubscriptionProxyConfig, String>
+where
+    F: FnMut() -> Result<String, String>,
+{
+    let mut config = normalize_subscription_proxy_config(source)?;
+    if config.enabled {
+        let (domain, _) = resolve_subscription_certificate_domain(
+            &config.certificate_domain,
+            &mut detect_public_ipv4,
+        )?;
+        config.certificate_domain = domain;
+    }
+    Ok(config)
+}
+
+pub fn resolve_subscription_certificate_domain<F>(
+    domain: &str,
+    mut detect_public_ipv4: F,
+) -> Result<(String, bool), String>
+where
+    F: FnMut() -> Result<String, String>,
+{
+    let domain = domain.trim();
+    match domain.parse::<IpAddr>() {
+        Ok(IpAddr::V4(_)) | Err(_) if !domain.is_empty() => Ok((domain.to_string(), false)),
+        Ok(IpAddr::V6(_)) => {
+            let original = domain.to_string();
+            let Some(ipv4) = detect_valid_public_ipv4(&mut detect_public_ipv4) else {
+                return Ok((original, false));
+            };
+            Ok((ipv4.clone(), ipv4 != original))
+        }
+        Ok(IpAddr::V4(_)) | Err(_) => {
+            let Some(ipv4) = detect_valid_public_ipv4(&mut detect_public_ipv4) else {
+                return Ok((String::new(), false));
+            };
+            Ok((ipv4, true))
+        }
+    }
 }
 
 pub fn plan_subscription_proxy_request(
@@ -259,6 +305,31 @@ fn is_valid_upstream_base_url(value: &str) -> bool {
         .unwrap_or(false)
 }
 
+fn is_public_ipv4(ip: Ipv4Addr) -> bool {
+    !(ip.is_private()
+        || ip.is_loopback()
+        || ip.is_link_local()
+        || ip.is_multicast()
+        || ip.is_broadcast()
+        || ip.is_unspecified())
+}
+
+fn detect_valid_public_ipv4<F>(detect_public_ipv4: &mut F) -> Option<String>
+where
+    F: FnMut() -> Result<String, String>,
+{
+    let Ok(ipv4) = detect_public_ipv4() else {
+        return None;
+    };
+    let Ok(parsed) = ipv4.trim().parse::<Ipv4Addr>() else {
+        return None;
+    };
+    if !is_public_ipv4(parsed) {
+        return None;
+    }
+    Some(parsed.to_string())
+}
+
 fn percent_encode_path_segment(value: &str) -> String {
     let mut output = String::new();
     for byte in value.as_bytes() {
@@ -355,10 +426,11 @@ mod tests {
 
     use super::{
         build_subscription_upstream_url, normalize_subscription_proxy_config,
+        normalize_subscription_proxy_config_with_public_ipv4,
         plan_subscription_proxy_request, plan_subscription_proxy_response,
-        SubscriptionProxyInboundRequest, SubscriptionProxyRoute, SubscriptionProxyRouteError,
-        SubscriptionProxyUpstreamResponse, DEFAULT_CHALLENGE_DIR, DEFAULT_HTTPS_LISTEN,
-        DEFAULT_MAX_RESPONSE_BYTES,
+        resolve_subscription_certificate_domain, SubscriptionProxyInboundRequest,
+        SubscriptionProxyRoute, SubscriptionProxyRouteError, SubscriptionProxyUpstreamResponse,
+        DEFAULT_CHALLENGE_DIR, DEFAULT_HTTPS_LISTEN, DEFAULT_MAX_RESPONSE_BYTES,
     };
     use crate::config::{SubscriptionProxyConfig, SubscriptionProxyProfile};
 
@@ -381,6 +453,81 @@ mod tests {
         assert_eq!(config.profiles[0].site_id, "site-a");
         assert_eq!(config.profiles[0].upstream_base_url, "https://panel.example.test");
         assert_eq!(config.profiles[0].subscribe_path, "answer/land");
+    }
+
+    #[test]
+    fn resolves_ipv6_certificate_domain_to_public_ipv4() {
+        let (domain, changed) =
+            resolve_subscription_certificate_domain("2607:f358:1a:e::d4d9:5831", || {
+                Ok("8.8.8.8".to_string())
+            })
+            .unwrap();
+
+        assert_eq!(domain, "8.8.8.8");
+        assert!(changed);
+    }
+
+    #[test]
+    fn resolves_empty_certificate_domain_to_public_ipv4_like_go_agent() {
+        let (domain, changed) =
+            resolve_subscription_certificate_domain("", || Ok("8.8.8.8".to_string())).unwrap();
+
+        assert_eq!(domain, "8.8.8.8");
+        assert!(changed);
+    }
+
+    #[test]
+    fn keeps_ipv4_and_hostname_certificate_domains_without_detection() {
+        let (domain, changed) = resolve_subscription_certificate_domain("152.53.135.140", || {
+            panic!("IPv4 certificate domains must not probe another address")
+        })
+        .unwrap();
+        assert_eq!(domain, "152.53.135.140");
+        assert!(!changed);
+
+        let (domain, changed) = resolve_subscription_certificate_domain("sub.example.test", || {
+            panic!("host certificate domains must not probe another address")
+        })
+        .unwrap();
+        assert_eq!(domain, "sub.example.test");
+        assert!(!changed);
+    }
+
+    #[test]
+    fn normalizes_certificate_domain_with_public_ipv4_resolver() {
+        let config = normalize_subscription_proxy_config_with_public_ipv4(
+            &SubscriptionProxyConfig {
+                enabled: true,
+                certificate_domain: "2607:f358:1a:e::d4d9:5831".to_string(),
+                site_id: "site-a".to_string(),
+                upstream_base_url: "https://panel.example.test".to_string(),
+                ..SubscriptionProxyConfig::default()
+            },
+            || Ok("8.8.8.8".to_string()),
+        )
+        .unwrap();
+
+        assert_eq!(config.certificate_domain, "8.8.8.8");
+        assert_eq!(config.profiles.len(), 1);
+    }
+
+    #[test]
+    fn keeps_original_certificate_domain_when_public_ipv4_detection_fails() {
+        let (domain, changed) =
+            resolve_subscription_certificate_domain("2607:f358:1a:e::d4d9:5831", || {
+                Ok("10.0.0.1".to_string())
+            })
+            .unwrap();
+        assert_eq!(domain, "2607:f358:1a:e::d4d9:5831");
+        assert!(!changed);
+
+        let (domain, changed) =
+            resolve_subscription_certificate_domain("2607:f358:1a:e::d4d9:5831", || {
+                Err("network unavailable".to_string())
+            })
+            .unwrap();
+        assert_eq!(domain, "2607:f358:1a:e::d4d9:5831");
+        assert!(!changed);
     }
 
     #[test]

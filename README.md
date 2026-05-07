@@ -70,6 +70,7 @@ First cut:
 - Normalize subscription proxy profiles and build upstream subscription URLs compatible with the Go agent.
 - Plan subscription proxy `/health` and `/sub/{site}/{token}` requests with Go-compatible header forwarding.
 - Plan subscription proxy response forwarding with size limits, header filtering, and HEAD handling.
+- Resolve IPv6 subscription proxy certificate domains through an injectable public IPv4 detector.
 
 Not implemented yet:
 
