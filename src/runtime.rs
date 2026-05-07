@@ -1,7 +1,9 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use crate::config::{AgentConfig, AppConfig, ResolvedConfig, SubscriptionProxyConfig};
+use crate::config::{
+    AgentConfig, AppConfig, NodeConfig, ResolvedConfig, SubscriptionProxyConfig,
+};
 use crate::core::{CoreKind, CorePlan};
 use crate::machine::{resolve_machine_profiles_from_panel, MachineResolveSummary};
 use crate::node::{users_by_node_tag, NodeFailure, NodeManager, NodeManagerOptions};
@@ -10,6 +12,7 @@ use crate::port_forward::{
     build_hysteria_port_forward_rules, new_hysteria_port_forward_status,
     HysteriaPortForwardStatus,
 };
+use crate::realtime::{resolve_realtime_options, RealtimeOptions};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RuntimeMode {
@@ -33,6 +36,7 @@ pub struct RuntimeBootstrapPlan {
     pub node_infos: Vec<NodeInfo>,
     pub node_failures: Vec<NodeFailure>,
     pub core_plan: Option<CorePlan>,
+    pub realtime_options: Vec<RealtimeOptions>,
     pub hy2_port_forward: HysteriaPortForwardStatus,
     pub subscription_proxy_only: bool,
 }
@@ -156,6 +160,7 @@ pub fn build_runtime_bootstrap_plan_with_users(
         )
     };
     let (hy2_rules, hy2_errors) = build_hysteria_port_forward_rules(&node_infos);
+    let realtime_options = resolve_realtime_options_for_nodes(&resolved, &node_infos);
     let bootstrap = Bootstrap::from_resolved(&resolved);
 
     Ok(RuntimeBootstrapPlan {
@@ -165,6 +170,7 @@ pub fn build_runtime_bootstrap_plan_with_users(
         node_infos,
         node_failures,
         core_plan,
+        realtime_options,
         hy2_port_forward: new_hysteria_port_forward_status(&hy2_rules, &hy2_errors, false),
         subscription_proxy_only,
     })
@@ -184,6 +190,31 @@ pub fn rebuild_runtime_plan_with_users(
 
 pub fn core_config_path(resolved: &ResolvedConfig) -> PathBuf {
     PathBuf::from(&resolved.kernel.config_dir).join("config.json")
+}
+
+pub fn node_config_for_info<'a>(
+    resolved: &'a ResolvedConfig,
+    node_id: u32,
+    tag: &str,
+) -> Option<&'a NodeConfig> {
+    let exact = resolved.nodes.iter().find(|config| {
+        config.node_id == node_id
+            && tag.starts_with(&format!("[{}]", config.url.trim_end_matches('/')))
+    });
+    if exact.is_some() {
+        return exact;
+    }
+
+    let mut candidates = resolved
+        .nodes
+        .iter()
+        .filter(|config| config.node_id == node_id);
+    let first = candidates.next()?;
+    if candidates.next().is_none() {
+        Some(first)
+    } else {
+        None
+    }
 }
 
 pub fn apply_machine_summary(
@@ -244,6 +275,20 @@ fn fill_if_empty(target: &mut String, value: &str) {
     }
 }
 
+fn resolve_realtime_options_for_nodes(
+    resolved: &ResolvedConfig,
+    node_infos: &[NodeInfo],
+) -> Vec<RealtimeOptions> {
+    node_infos
+        .iter()
+        .filter_map(|node| {
+            node_config_for_info(resolved, node.id, &node.tag).and_then(|config| {
+                resolve_realtime_options(&resolved.realtime, config, node)
+            })
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
@@ -252,7 +297,8 @@ mod tests {
 
     use crate::config::{
         AgentConfig, AppConfig, MachineProfileConfig, NodeConfig, ResolvedConfig,
-        ResolvedMachineConfig, SubscriptionProxyConfig, SubscriptionProxyProfile,
+        ResolvedMachineConfig, RealtimeConfig, SubscriptionProxyConfig,
+        SubscriptionProxyProfile,
     };
     use crate::machine::MachineResolveSummary;
     use crate::panel::types::{CommonNode, NodeInfo, UserInfo};
@@ -457,7 +503,74 @@ mod tests {
         );
     }
 
+    #[test]
+    fn builds_realtime_options_for_matching_active_node_configs() {
+        let resolved = ResolvedConfig {
+            kernel: Default::default(),
+            realtime: RealtimeConfig {
+                enabled: true,
+                ..RealtimeConfig::default()
+            },
+            machine: ResolvedMachineConfig {
+                enabled: true,
+                continue_on_error: true,
+                profiles: Vec::new(),
+            },
+            agent: AgentConfig::default(),
+            nodes: vec![
+                NodeConfig {
+                    url: "https://panel-a.example.test".to_string(),
+                    token: "token-a".to_string(),
+                    node_id: 7,
+                    machine_id: 1,
+                    ..NodeConfig::default()
+                },
+                NodeConfig {
+                    url: "https://panel-b.example.test".to_string(),
+                    token: "token-b".to_string(),
+                    node_id: 7,
+                    machine_id: 2,
+                    ..NodeConfig::default()
+                },
+            ],
+        };
+        let nodes = vec![
+            test_node_for_url("https://panel-a.example.test", "vless", 7, 443, ""),
+            test_node_for_url("https://panel-b.example.test", "vless", 7, 443, ""),
+        ];
+
+        let plan = build_runtime_bootstrap_plan(resolved, nodes, Vec::new()).unwrap();
+
+        assert_eq!(plan.realtime_options.len(), 2);
+        assert_eq!(
+            plan.realtime_options[0].url,
+            "wss://panel-a.example.test/ws/node"
+        );
+        assert_eq!(plan.realtime_options[0].token, "token-a");
+        assert_eq!(
+            plan.realtime_options[1].url,
+            "wss://panel-b.example.test/ws/node"
+        );
+        assert_eq!(plan.realtime_options[1].token, "token-b");
+    }
+
     fn test_node(protocol: &str, node_id: u32, server_port: u16, port: &str) -> NodeInfo {
+        test_node_for_url(
+            "https://panel.example.test",
+            protocol,
+            node_id,
+            server_port,
+            port,
+        )
+    }
+
+    fn test_node_for_url(
+        api_host: &str,
+        protocol: &str,
+        node_id: u32,
+        server_port: u16,
+        port: &str,
+    ) -> NodeInfo {
         let common: CommonNode = serde_json::from_value(json!({
             "protocol": protocol,
             "server_port": server_port,
@@ -465,6 +578,6 @@ mod tests {
         }))
         .unwrap();
 
-        NodeInfo::from_common("https://panel.example.test", node_id, common).unwrap()
+        NodeInfo::from_common(api_host, node_id, common).unwrap()
     }
 }

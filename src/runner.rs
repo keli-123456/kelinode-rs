@@ -13,7 +13,10 @@ use crate::panel::client::{PanelClient, PanelClientOptions};
 use crate::panel::types::UserInfo;
 use crate::port_forward::PortForwardExecutor;
 use crate::process::ProcessSupervisor;
-use crate::runtime::{rebuild_runtime_plan_with_users, RuntimeBootstrapPlan};
+use crate::runtime::{
+    node_config_for_info as runtime_node_config_for_info, rebuild_runtime_plan_with_users,
+    RuntimeBootstrapPlan,
+};
 use crate::system::ResourceSampler;
 use crate::user::{
     apply_full_user_list, apply_user_delta_body, load_user_sync_state, save_user_sync_state,
@@ -415,25 +418,7 @@ fn node_config_for_info<'a>(
     node_id: u32,
     tag: &str,
 ) -> Option<&'a NodeConfig> {
-    let exact = plan.resolved.nodes.iter().find(|config| {
-        config.node_id == node_id
-            && tag.starts_with(&format!("[{}]", config.url.trim_end_matches('/')))
-    });
-    if exact.is_some() {
-        return exact;
-    }
-
-    let mut candidates = plan
-        .resolved
-        .nodes
-        .iter()
-        .filter(|config| config.node_id == node_id);
-    let first = candidates.next()?;
-    if candidates.next().is_none() {
-        Some(first)
-    } else {
-        None
-    }
+    runtime_node_config_for_info(&plan.resolved, node_id, tag)
 }
 
 pub fn should_run(tick: usize, interval: usize) -> bool {

@@ -4,6 +4,9 @@ use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::config::{NodeConfig, RealtimeConfig};
+use crate::panel::types::NodeInfo;
+
 pub const REASON_SUBSCRIPTION_PROXY_CERT_STATE_CHANGED: &str =
     "subscription_proxy.cert_state_changed";
 pub const REASON_SERVER_MACHINE_BOUND: &str = "admin.server_machine.bound";
@@ -70,6 +73,17 @@ pub enum RealtimeInboundAction {
     HelloAck,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub enum RealtimeRuntimeTask {
+    Ignore,
+    Pong(RealtimeMessage),
+    ConfigCheck,
+    ForceReload,
+    UserSync,
+    Error(String),
+    HelloAck,
+}
+
 impl Default for RealtimeOptions {
     fn default() -> Self {
         Self {
@@ -83,6 +97,67 @@ impl Default for RealtimeOptions {
             log_tag: String::new(),
         }
     }
+}
+
+pub fn resolve_realtime_options(
+    local: &RealtimeConfig,
+    node_config: &NodeConfig,
+    node_info: &NodeInfo,
+) -> Option<RealtimeOptions> {
+    let panel_realtime = node_info
+        .common
+        .base_config
+        .as_ref()
+        .and_then(|config| config.realtime.as_ref());
+
+    let panel_enabled = panel_realtime.map(|config| config.enabled).unwrap_or(false);
+    let panel_url = panel_realtime
+        .map(|config| config.url.trim())
+        .unwrap_or_default();
+    let panel_ping = panel_realtime
+        .map(|config| realtime_interval_to_duration(&config.ping_interval))
+        .unwrap_or_default();
+
+    let mut url = local.url.trim().to_string();
+    let enabled = local.enabled || !url.is_empty() || panel_enabled;
+    if !enabled {
+        return None;
+    }
+
+    if url.is_empty() {
+        url = panel_url.to_string();
+    }
+    if url.is_empty() {
+        url = derive_realtime_url(&node_config.url);
+    }
+    if url.is_empty() {
+        return None;
+    }
+
+    let mut ping_interval = panel_ping;
+    if local.ping_interval > 0 {
+        ping_interval = Duration::from_secs(local.ping_interval);
+    }
+    if ping_interval.is_zero() {
+        ping_interval = Duration::from_secs(30);
+    }
+
+    let reconnect_delay = if local.reconnect_interval > 0 {
+        Duration::from_secs(local.reconnect_interval)
+    } else {
+        Duration::from_secs(5)
+    };
+
+    Some(RealtimeOptions {
+        url,
+        token: node_config.token.trim().to_string(),
+        node_id: node_config.node_id,
+        machine_id: node_config.machine_id,
+        node_type: "v2node".to_string(),
+        ping_interval,
+        reconnect_delay,
+        log_tag: node_info.tag.clone(),
+    })
 }
 
 impl RealtimeMessage {
@@ -105,6 +180,18 @@ impl RealtimeMessage {
             ts,
             ..Self::default()
         }
+    }
+}
+
+pub fn realtime_runtime_task(message: &RealtimeMessage, now_ts: i64) -> RealtimeRuntimeTask {
+    match realtime_inbound_action(message) {
+        RealtimeInboundAction::Ignore => RealtimeRuntimeTask::Ignore,
+        RealtimeInboundAction::Pong => RealtimeRuntimeTask::Pong(RealtimeMessage::pong(now_ts)),
+        RealtimeInboundAction::ConfigCheck => RealtimeRuntimeTask::ConfigCheck,
+        RealtimeInboundAction::ForceReload => RealtimeRuntimeTask::ForceReload,
+        RealtimeInboundAction::UserSync => RealtimeRuntimeTask::UserSync,
+        RealtimeInboundAction::Error(message) => RealtimeRuntimeTask::Error(message),
+        RealtimeInboundAction::HelloAck => RealtimeRuntimeTask::HelloAck,
     }
 }
 
@@ -235,11 +322,15 @@ fn is_zero_u32(value: &u32) -> bool {
 mod tests {
     use serde_json::json;
 
+    use crate::config::{NodeConfig, RealtimeConfig};
+    use crate::panel::types::{CommonNode, NodeInfo};
+
     use super::{
         build_realtime_dial_url, build_realtime_receipt, derive_realtime_url,
         format_realtime_user_summary, realtime_inbound_action, realtime_interval_to_duration,
-        should_force_realtime_config_reload, truncate_realtime_receipt_message,
-        RealtimeInboundAction, RealtimeMessage, RealtimeOptions, RealtimeUserSummary,
+        realtime_runtime_task, resolve_realtime_options, should_force_realtime_config_reload,
+        truncate_realtime_receipt_message, RealtimeInboundAction, RealtimeMessage,
+        RealtimeOptions, RealtimeRuntimeTask, RealtimeUserSummary,
         REASON_SERVER_MACHINE_BOUND, REASON_SUBSCRIPTION_PROXY_CERT_STATE_CHANGED,
     };
 
@@ -337,6 +428,129 @@ mod tests {
     }
 
     #[test]
+    fn resolves_realtime_options_from_panel_base_config() {
+        let node_config = test_node_config();
+        let node_info = test_node_info(json!({
+            "protocol": "vless",
+            "base_config": {
+                "realtime": {
+                    "enabled": true,
+                    "url": "wss://panel.example.test/custom/ws",
+                    "ping_interval": "18"
+                }
+            }
+        }));
+
+        let options =
+            resolve_realtime_options(&RealtimeConfig::default(), &node_config, &node_info)
+                .unwrap();
+
+        assert_eq!(options.url, "wss://panel.example.test/custom/ws");
+        assert_eq!(options.token, "token");
+        assert_eq!(options.node_id, 7);
+        assert_eq!(options.machine_id, 3);
+        assert_eq!(options.ping_interval.as_secs(), 18);
+        assert_eq!(options.reconnect_delay.as_secs(), 5);
+        assert_eq!(options.log_tag, node_info.tag);
+    }
+
+    #[test]
+    fn local_realtime_config_overrides_panel_url_and_intervals() {
+        let node_config = test_node_config();
+        let node_info = test_node_info(json!({
+            "protocol": "vless",
+            "base_config": {
+                "realtime": {
+                    "enabled": true,
+                    "url": "wss://panel.example.test/custom/ws",
+                    "ping_interval": 18
+                }
+            }
+        }));
+        let local = RealtimeConfig {
+            url: "wss://local.example.test/ws/node".to_string(),
+            ping_interval: 9,
+            reconnect_interval: 4,
+            ..RealtimeConfig::default()
+        };
+
+        let options = resolve_realtime_options(&local, &node_config, &node_info).unwrap();
+
+        assert_eq!(options.url, "wss://local.example.test/ws/node");
+        assert_eq!(options.ping_interval.as_secs(), 9);
+        assert_eq!(options.reconnect_delay.as_secs(), 4);
+    }
+
+    #[test]
+    fn derives_realtime_options_from_panel_api_host_when_enabled_locally() {
+        let node_config = test_node_config();
+        let node_info = test_node_info(json!({
+            "protocol": "vless"
+        }));
+        let local = RealtimeConfig {
+            enabled: true,
+            ..RealtimeConfig::default()
+        };
+
+        let options = resolve_realtime_options(&local, &node_config, &node_info).unwrap();
+
+        assert_eq!(options.url, "wss://panel.example.test/ws/node");
+        assert_eq!(options.ping_interval.as_secs(), 30);
+    }
+
+    #[test]
+    fn realtime_options_stay_disabled_without_local_or_panel_enablement() {
+        let node_config = test_node_config();
+        let node_info = test_node_info(json!({
+            "protocol": "vless"
+        }));
+
+        assert!(resolve_realtime_options(
+            &RealtimeConfig::default(),
+            &node_config,
+            &node_info
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn maps_realtime_messages_to_runtime_tasks() {
+        assert_eq!(
+            realtime_runtime_task(
+                &RealtimeMessage {
+                    message_type: "ping".to_string(),
+                    ..RealtimeMessage::default()
+                },
+                123
+            ),
+            RealtimeRuntimeTask::Pong(RealtimeMessage::pong(123))
+        );
+        assert_eq!(
+            realtime_runtime_task(
+                &RealtimeMessage {
+                    message_type: "invalidate".to_string(),
+                    topic: "config".to_string(),
+                    reason: REASON_SERVER_MACHINE_BOUND.to_string(),
+                    ..RealtimeMessage::default()
+                },
+                123
+            ),
+            RealtimeRuntimeTask::ForceReload
+        );
+        assert_eq!(
+            realtime_runtime_task(
+                &RealtimeMessage {
+                    message_type: "invalidate".to_string(),
+                    topic: "users".to_string(),
+                    ..RealtimeMessage::default()
+                },
+                123
+            ),
+            RealtimeRuntimeTask::UserSync
+        );
+    }
+
+    #[test]
     fn formats_user_summary_and_intervals() {
         assert_eq!(
             format_realtime_user_summary(RealtimeUserSummary {
@@ -352,5 +566,20 @@ mod tests {
         );
         assert_eq!(realtime_interval_to_duration(&json!(30)).as_secs(), 30);
         assert_eq!(truncate_realtime_receipt_message(" ok "), "ok");
+    }
+
+    fn test_node_config() -> NodeConfig {
+        NodeConfig {
+            url: "https://panel.example.test/base".to_string(),
+            token: "token".to_string(),
+            node_id: 7,
+            machine_id: 3,
+            ..NodeConfig::default()
+        }
+    }
+
+    fn test_node_info(value: serde_json::Value) -> NodeInfo {
+        let common: CommonNode = serde_json::from_value(value).unwrap();
+        NodeInfo::from_common("https://panel.example.test", 7, common).unwrap()
     }
 }

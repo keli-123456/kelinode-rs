@@ -45,6 +45,7 @@
 - User sync state advancement for delta and full-list responses with empty-list no-change semantics.
 - Runtime user refresh backed by persisted user sync state with delta-first and full-list fallback.
 - Realtime protocol models for websocket messages, receipts, URL derivation, and invalidate actions.
+- Realtime runtime option resolution and message-to-task mapping for later websocket workers.
 - Linux root disk usage and network byte counter collection for machine status payloads.
 - Linux `/proc/stat` CPU usage sampler with loadavg fallback for machine status payloads.
 - Local/public IPv4/IPv6 candidate snapshot collection for machine status payloads.

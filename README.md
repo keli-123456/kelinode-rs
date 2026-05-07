@@ -39,6 +39,8 @@ First cut:
 - Advance cached user sync state from delta or full-list responses with Go-compatible empty-list semantics.
 - Use cached user sync state in the runtime loop, preferring `user_delta` and falling back to full user lists for old panels.
 - Add realtime message, receipt, URL, and invalidate-action models compatible with the Go agent worker behavior.
+- Resolve realtime runtime options from local config, panel node base config, and node identity.
+- Map realtime inbound messages into runtime tasks for pong, config checks, forced reloads, and user sync.
 - Collect Linux root disk usage and network byte counters for machine status payloads.
 - Compute Linux CPU usage from `/proc/stat` samples, with `/proc/loadavg` as a fallback.
 - Collect local and public IPv4/IPv6 candidates for machine status payloads without external network calls.
@@ -52,7 +54,7 @@ First cut:
 
 Not implemented yet:
 
-- Realtime websocket workers.
+- Realtime websocket transport workers.
 - External public IP discovery when local interface addresses are not enough.
 - Complete per-protocol user options for bandwidth limits, device-limit enforcement, and advanced protocol-specific credentials.
 - Download verification and rollback around self-upgrade execution.
