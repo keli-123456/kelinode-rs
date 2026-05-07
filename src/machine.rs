@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -6,8 +7,9 @@ use serde_json::Value;
 use crate::config::{
     AgentConfig, MachineProfileConfig, NodeConfig,
     SubscriptionProxyConfig as RuntimeSubscriptionProxyConfig, SubscriptionProxyProfile,
-    DEFAULT_CONFIG_DIR,
+    DEFAULT_CONFIG_DIR, DEFAULT_TIMEOUT_SECS,
 };
+use crate::panel::{PanelClient, PanelClientOptions};
 use crate::panel::types::RealtimeBaseConfig;
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]
@@ -274,6 +276,22 @@ pub fn resolve_machine_profiles(
     Ok(summary)
 }
 
+pub async fn fetch_machine_profile_input(profile: MachineProfileConfig) -> MachineProfileInput {
+    let result = fetch_machine_nodes_for_profile(&profile).await;
+    MachineProfileInput { profile, result }
+}
+
+pub async fn resolve_machine_profiles_from_panel(
+    profiles: &[MachineProfileConfig],
+    continue_on_error: bool,
+) -> Result<MachineResolveSummary, String> {
+    let mut inputs = Vec::with_capacity(profiles.len());
+    for profile in profiles {
+        inputs.push(fetch_machine_profile_input(profile.clone()).await);
+    }
+    resolve_machine_profiles(inputs, continue_on_error)
+}
+
 pub fn merge_subscription_proxy(
     target: &mut RuntimeSubscriptionProxyConfig,
     profile: &MachineProfileConfig,
@@ -445,6 +463,30 @@ fn merge_runtime_agent(target: &mut AgentConfig, source: AgentConfig) {
         }
         target.subscription_proxy.profiles.push(profile);
     }
+}
+
+async fn fetch_machine_nodes_for_profile(
+    profile: &MachineProfileConfig,
+) -> Result<MachineNodesResponse, String> {
+    let timeout = if profile.timeout == 0 {
+        DEFAULT_TIMEOUT_SECS
+    } else {
+        profile.timeout
+    };
+    let client = PanelClient::new(PanelClientOptions {
+        api_host: profile.url.clone(),
+        token: profile.token.clone(),
+        node_id: 0,
+        machine_id: profile.machine_id,
+        timeout: Duration::from_secs(timeout),
+        config_dir: profile.config_dir.clone(),
+    })
+    .map_err(|err| err.to_string())?;
+
+    client
+        .get_machine_nodes()
+        .await
+        .map_err(|err| err.to_string())
 }
 
 fn can_run_subscription_proxy_only(agent: &AgentConfig) -> bool {

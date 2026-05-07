@@ -14,6 +14,7 @@
 - V2 handshake and unified report client support.
 - Core inbound planning for protocol/listen/security/ALPN parity.
 - Node TLS certificate runtime defaults from config directory.
+- Panel-backed machine profile fetch and aggregation entrypoint.
 - Machine node resolution and subscription proxy config merging.
 - Compatibility tests around protocol parsing and endpoint construction.
 
