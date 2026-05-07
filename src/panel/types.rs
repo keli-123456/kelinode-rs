@@ -162,7 +162,7 @@ pub struct EncSettings {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct PortValue(pub String);
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Protocol {
     Vmess,
     Vless,

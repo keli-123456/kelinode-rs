@@ -12,6 +12,7 @@
 - User delta and full-list diff helpers compatible with Go `kelinode`.
 - User sync state path/load/save helpers for warm starts.
 - V2 handshake and unified report client support.
+- Core inbound planning for protocol/listen/security/ALPN parity.
 - Machine node resolution and subscription proxy config merging.
 - Compatibility tests around protocol parsing and endpoint construction.
 
