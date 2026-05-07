@@ -20,6 +20,7 @@ First cut:
 - Provide process supervisor and health payload aggregation layers for runtime integration.
 - Apply a runtime plan by writing core config, reconciling HY2 forwarding state, starting/reloading core, and building the machine status payload.
 - Report machine status to `keliboard` and normalize returned reload/upgrade commands for the runtime loop.
+- Run a single runtime tick that applies local state, optionally reports to the panel, and returns a continue/reload/upgrade signal.
 
 Not implemented yet:
 

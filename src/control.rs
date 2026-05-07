@@ -32,6 +32,26 @@ pub struct RuntimePanelAction {
     pub upgrade: Option<MachineUpgradeCommand>,
 }
 
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct RuntimeTickOptions {
+    pub control: RuntimeControlOptions,
+    pub report_to_panel: bool,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct RuntimeTickResult {
+    pub apply: RuntimeApplyResult,
+    pub panel_action: RuntimePanelAction,
+    pub signal: RuntimeLoopSignal,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RuntimeLoopSignal {
+    Continue,
+    Reload,
+    Upgrade(MachineUpgradeCommand),
+}
+
 pub fn apply_runtime_plan<P, F>(
     plan: &RuntimeBootstrapPlan,
     process_supervisor: &mut P,
@@ -109,6 +129,51 @@ pub fn runtime_panel_action(response: &MachineStatusResponse) -> RuntimePanelAct
     }
 }
 
+pub async fn run_runtime_tick<P, F>(
+    plan: &RuntimeBootstrapPlan,
+    process_supervisor: &mut P,
+    port_forward_executor: &mut F,
+    panel_client: Option<&PanelClient>,
+    options: RuntimeTickOptions,
+) -> Result<RuntimeTickResult, String>
+where
+    P: ProcessSupervisor,
+    F: PortForwardExecutor,
+{
+    let apply = apply_runtime_plan(
+        plan,
+        process_supervisor,
+        port_forward_executor,
+        options.control,
+    )?;
+    let panel_action = if options.report_to_panel {
+        let client = panel_client.ok_or_else(|| {
+            "runtime tick requested panel report without panel client".to_string()
+        })?;
+        report_runtime_apply_result(client, &apply).await?
+    } else {
+        RuntimePanelAction::default()
+    };
+    let signal = runtime_loop_signal(&panel_action);
+
+    Ok(RuntimeTickResult {
+        apply,
+        panel_action,
+        signal,
+    })
+}
+
+pub fn runtime_loop_signal(action: &RuntimePanelAction) -> RuntimeLoopSignal {
+    if let Some(upgrade) = &action.upgrade {
+        return RuntimeLoopSignal::Upgrade(upgrade.clone());
+    }
+    if action.reload {
+        RuntimeLoopSignal::Reload
+    } else {
+        RuntimeLoopSignal::Continue
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
@@ -125,7 +190,10 @@ mod tests {
 
     use crate::machine::{MachineStatusResponse, MachineUpgradeCommand};
 
-    use super::{apply_runtime_plan, runtime_panel_action, RuntimeControlOptions};
+    use super::{
+        apply_runtime_plan, run_runtime_tick, runtime_loop_signal, runtime_panel_action,
+        RuntimeControlOptions, RuntimeLoopSignal, RuntimePanelAction, RuntimeTickOptions,
+    };
 
     #[test]
     fn applies_plan_by_writing_config_starting_core_and_building_status() {
@@ -232,6 +300,62 @@ mod tests {
 
         assert!(action.reload);
         assert_eq!(action.upgrade.unwrap().target_version, "v0.4.1");
+    }
+
+    #[test]
+    fn loop_signal_prefers_upgrade_over_reload() {
+        let action = RuntimePanelAction {
+            reload: true,
+            upgrade: Some(MachineUpgradeCommand {
+                id: "upgrade-1".to_string(),
+                target_version: "v0.4.1".to_string(),
+            }),
+        };
+
+        assert_eq!(
+            runtime_loop_signal(&action),
+            RuntimeLoopSignal::Upgrade(MachineUpgradeCommand {
+                id: "upgrade-1".to_string(),
+                target_version: "v0.4.1".to_string(),
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn tick_can_run_without_panel_reporting() {
+        let resolved = ResolvedConfig {
+            kernel: Default::default(),
+            realtime: Default::default(),
+            machine: ResolvedMachineConfig {
+                enabled: true,
+                continue_on_error: true,
+                profiles: Vec::new(),
+            },
+            agent: Default::default(),
+            nodes: Vec::new(),
+        };
+        let plan = build_runtime_bootstrap_plan(resolved, Vec::new(), Vec::new()).unwrap();
+        let mut process = MemoryProcessSupervisor::default();
+        let mut port_forward = FakePortForwardExecutor::default();
+
+        let result = run_runtime_tick(
+            &plan,
+            &mut process,
+            &mut port_forward,
+            None,
+            RuntimeTickOptions {
+                control: RuntimeControlOptions {
+                    machine_id: 9,
+                    ..RuntimeControlOptions::default()
+                },
+                report_to_panel: false,
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.signal, RuntimeLoopSignal::Continue);
+        assert_eq!(result.apply.machine_status.machine_id, 9);
     }
 
     #[derive(Default)]
