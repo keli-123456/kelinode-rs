@@ -1,13 +1,16 @@
+use std::collections::BTreeMap;
+
 use crate::core::{write_core_config, CoreConfigWriteResult};
 use crate::health::{build_machine_status_payload, HealthReportInput};
 use crate::machine::{MachineStatusPayload, MachineStatusResponse, MachineUpgradeCommand};
 use crate::panel::PanelClient;
+use crate::panel::types::UserInfo;
 use crate::port_forward::{
     inspect_hysteria_port_forward, repair_hysteria_port_forward, HysteriaPortForwardStatus,
     PortForwardExecutor,
 };
 use crate::process::{core_process_spec, ProcessStatus, ProcessSupervisor};
-use crate::runtime::RuntimeBootstrapPlan;
+use crate::runtime::{build_runtime_bootstrap_plan_with_users, RuntimeBootstrapPlan};
 use crate::upgrade::{UpgradeExecutor, UpgradeManager, UpgradeStatus};
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -37,6 +40,7 @@ pub struct RuntimePanelAction {
 pub struct RuntimeTickOptions {
     pub control: RuntimeControlOptions,
     pub report_to_panel: bool,
+    pub users_by_node_tag: BTreeMap<String, Vec<UserInfo>>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -141,13 +145,29 @@ where
     P: ProcessSupervisor,
     F: PortForwardExecutor,
 {
+    let RuntimeTickOptions {
+        control,
+        report_to_panel,
+        users_by_node_tag,
+    } = options;
+    let refreshed_plan = if users_by_node_tag.is_empty() {
+        None
+    } else {
+        Some(build_runtime_bootstrap_plan_with_users(
+            plan.resolved.clone(),
+            plan.node_infos.clone(),
+            plan.node_failures.clone(),
+            &users_by_node_tag,
+        )?)
+    };
+    let active_plan = refreshed_plan.as_ref().unwrap_or(plan);
     let apply = apply_runtime_plan(
-        plan,
+        active_plan,
         process_supervisor,
         port_forward_executor,
-        options.control,
+        control,
     )?;
-    let panel_action = if options.report_to_panel {
+    let panel_action = if report_to_panel {
         let client = panel_client.ok_or_else(|| {
             "runtime tick requested panel report without panel client".to_string()
         })?;
@@ -195,14 +215,14 @@ pub fn handle_runtime_signal<E: UpgradeExecutor>(
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeSet;
+    use std::collections::{BTreeMap, BTreeSet};
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use serde_json::json;
 
     use crate::config::{NodeConfig, ResolvedConfig, ResolvedMachineConfig};
-    use crate::panel::types::{CommonNode, NodeInfo};
+    use crate::panel::types::{CommonNode, NodeInfo, UserInfo};
     use crate::port_forward::{PortForwardCommand, PortForwardExecutor};
     use crate::process::MemoryProcessSupervisor;
     use crate::runtime::build_runtime_bootstrap_plan;
@@ -370,6 +390,7 @@ mod tests {
                     ..RuntimeControlOptions::default()
                 },
                 report_to_panel: false,
+                ..RuntimeTickOptions::default()
             },
         )
         .await
@@ -377,6 +398,61 @@ mod tests {
 
         assert_eq!(result.signal, RuntimeLoopSignal::Continue);
         assert_eq!(result.apply.machine_status.machine_id, 9);
+    }
+
+    #[tokio::test]
+    async fn tick_can_rebuild_core_plan_with_refreshed_users() {
+        let dir = temp_test_dir("runtime-users");
+        let mut resolved = ResolvedConfig {
+            kernel: Default::default(),
+            realtime: Default::default(),
+            machine: ResolvedMachineConfig {
+                enabled: true,
+                continue_on_error: true,
+                profiles: Vec::new(),
+            },
+            agent: Default::default(),
+            nodes: Vec::new(),
+        };
+        resolved.kernel.config_dir = dir.join("v2node").display().to_string();
+        let node = test_node("vless", 21);
+        let tag = node.tag.clone();
+        let plan = build_runtime_bootstrap_plan(resolved, vec![node], Vec::new()).unwrap();
+        let mut users_by_node_tag = BTreeMap::new();
+        users_by_node_tag.insert(
+            tag,
+            vec![UserInfo {
+                id: 21,
+                uuid: "33333333-3333-3333-3333-333333333333".to_string(),
+                speed_limit: 0,
+                device_limit: 0,
+            }],
+        );
+        let mut process = MemoryProcessSupervisor::default();
+        let mut port_forward = FakePortForwardExecutor::default();
+
+        let result = run_runtime_tick(
+            &plan,
+            &mut process,
+            &mut port_forward,
+            None,
+            RuntimeTickOptions {
+                control: RuntimeControlOptions {
+                    machine_id: 21,
+                    ..RuntimeControlOptions::default()
+                },
+                report_to_panel: false,
+                users_by_node_tag,
+            },
+        )
+        .await
+        .unwrap();
+        let saved = fs::read_to_string(dir.join("v2node").join("config.json")).unwrap();
+
+        assert!(result.apply.core_config.unwrap().changed);
+        assert!(saved.contains("33333333-3333-3333-3333-333333333333"));
+
+        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]
