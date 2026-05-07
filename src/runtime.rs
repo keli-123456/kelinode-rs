@@ -170,6 +170,18 @@ pub fn build_runtime_bootstrap_plan_with_users(
     })
 }
 
+pub fn rebuild_runtime_plan_with_users(
+    plan: &RuntimeBootstrapPlan,
+    users_by_node_tag: &BTreeMap<String, Vec<UserInfo>>,
+) -> Result<RuntimeBootstrapPlan, String> {
+    build_runtime_bootstrap_plan_with_users(
+        plan.resolved.clone(),
+        plan.node_infos.clone(),
+        plan.node_failures.clone(),
+        users_by_node_tag,
+    )
+}
+
 pub fn core_config_path(resolved: &ResolvedConfig) -> PathBuf {
     PathBuf::from(&resolved.kernel.config_dir).join("config.json")
 }

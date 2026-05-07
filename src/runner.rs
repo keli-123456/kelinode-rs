@@ -3,8 +3,15 @@ use std::future::Future;
 use std::pin::Pin;
 use std::time::Duration;
 
-use crate::control::{RuntimeControlOptions, RuntimeLoopSignal, RuntimeTickOptions};
+use crate::config::NodeConfig;
+use crate::control::{
+    run_runtime_tick, RuntimeControlOptions, RuntimeLoopSignal, RuntimeTickOptions,
+};
+use crate::panel::client::{PanelClient, PanelClientOptions};
 use crate::panel::types::UserInfo;
+use crate::port_forward::PortForwardExecutor;
+use crate::process::ProcessSupervisor;
+use crate::runtime::{rebuild_runtime_plan_with_users, RuntimeBootstrapPlan};
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct RuntimeLoopOptions {
@@ -53,6 +60,67 @@ pub trait AsyncRuntimeLoopCallbacks {
         Box::pin(async move {
             tokio::time::sleep(duration).await;
             Ok(())
+        })
+    }
+}
+
+pub struct PanelRuntimeLoop<'a, P, F> {
+    pub plan: RuntimeBootstrapPlan,
+    pub process_supervisor: &'a mut P,
+    pub port_forward_executor: &'a mut F,
+    pub panel_client: Option<PanelClient>,
+}
+
+impl<'a, P, F> PanelRuntimeLoop<'a, P, F>
+where
+    P: ProcessSupervisor,
+    F: PortForwardExecutor,
+{
+    pub fn new(
+        plan: RuntimeBootstrapPlan,
+        process_supervisor: &'a mut P,
+        port_forward_executor: &'a mut F,
+        panel_client: Option<PanelClient>,
+    ) -> Self {
+        Self {
+            plan,
+            process_supervisor,
+            port_forward_executor,
+            panel_client,
+        }
+    }
+}
+
+impl<P, F> AsyncRuntimeLoopCallbacks for PanelRuntimeLoop<'_, P, F>
+where
+    P: ProcessSupervisor,
+    F: PortForwardExecutor,
+{
+    fn refresh_users<'a>(
+        &'a mut self,
+    ) -> RuntimeLoopFuture<'a, Result<BTreeMap<String, Vec<UserInfo>>, String>> {
+        Box::pin(async move { load_users_by_node_tag_from_panel(&self.plan).await })
+    }
+
+    fn run_tick<'a>(
+        &'a mut self,
+        mut options: RuntimeTickOptions,
+    ) -> RuntimeLoopFuture<'a, Result<RuntimeLoopSignal, String>> {
+        Box::pin(async move {
+            if !options.users_by_node_tag.is_empty() {
+                self.plan =
+                    rebuild_runtime_plan_with_users(&self.plan, &options.users_by_node_tag)?;
+                options.users_by_node_tag.clear();
+            }
+            let result = run_runtime_tick(
+                &self.plan,
+                &mut *self.process_supervisor,
+                &mut *self.port_forward_executor,
+                self.panel_client.as_ref(),
+                options,
+            )
+            .await?;
+            Ok(result.signal)
         })
     }
 }
@@ -171,6 +239,59 @@ where
     }
 }
 
+pub async fn load_users_by_node_tag_from_panel(
+    plan: &RuntimeBootstrapPlan,
+) -> Result<BTreeMap<String, Vec<UserInfo>>, String> {
+    let mut users_by_tag = BTreeMap::new();
+    for node in &plan.node_infos {
+        let Some(config) = node_config_for_info(plan, node.id, &node.tag) else {
+            continue;
+        };
+        let options = PanelClientOptions::from(config);
+        let mut client = PanelClient::new(options).map_err(|err| err.to_string())?;
+        let users = client
+            .get_user_list()
+            .await
+            .map_err(|err| {
+                format!(
+                    "get user list [{}-{}] error: {}",
+                    config.url.trim_end_matches('/'),
+                    config.node_id,
+                    err
+                )
+            })?
+            .unwrap_or_default();
+        users_by_tag.insert(node.tag.clone(), users);
+    }
+    Ok(users_by_tag)
+}
+
+fn node_config_for_info<'a>(
+    plan: &'a RuntimeBootstrapPlan,
+    node_id: u32,
+    tag: &str,
+) -> Option<&'a NodeConfig> {
+    let exact = plan.resolved.nodes.iter().find(|config| {
+        config.node_id == node_id
+            && tag.starts_with(&format!("[{}]", config.url.trim_end_matches('/')))
+    });
+    if exact.is_some() {
+        return exact;
+    }
+
+    let mut candidates = plan
+        .resolved
+        .nodes
+        .iter()
+        .filter(|config| config.node_id == node_id);
+    let first = candidates.next()?;
+    if candidates.next().is_none() {
+        Some(first)
+    } else {
+        None
+    }
+}
+
 pub fn should_run(tick: usize, interval: usize) -> bool {
     interval > 0 && tick % interval == 0
 }
@@ -178,16 +299,25 @@ pub fn should_run(tick: usize, interval: usize) -> bool {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
+    use std::collections::BTreeSet;
+    use std::fs;
     use std::time::Duration;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::{
-        run_runtime_loop, run_runtime_loop_async, should_run, AsyncRuntimeLoopCallbacks,
-        RuntimeLoopCallbacks, RuntimeLoopExit, RuntimeLoopExitReason, RuntimeLoopFuture,
-        RuntimeLoopOptions,
+        node_config_for_info, run_runtime_loop, run_runtime_loop_async, should_run,
+        AsyncRuntimeLoopCallbacks, PanelRuntimeLoop, RuntimeLoopCallbacks, RuntimeLoopExit,
+        RuntimeLoopExitReason, RuntimeLoopFuture, RuntimeLoopOptions,
     };
+    use crate::config::{NodeConfig, ResolvedConfig, ResolvedMachineConfig};
     use crate::control::{RuntimeLoopSignal, RuntimeTickOptions};
+    use crate::control::RuntimeControlOptions;
     use crate::machine::MachineUpgradeCommand;
-    use crate::panel::types::UserInfo;
+    use crate::panel::types::{CommonNode, NodeInfo, UserInfo};
+    use crate::port_forward::{PortForwardCommand, PortForwardExecutor};
+    use crate::process::MemoryProcessSupervisor;
+    use crate::runtime::build_runtime_bootstrap_plan;
+    use serde_json::json;
 
     #[test]
     fn should_run_matches_tick_interval() {
@@ -331,6 +461,102 @@ mod tests {
         assert!(callbacks.ticks[2].report_to_panel);
     }
 
+    #[test]
+    fn node_config_matching_keeps_same_node_id_on_different_panels_distinct() {
+        let resolved = ResolvedConfig {
+            kernel: Default::default(),
+            realtime: Default::default(),
+            machine: ResolvedMachineConfig {
+                enabled: true,
+                continue_on_error: true,
+                profiles: Vec::new(),
+            },
+            agent: Default::default(),
+            nodes: vec![
+                NodeConfig {
+                    url: "https://panel-a.example.test".to_string(),
+                    token: "a".to_string(),
+                    node_id: 7,
+                    machine_id: 1,
+                    ..NodeConfig::default()
+                },
+                NodeConfig {
+                    url: "https://panel-b.example.test".to_string(),
+                    token: "b".to_string(),
+                    node_id: 7,
+                    machine_id: 1,
+                    ..NodeConfig::default()
+                },
+            ],
+        };
+        let node = test_node_with_host("https://panel-b.example.test", "vless", 7);
+        let plan = build_runtime_bootstrap_plan(resolved, vec![node.clone()], Vec::new()).unwrap();
+
+        let matched = node_config_for_info(&plan, node.id, &node.tag).unwrap();
+
+        assert_eq!(matched.url, "https://panel-b.example.test");
+        assert_eq!(matched.token, "b");
+    }
+
+    #[tokio::test]
+    async fn panel_runtime_loop_rebuilds_plan_with_refreshed_users_before_tick() {
+        let dir = temp_test_dir("panel-runtime-loop");
+        let mut resolved = ResolvedConfig {
+            kernel: Default::default(),
+            realtime: Default::default(),
+            machine: ResolvedMachineConfig {
+                enabled: true,
+                continue_on_error: true,
+                profiles: Vec::new(),
+            },
+            agent: Default::default(),
+            nodes: vec![NodeConfig {
+                url: "https://panel.example.test".to_string(),
+                token: "token".to_string(),
+                node_id: 9,
+                machine_id: 9,
+                ..NodeConfig::default()
+            }],
+        };
+        resolved.kernel.config_dir = dir.join("v2node").display().to_string();
+        let node = test_node_with_host("https://panel.example.test", "vless", 9);
+        let tag = node.tag.clone();
+        let plan = build_runtime_bootstrap_plan(resolved, vec![node], Vec::new()).unwrap();
+        let mut process = MemoryProcessSupervisor::default();
+        let mut port_forward = FakePortForwardExecutor::default();
+        let mut runner = PanelRuntimeLoop::new(plan, &mut process, &mut port_forward, None);
+        let mut users_by_node_tag = BTreeMap::new();
+        users_by_node_tag.insert(
+            tag,
+            vec![UserInfo {
+                id: 9,
+                uuid: "44444444-4444-4444-4444-444444444444".to_string(),
+                speed_limit: 0,
+                device_limit: 0,
+            }],
+        );
+
+        let signal = AsyncRuntimeLoopCallbacks::run_tick(
+            &mut runner,
+            RuntimeTickOptions {
+                control: RuntimeControlOptions {
+                    machine_id: 9,
+                    ..RuntimeControlOptions::default()
+                },
+                report_to_panel: false,
+                users_by_node_tag,
+            },
+        )
+        .await
+        .unwrap();
+        let saved = fs::read_to_string(dir.join("v2node").join("config.json")).unwrap();
+
+        assert_eq!(signal, RuntimeLoopSignal::Continue);
+        assert!(saved.contains("44444444-4444-4444-4444-444444444444"));
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
     struct FakeCallbacks {
         ticks: Vec<RuntimeTickOptions>,
         refreshes: usize,
@@ -435,5 +661,48 @@ mod tests {
         ) -> RuntimeLoopFuture<'a, Result<(), String>> {
             Box::pin(async { Ok(()) })
         }
+    }
+
+    #[derive(Default)]
+    struct FakePortForwardExecutor {
+        available: BTreeSet<String>,
+    }
+
+    impl PortForwardExecutor for FakePortForwardExecutor {
+        fn is_tool_available(&mut self, tool: &str) -> bool {
+            self.available.contains(tool)
+        }
+
+        fn command_output(&mut self, command: &PortForwardCommand) -> Result<String, String> {
+            Err(format!("{} unavailable", command.tool))
+        }
+
+        fn run_command(&mut self, command: &PortForwardCommand) -> Result<(), String> {
+            Err(format!("{} unavailable", command.tool))
+        }
+
+        fn running_as_root(&self) -> bool {
+            false
+        }
+    }
+
+    fn test_node_with_host(api_host: &str, protocol: &str, node_id: u32) -> NodeInfo {
+        let common: CommonNode = serde_json::from_value(json!({
+            "protocol": protocol,
+            "server_port": 10000 + node_id
+        }))
+        .unwrap();
+
+        NodeInfo::from_common(api_host, node_id, common).unwrap()
+    }
+
+    fn temp_test_dir(label: &str) -> std::path::PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("kelinode-rs-{label}-{nanos}"));
+        fs::create_dir_all(&path).unwrap();
+        path
     }
 }

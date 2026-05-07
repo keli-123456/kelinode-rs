@@ -42,6 +42,7 @@ First cut:
 - Collect local IPv4/IPv6 addresses for machine status payloads without external network calls.
 - Add a runtime loop scheduler for periodic user refresh, panel reports, and reload/upgrade signal exits.
 - Add an async runtime loop variant for panel-backed user refresh and report ticks.
+- Add a panel-backed runtime loop adapter that reloads users by node tag before applying ticks.
 
 Not implemented yet:
 

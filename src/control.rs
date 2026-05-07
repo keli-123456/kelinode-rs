@@ -10,7 +10,7 @@ use crate::port_forward::{
     PortForwardExecutor,
 };
 use crate::process::{core_process_spec, ProcessStatus, ProcessSupervisor};
-use crate::runtime::{build_runtime_bootstrap_plan_with_users, RuntimeBootstrapPlan};
+use crate::runtime::{rebuild_runtime_plan_with_users, RuntimeBootstrapPlan};
 use crate::upgrade::{UpgradeExecutor, UpgradeManager, UpgradeStatus};
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -153,12 +153,7 @@ where
     let refreshed_plan = if users_by_node_tag.is_empty() {
         None
     } else {
-        Some(build_runtime_bootstrap_plan_with_users(
-            plan.resolved.clone(),
-            plan.node_infos.clone(),
-            plan.node_failures.clone(),
-            &users_by_node_tag,
-        )?)
+        Some(rebuild_runtime_plan_with_users(plan, &users_by_node_tag)?)
     };
     let active_plan = refreshed_plan.as_ref().unwrap_or(plan);
     let apply = apply_runtime_plan(
