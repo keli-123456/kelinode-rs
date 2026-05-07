@@ -9,6 +9,7 @@
 - Node manager initialization skeleton with machine-mode failure accounting.
 - Panel-backed node manager bootstrap path.
 - Machine reconcile decision logic for add/remove/restart/skip/full-reload.
+- User delta and full-list diff helpers compatible with Go `kelinode`.
 - Machine node resolution and subscription proxy config merging.
 - Compatibility tests around protocol parsing and endpoint construction.
 

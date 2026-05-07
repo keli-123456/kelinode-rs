@@ -6,3 +6,4 @@ pub mod machine;
 pub mod node;
 pub mod panel;
 pub mod runtime;
+pub mod user;
