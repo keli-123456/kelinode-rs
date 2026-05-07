@@ -36,6 +36,7 @@
 - Xray stream network settings passthrough for websocket/grpc/httpupgrade/xhttp/tcp-style transports.
 - VLESS flow and Shadowsocks cipher/method rendering from panel node fields.
 - VLESS supported encryption/decryption string rendering with unsupported values rejected.
+- Xray route rendering for DNS servers, block rules, protocol rules, and custom outbound rules.
 - Machine node resolution and subscription proxy config merging.
 - Compatibility tests around protocol parsing and endpoint construction.
 

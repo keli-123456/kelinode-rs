@@ -43,6 +43,7 @@ pub struct InboundPlan {
     pub reality_private_key: String,
     pub reality_short_id: String,
     pub users: Vec<InboundUserPlan>,
+    pub routes: Vec<RoutePlan>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -52,6 +53,14 @@ pub struct InboundUserPlan {
     pub email: String,
     pub speed_limit: u32,
     pub device_limit: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RoutePlan {
+    pub id: u32,
+    pub action: String,
+    pub match_rules: Vec<String>,
+    pub action_value: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -260,6 +269,13 @@ pub fn build_inbound_plan_with_users(
             .filter(|user| !user.uuid.trim().is_empty())
             .map(inbound_user_plan)
             .collect(),
+        routes: node
+            .common
+            .routes
+            .iter()
+            .map(route_plan)
+            .filter(|route| !route.action.is_empty())
+            .collect(),
     })
 }
 
@@ -371,22 +387,184 @@ fn render_xray_config(plan: &CorePlan) -> Value {
         .map(render_xray_inbound)
         .collect::<Vec<_>>();
 
-    json!({
-        "log": {
+    let mut config = Map::new();
+    config.insert(
+        "log".to_string(),
+        json!({
             "loglevel": "warning"
-        },
-        "inbounds": inbounds,
-        "outbounds": [
-            {
-                "tag": "direct",
-                "protocol": "freedom"
-            },
-            {
-                "tag": "blocked",
-                "protocol": "blackhole"
+        }),
+    );
+    config.insert("inbounds".to_string(), Value::Array(inbounds));
+    config.insert(
+        "outbounds".to_string(),
+        Value::Array(render_xray_outbounds(plan)),
+    );
+    config.insert("routing".to_string(), render_xray_routing(plan));
+    if let Some(dns) = render_xray_dns(plan) {
+        config.insert("dns".to_string(), dns);
+    }
+
+    Value::Object(config)
+}
+
+fn render_xray_outbounds(plan: &CorePlan) -> Vec<Value> {
+    let mut outbounds = vec![
+        json!({
+            "tag": "direct",
+            "protocol": "freedom"
+        }),
+        json!({
+            "tag": "block",
+            "protocol": "blackhole"
+        }),
+        json!({
+            "tag": "dns_out",
+            "protocol": "dns"
+        }),
+    ];
+
+    for inbound in &plan.inbounds {
+        for route in &inbound.routes {
+            if !matches!(
+                route.action.as_str(),
+                "route" | "route_ip" | "default_out"
+            ) {
+                continue;
             }
-        ]
+            let Some((tag, outbound)) = parse_route_outbound(route) else {
+                continue;
+            };
+            if outbounds
+                .iter()
+                .any(|item| item.get("tag").and_then(Value::as_str) == Some(tag.as_str()))
+            {
+                continue;
+            }
+            outbounds.push(outbound);
+        }
+    }
+
+    outbounds
+}
+
+fn render_xray_routing(plan: &CorePlan) -> Value {
+    let mut rules = vec![json!({
+        "port": "53",
+        "network": "udp",
+        "outboundTag": "dns_out"
+    })];
+
+    for inbound in &plan.inbounds {
+        for route in &inbound.routes {
+            if let Some(rule) = render_xray_route_rule(&inbound.tag, route) {
+                rules.push(rule);
+            }
+        }
+    }
+
+    json!({
+        "domainStrategy": "AsIs",
+        "rules": rules
     })
+}
+
+fn render_xray_route_rule(inbound_tag: &str, route: &RoutePlan) -> Option<Value> {
+    if route.match_rules.is_empty() && route.action != "default_out" {
+        return None;
+    }
+
+    match route.action.as_str() {
+        "block" => Some(json!({
+            "inboundTag": inbound_tag,
+            "domain": &route.match_rules,
+            "outboundTag": "block"
+        })),
+        "block_ip" => Some(json!({
+            "inboundTag": inbound_tag,
+            "ip": &route.match_rules,
+            "outboundTag": "block"
+        })),
+        "block_port" => Some(json!({
+            "inboundTag": inbound_tag,
+            "port": route.match_rules.join(","),
+            "outboundTag": "block"
+        })),
+        "protocol" => Some(json!({
+            "inboundTag": inbound_tag,
+            "protocol": &route.match_rules,
+            "outboundTag": "block"
+        })),
+        "route" => route_outbound_tag(route).map(|tag| {
+            json!({
+                "inboundTag": inbound_tag,
+                "domain": &route.match_rules,
+                "outboundTag": tag
+            })
+        }),
+        "route_ip" => route_outbound_tag(route).map(|tag| {
+            json!({
+                "inboundTag": inbound_tag,
+                "ip": &route.match_rules,
+                "outboundTag": tag
+            })
+        }),
+        "default_out" => route_outbound_tag(route).map(|tag| {
+            json!({
+                "inboundTag": inbound_tag,
+                "network": "tcp,udp",
+                "outboundTag": tag
+            })
+        }),
+        _ => None,
+    }
+}
+
+fn render_xray_dns(plan: &CorePlan) -> Option<Value> {
+    let mut servers = Vec::new();
+    for inbound in &plan.inbounds {
+        for route in &inbound.routes {
+            if route.action != "dns" {
+                continue;
+            }
+            let Some(address) = route.action_value.as_deref().map(str::trim) else {
+                continue;
+            };
+            if address.is_empty() {
+                continue;
+            }
+            let mut server = Map::new();
+            server.insert("address".to_string(), json!(address));
+            if !route.match_rules.is_empty() {
+                server.insert("domains".to_string(), json!(&route.match_rules));
+            }
+            servers.push(Value::Object(server));
+        }
+    }
+
+    if servers.is_empty() {
+        None
+    } else {
+        Some(json!({
+            "servers": servers
+        }))
+    }
+}
+
+fn route_outbound_tag(route: &RoutePlan) -> Option<String> {
+    parse_route_outbound(route).map(|(tag, _)| tag)
+}
+
+fn parse_route_outbound(route: &RoutePlan) -> Option<(String, Value)> {
+    let raw = route.action_value.as_deref()?.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    let outbound: Value = serde_json::from_str(raw).ok()?;
+    let tag = outbound.get("tag").and_then(Value::as_str)?.trim();
+    if tag.is_empty() {
+        return None;
+    }
+    Some((tag.to_string(), outbound))
 }
 
 fn render_xray_inbound(inbound: &InboundPlan) -> Value {
@@ -627,6 +805,27 @@ fn inbound_user_plan(user: &UserInfo) -> InboundUserPlan {
     }
 }
 
+fn route_plan(route: &crate::panel::types::Route) -> RoutePlan {
+    RoutePlan {
+        id: route.id,
+        action: route.action.trim().to_string(),
+        match_rules: route
+            .match_rules
+            .iter()
+            .map(|item| item.trim().to_string())
+            .filter(|item| !item.is_empty())
+            .collect(),
+        action_value: route.action_value.as_ref().and_then(|value| {
+            let trimmed = value.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        }),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
@@ -639,7 +838,7 @@ mod tests {
         build_inbound_plan, core_file_layout, render_core_config, resolve_node_listen_ip,
         should_fallback_node_listen_ip, write_core_config, CoreKind, CorePlan,
     };
-    use crate::panel::types::{CommonNode, NodeInfo, Security, UserInfo};
+    use crate::panel::types::{CommonNode, NodeInfo, Route, Security, UserInfo};
 
     #[test]
     fn core_plan_can_represent_external_xray() {
@@ -932,6 +1131,97 @@ mod tests {
         assert_eq!(
             config["inbounds"][0]["streamSettings"]["wsSettings"]["path"],
             "/ws"
+        );
+    }
+
+    #[test]
+    fn renders_block_route_rules() {
+        let mut node = test_node("vless", 17, "");
+        node.common.routes = vec![Route {
+            id: 1,
+            action: "block".to_string(),
+            match_rules: vec!["domain:example.com".to_string()],
+            action_value: None,
+        }];
+        let tag = node.tag.clone();
+        let plan = CorePlan::from_nodes(
+            CoreKind::Xray,
+            PathBuf::from("/srv/v2node/config.json"),
+            &[node],
+        )
+        .unwrap();
+
+        let config = render_core_config(&plan).unwrap();
+
+        assert_eq!(config["outbounds"][1]["tag"], "block");
+        assert_eq!(config["routing"]["rules"][1]["inboundTag"], tag);
+        assert_eq!(
+            config["routing"]["rules"][1]["domain"][0],
+            "domain:example.com"
+        );
+        assert_eq!(config["routing"]["rules"][1]["outboundTag"], "block");
+    }
+
+    #[test]
+    fn renders_custom_route_outbound_once() {
+        let mut node = test_node("vless", 18, "");
+        node.common.routes = vec![
+            Route {
+                id: 1,
+                action: "default_out".to_string(),
+                match_rules: Vec::new(),
+                action_value: Some(r#"{"tag":"warp","protocol":"freedom"}"#.to_string()),
+            },
+            Route {
+                id: 2,
+                action: "route_ip".to_string(),
+                match_rules: vec!["geoip:private".to_string()],
+                action_value: Some(r#"{"tag":"warp","protocol":"freedom"}"#.to_string()),
+            },
+        ];
+        let plan = CorePlan::from_nodes(
+            CoreKind::Xray,
+            PathBuf::from("/srv/v2node/config.json"),
+            &[node],
+        )
+        .unwrap();
+
+        let config = render_core_config(&plan).unwrap();
+        let outbounds = config["outbounds"].as_array().unwrap();
+
+        assert_eq!(
+            outbounds
+                .iter()
+                .filter(|outbound| outbound["tag"] == "warp")
+                .count(),
+            1
+        );
+        assert_eq!(config["routing"]["rules"][1]["outboundTag"], "warp");
+        assert_eq!(config["routing"]["rules"][2]["ip"][0], "geoip:private");
+    }
+
+    #[test]
+    fn renders_dns_route_servers() {
+        let mut node = test_node("vless", 19, "");
+        node.common.routes = vec![Route {
+            id: 1,
+            action: "dns".to_string(),
+            match_rules: vec!["geosite:openai".to_string()],
+            action_value: Some("1.1.1.1".to_string()),
+        }];
+        let plan = CorePlan::from_nodes(
+            CoreKind::Xray,
+            PathBuf::from("/srv/v2node/config.json"),
+            &[node],
+        )
+        .unwrap();
+
+        let config = render_core_config(&plan).unwrap();
+
+        assert_eq!(config["dns"]["servers"][0]["address"], "1.1.1.1");
+        assert_eq!(
+            config["dns"]["servers"][0]["domains"][0],
+            "geosite:openai"
         );
     }
 
