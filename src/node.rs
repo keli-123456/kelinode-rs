@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::config::{NodeConfig, RealtimeConfig};
 use crate::panel::client::{PanelClient, PanelClientOptions};
-use crate::panel::types::NodeInfo;
+use crate::panel::types::{NodeInfo, UserInfo};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct NodeManagerOptions {
@@ -19,6 +19,15 @@ pub struct NodeRuntime {
 pub struct NodeFailure {
     pub config: NodeConfig,
     pub error: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct NodeUserSet {
+    pub api_host: String,
+    pub node_id: u32,
+    pub machine_id: u32,
+    pub tag: String,
+    pub users: Vec<UserInfo>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -249,6 +258,39 @@ impl NodeManager {
             .collect()
     }
 
+    pub async fn load_user_sets_from_panel(&self) -> Result<Vec<NodeUserSet>, String> {
+        let mut sets = Vec::with_capacity(self.runtimes.len());
+        for runtime in &self.runtimes {
+            let options = PanelClientOptions::from(&runtime.config);
+            let mut client = PanelClient::new(options).map_err(|err| err.to_string())?;
+            let users = client
+                .get_user_list()
+                .await
+                .map_err(|err| {
+                    format_node_error("get user list", &runtime.config, &err.to_string())
+                })?
+                .unwrap_or_default();
+            sets.push(node_user_set(&runtime.config, &runtime.info, users));
+        }
+        Ok(sets)
+    }
+
+    pub fn load_user_sets_with_loader<F>(
+        &self,
+        mut load_users: F,
+    ) -> Result<Vec<NodeUserSet>, String>
+    where
+        F: FnMut(&NodeConfig) -> Result<Vec<UserInfo>, String>,
+    {
+        let mut sets = Vec::with_capacity(self.runtimes.len());
+        for runtime in &self.runtimes {
+            let users = load_users(&runtime.config)
+                .map_err(|err| format_node_error("get user list", &runtime.config, &err))?;
+            sets.push(node_user_set(&runtime.config, &runtime.info, users));
+        }
+        Ok(sets)
+    }
+
     pub fn failures(&self) -> &[NodeFailure] {
         &self.failures
     }
@@ -294,6 +336,14 @@ impl NodeManager {
     }
 }
 
+pub fn users_by_node_tag(sets: &[NodeUserSet]) -> BTreeMap<String, Vec<UserInfo>> {
+    let mut users = BTreeMap::new();
+    for set in sets {
+        users.insert(set.tag.clone(), set.users.clone());
+    }
+    users
+}
+
 async fn load_panel_node_info(config: &NodeConfig) -> Result<Option<NodeInfo>, String> {
     let options = PanelClientOptions::from(config);
     let mut client = PanelClient::new(options).map_err(|err| err.to_string())?;
@@ -311,6 +361,16 @@ fn format_node_error(action: &str, config: &NodeConfig, error: &str) -> String {
         config.node_id,
         error
     )
+}
+
+fn node_user_set(config: &NodeConfig, info: &NodeInfo, users: Vec<UserInfo>) -> NodeUserSet {
+    NodeUserSet {
+        api_host: config.url.trim_end_matches('/').to_string(),
+        node_id: config.node_id,
+        machine_id: config.machine_id,
+        tag: info.tag.clone(),
+        users,
+    }
 }
 
 fn handle_reconcile_failure(
@@ -376,9 +436,9 @@ fn machine_node_key(config: &NodeConfig) -> String {
 mod tests {
     use serde_json::json;
 
-    use super::{NodeManager, NodeManagerOptions};
+    use super::{users_by_node_tag, NodeManager, NodeManagerOptions};
     use crate::config::{NodeConfig, RealtimeConfig};
-    use crate::panel::types::{CommonNode, NodeInfo};
+    use crate::panel::types::{CommonNode, NodeInfo, UserInfo};
 
     #[test]
     fn continues_after_node_info_error_when_allowed() {
@@ -550,6 +610,33 @@ mod tests {
         assert_eq!(result.failures.len(), 1);
         assert_eq!(manager.active_configs().len(), 1);
         assert_eq!(manager.active_configs()[0].node_id, 1);
+    }
+
+    #[test]
+    fn loads_user_sets_for_active_nodes() {
+        let nodes = vec![node_config("https://panel.example.test", 1)];
+        let manager = NodeManager::build_with_loader(
+            &nodes,
+            RealtimeConfig::default(),
+            NodeManagerOptions::default(),
+            |config| Ok(Some(test_node_info(config))),
+        )
+        .unwrap();
+
+        let sets = manager
+            .load_user_sets_with_loader(|config| {
+                Ok(vec![UserInfo {
+                    id: config.node_id,
+                    uuid: "uuid-a".to_string(),
+                    speed_limit: 0,
+                    device_limit: 2,
+                }])
+            })
+            .unwrap();
+        let users = users_by_node_tag(&sets);
+
+        assert_eq!(sets[0].api_host, "https://panel.example.test");
+        assert_eq!(users[&sets[0].tag][0].uuid, "uuid-a");
     }
 
     fn node_config(url: &str, node_id: u32) -> NodeConfig {

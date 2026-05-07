@@ -1,10 +1,11 @@
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use crate::config::{AgentConfig, AppConfig, ResolvedConfig, SubscriptionProxyConfig};
 use crate::core::{CoreKind, CorePlan};
 use crate::machine::{resolve_machine_profiles_from_panel, MachineResolveSummary};
 use crate::node::{NodeFailure, NodeManager, NodeManagerOptions};
-use crate::panel::types::NodeInfo;
+use crate::panel::types::{NodeInfo, UserInfo};
 use crate::port_forward::{
     build_hysteria_port_forward_rules, new_hysteria_port_forward_status,
     HysteriaPortForwardStatus,
@@ -104,13 +105,32 @@ pub fn build_runtime_bootstrap_plan(
     node_infos: Vec<NodeInfo>,
     node_failures: Vec<NodeFailure>,
 ) -> Result<RuntimeBootstrapPlan, String> {
+    build_runtime_bootstrap_plan_with_users(
+        resolved,
+        node_infos,
+        node_failures,
+        &BTreeMap::new(),
+    )
+}
+
+pub fn build_runtime_bootstrap_plan_with_users(
+    resolved: ResolvedConfig,
+    node_infos: Vec<NodeInfo>,
+    node_failures: Vec<NodeFailure>,
+    users_by_node_tag: &BTreeMap<String, Vec<UserInfo>>,
+) -> Result<RuntimeBootstrapPlan, String> {
     let subscription_proxy_only =
         node_infos.is_empty() && resolved.agent.subscription_proxy.enabled;
     let core_plan = if node_infos.is_empty() {
         None
     } else {
         Some(
-            CorePlan::from_nodes(CoreKind::Xray, core_config_path(&resolved), &node_infos)
+            CorePlan::from_nodes_with_users(
+                CoreKind::Xray,
+                core_config_path(&resolved),
+                &node_infos,
+                users_by_node_tag,
+            )
                 .map_err(|err| err.message)?,
         )
     };
@@ -193,6 +213,8 @@ fn fill_if_empty(target: &mut String, value: &str) {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use serde_json::json;
 
     use crate::config::{
@@ -200,11 +222,11 @@ mod tests {
         ResolvedMachineConfig, SubscriptionProxyConfig, SubscriptionProxyProfile,
     };
     use crate::machine::MachineResolveSummary;
-    use crate::panel::types::{CommonNode, NodeInfo};
+    use crate::panel::types::{CommonNode, NodeInfo, UserInfo};
 
     use super::{
-        apply_machine_summary, build_runtime_bootstrap_plan, core_config_path, Bootstrap,
-        RuntimeMode,
+        apply_machine_summary, build_runtime_bootstrap_plan,
+        build_runtime_bootstrap_plan_with_users, core_config_path, Bootstrap, RuntimeMode,
     };
 
     #[test]
@@ -359,6 +381,46 @@ mod tests {
         assert_eq!(
             core_config_path(&resolved),
             std::path::PathBuf::from("/srv/v2node").join("config.json")
+        );
+    }
+
+    #[test]
+    fn builds_core_plan_with_user_clients() {
+        let resolved = ResolvedConfig {
+            kernel: Default::default(),
+            realtime: Default::default(),
+            machine: ResolvedMachineConfig {
+                enabled: false,
+                continue_on_error: false,
+                profiles: Vec::new(),
+            },
+            agent: AgentConfig::default(),
+            nodes: vec![NodeConfig {
+                url: "https://panel.example.test".to_string(),
+                node_id: 7,
+                ..NodeConfig::default()
+            }],
+        };
+        let node = test_node("vless", 7, 443, "");
+        let tag = node.tag.clone();
+        let mut users = BTreeMap::new();
+        users.insert(
+            tag,
+            vec![UserInfo {
+                id: 1,
+                uuid: "uuid-a".to_string(),
+                speed_limit: 0,
+                device_limit: 0,
+            }],
+        );
+
+        let plan =
+            build_runtime_bootstrap_plan_with_users(resolved, vec![node], Vec::new(), &users)
+                .unwrap();
+
+        assert_eq!(
+            plan.core_plan.as_ref().unwrap().inbounds[0].users[0].uuid,
+            "uuid-a"
         );
     }
 

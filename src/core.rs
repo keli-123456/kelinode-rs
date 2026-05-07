@@ -102,13 +102,13 @@ impl CorePlan {
         kind: CoreKind,
         config_path: PathBuf,
         nodes: &[NodeInfo],
-        users_by_node_id: &BTreeMap<u32, Vec<UserInfo>>,
+        users_by_node_tag: &BTreeMap<String, Vec<UserInfo>>,
     ) -> Result<Self, CoreError> {
         let inbounds = nodes
             .iter()
             .map(|node| {
-                let users = users_by_node_id
-                    .get(&node.id)
+                let users = users_by_node_tag
+                    .get(&node.tag)
                     .map(Vec::as_slice)
                     .unwrap_or(&[]);
                 build_inbound_plan_with_users(node, users)
@@ -640,11 +640,12 @@ mod tests {
     }
 
     #[test]
-    fn renders_xray_clients_from_users_by_node_id() {
+    fn renders_xray_clients_from_users_by_node_tag() {
         let node = test_node("vless", 9, "0.0.0.0");
+        let tag = node.tag.clone();
         let mut users = std::collections::BTreeMap::new();
         users.insert(
-            9,
+            tag,
             vec![UserInfo {
                 id: 12,
                 uuid: "11111111-1111-1111-1111-111111111111".to_string(),
@@ -675,9 +676,10 @@ mod tests {
     #[test]
     fn renders_password_based_clients_for_trojan() {
         let node = test_node("trojan", 3, "");
+        let tag = node.tag.clone();
         let mut users = std::collections::BTreeMap::new();
         users.insert(
-            3,
+            tag,
             vec![UserInfo {
                 id: 5,
                 uuid: "password-value".to_string(),

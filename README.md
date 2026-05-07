@@ -25,6 +25,7 @@ First cut:
 - Feed upgrade signals into the self-upgrade state machine so the next status report can include running/failed/succeeded state.
 - Collect basic host resource snapshots for system metadata, Linux memory/swap, and uptime.
 - Render panel users into Xray client entries for UUID/password based protocols.
+- Load panel users per active node and pass them into runtime bootstrap planning by node tag to keep multi-site nodes distinct.
 
 Not implemented yet:
 
