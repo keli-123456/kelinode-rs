@@ -37,6 +37,7 @@ First cut:
 - Render supported VLESS encryption decryption strings instead of silently forcing `none`.
 - Render Shadowsocks HTTP obfs transport headers and TCP-only network mode.
 - Render Xray DNS, block, protocol, and custom outbound route rules from panel node routes.
+- Render Go-compatible default outbound and DNS fallback settings.
 - Let runtime ticks rebuild the core plan from refreshed panel user sets before applying config.
 - Render SOCKS/HTTP account settings and AnyTLS client/padding settings from panel users.
 - Render HY2 bandwidth/obfs stream settings and TUIC congestion/0-RTT settings.

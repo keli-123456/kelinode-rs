@@ -42,6 +42,7 @@
 - VLESS supported encryption/decryption string rendering with unsupported values rejected.
 - Shadowsocks HTTP obfs transport headers and TCP-only network mode.
 - Xray route rendering for DNS servers, block rules, protocol rules, and custom outbound rules.
+- Go-compatible default outbound and DNS fallback settings.
 - Runtime tick core-plan rebuild path for refreshed panel user sets.
 - SOCKS/HTTP account rendering and AnyTLS client/padding rendering from panel users.
 - HY2 bandwidth/obfs stream rendering and TUIC congestion/0-RTT rendering.

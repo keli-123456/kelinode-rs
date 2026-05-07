@@ -457,8 +457,11 @@ fn render_xray_config(plan: &CorePlan) -> Value {
 fn render_xray_outbounds(plan: &CorePlan) -> Vec<Value> {
     let mut outbounds = vec![
         json!({
-            "tag": "direct",
-            "protocol": "freedom"
+            "tag": "Default",
+            "protocol": "freedom",
+            "settings": {
+                "domainStrategy": "UseIPv4"
+            }
         }),
         json!({
             "tag": "block",
@@ -567,7 +570,14 @@ fn render_xray_route_rule(inbound_tag: &str, route: &RoutePlan) -> Option<Value>
 }
 
 fn render_xray_dns(plan: &CorePlan) -> Option<Value> {
-    let mut servers = Vec::new();
+    let mut servers = vec![
+        json!({
+            "address": "1.1.1.1"
+        }),
+        json!({
+            "address": "8.8.8.8"
+        }),
+    ];
     for inbound in &plan.inbounds {
         for route in &inbound.routes {
             if route.action != "dns" {
@@ -588,13 +598,10 @@ fn render_xray_dns(plan: &CorePlan) -> Option<Value> {
         }
     }
 
-    if servers.is_empty() {
-        None
-    } else {
-        Some(json!({
-            "servers": servers
-        }))
-    }
+    Some(json!({
+        "servers": servers,
+        "queryStrategy": "UseIPv4"
+    }))
 }
 
 fn route_outbound_tag(route: &RoutePlan) -> Option<String> {
@@ -1193,6 +1200,28 @@ mod tests {
             config["inbounds"][0]["sniffing"]["destOverride"],
             json!(["http", "tls"])
         );
+    }
+
+    #[test]
+    fn renders_go_default_dns_and_outbound() {
+        let node = test_node("vless", 30, "");
+        let plan = CorePlan::from_nodes(
+            CoreKind::Xray,
+            PathBuf::from("/srv/v2node/config.json"),
+            &[node],
+        )
+        .unwrap();
+
+        let config = render_core_config(&plan).unwrap();
+
+        assert_eq!(config["outbounds"][0]["tag"], "Default");
+        assert_eq!(
+            config["outbounds"][0]["settings"]["domainStrategy"],
+            "UseIPv4"
+        );
+        assert_eq!(config["dns"]["queryStrategy"], "UseIPv4");
+        assert_eq!(config["dns"]["servers"][0]["address"], "1.1.1.1");
+        assert_eq!(config["dns"]["servers"][1]["address"], "8.8.8.8");
     }
 
     #[test]
@@ -1872,9 +1901,9 @@ mod tests {
 
         let config = render_core_config(&plan).unwrap();
 
-        assert_eq!(config["dns"]["servers"][0]["address"], "1.1.1.1");
+        assert_eq!(config["dns"]["servers"][2]["address"], "1.1.1.1");
         assert_eq!(
-            config["dns"]["servers"][0]["domains"][0],
+            config["dns"]["servers"][2]["domains"][0],
             "geosite:openai"
         );
     }
