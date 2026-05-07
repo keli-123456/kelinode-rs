@@ -79,6 +79,7 @@ First cut:
 - Map runtime subscription proxy status into the machine health payload.
 - Generate stable subscription proxy fingerprints for reload decisions.
 - Plan subscription proxy HTTP health and ZeroSSL challenge-file routes.
+- Plan subscription proxy apply decisions for disabled, unchanged, start, and error states.
 
 Not implemented yet:
 

@@ -68,10 +68,27 @@ pub struct SubscriptionProxyStatus {
     pub last_error: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SubscriptionProxyServeMode {
     Https,
     HttpFallback,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SubscriptionProxyApplyAction {
+    Disabled,
+    Unchanged,
+    Start,
+    Error,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SubscriptionProxyApplyPlan {
+    pub action: SubscriptionProxyApplyAction,
+    pub fingerprint: String,
+    pub status: SubscriptionProxyStatus,
+    pub serve_mode: Option<SubscriptionProxyServeMode>,
+    pub profiles: Vec<SubscriptionProxyProfile>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -546,6 +563,93 @@ pub fn write_subscription_proxy_file(write: &SubscriptionProxyFileWrite) -> Resu
     Ok(())
 }
 
+pub fn plan_subscription_proxy_apply<F>(
+    config: &SubscriptionProxyConfig,
+    current_fingerprint: &str,
+    certificate_status: SubscriptionProxyStatus,
+    mut file_readable: F,
+) -> SubscriptionProxyApplyPlan
+where
+    F: FnMut(&str) -> bool,
+{
+    if !config.enabled || config.profiles.is_empty() {
+        return SubscriptionProxyApplyPlan {
+            action: SubscriptionProxyApplyAction::Disabled,
+            fingerprint: String::new(),
+            status: SubscriptionProxyStatus {
+                status: "disabled".to_string(),
+                enabled: false,
+                running: false,
+                mode: "disabled".to_string(),
+                ..SubscriptionProxyStatus::default()
+            },
+            serve_mode: None,
+            profiles: Vec::new(),
+        };
+    }
+
+    let fingerprint = subscription_proxy_fingerprint(config);
+    if !current_fingerprint.is_empty() && current_fingerprint == fingerprint {
+        return SubscriptionProxyApplyPlan {
+            action: SubscriptionProxyApplyAction::Unchanged,
+            fingerprint,
+            status: certificate_status,
+            serve_mode: None,
+            profiles: config.profiles.clone(),
+        };
+    }
+
+    let certificate_owner_site_id =
+        subscription_proxy_certificate_owner_site_id(&config.profiles);
+    match plan_subscription_proxy_serve_mode(config, &mut file_readable) {
+        Ok(serve_mode) => {
+            let mode = match serve_mode {
+                SubscriptionProxyServeMode::Https => "https",
+                SubscriptionProxyServeMode::HttpFallback => "http",
+            };
+            let mut status = SubscriptionProxyStatus {
+                status: "running".to_string(),
+                enabled: true,
+                running: true,
+                mode: mode.to_string(),
+                https_listen: config.https_listen.trim().to_string(),
+                profiles: config.profiles.len(),
+                certificate_owner_site_id,
+                ..SubscriptionProxyStatus::default()
+            };
+            merge_subscription_proxy_status(&mut status, &certificate_status);
+            SubscriptionProxyApplyPlan {
+                action: SubscriptionProxyApplyAction::Start,
+                fingerprint,
+                status,
+                serve_mode: Some(serve_mode),
+                profiles: config.profiles.clone(),
+            }
+        }
+        Err(err) => {
+            let mut status = SubscriptionProxyStatus {
+                status: "error".to_string(),
+                enabled: true,
+                running: false,
+                mode: "error".to_string(),
+                https_listen: config.https_listen.trim().to_string(),
+                profiles: config.profiles.len(),
+                certificate_owner_site_id,
+                last_error: err,
+                ..SubscriptionProxyStatus::default()
+            };
+            merge_subscription_proxy_status(&mut status, &certificate_status);
+            SubscriptionProxyApplyPlan {
+                action: SubscriptionProxyApplyAction::Error,
+                fingerprint,
+                status,
+                serve_mode: None,
+                profiles: config.profiles.clone(),
+            }
+        }
+    }
+}
+
 pub fn subscription_proxy_fingerprint(config: &SubscriptionProxyConfig) -> String {
     let mut parts = vec![
         config.https_listen.trim().to_string(),
@@ -570,6 +674,30 @@ pub fn subscription_proxy_fingerprint(config: &SubscriptionProxyConfig) -> Strin
         parts.push(profile.subscribe_path.trim_matches('/').to_string());
     }
     parts.join("\0")
+}
+
+fn merge_subscription_proxy_status(
+    target: &mut SubscriptionProxyStatus,
+    source: &SubscriptionProxyStatus,
+) {
+    if !source.certificate_domain.is_empty() {
+        target.certificate_domain = source.certificate_domain.clone();
+    }
+    if !source.certificate_owner_site_id.is_empty() {
+        target.certificate_owner_site_id = source.certificate_owner_site_id.clone();
+    }
+    if !source.certificate_id.is_empty() {
+        target.certificate_id = source.certificate_id.clone();
+    }
+    target.need_certificate = source.need_certificate;
+    target.csr_pem = source.csr_pem.clone();
+    target.validation_ready = source.validation_ready;
+    if !source.cert_not_after.is_empty() {
+        target.cert_not_after = source.cert_not_after.clone();
+    }
+    if !source.last_error.is_empty() {
+        target.last_error = source.last_error.clone();
+    }
 }
 
 fn first_non_empty(value: &str, fallback: &str) -> String {
@@ -771,13 +899,15 @@ mod tests {
         normalize_subscription_proxy_config_with_public_ipv4,
         plan_subscription_proxy_health_response, plan_subscription_proxy_http_request,
         plan_subscription_proxy_request, plan_subscription_proxy_response,
-        plan_subscription_proxy_certificate_file, plan_subscription_proxy_serve_mode,
-        plan_subscription_proxy_validation_file, prepare_subscription_proxy_certificate_status,
+        plan_subscription_proxy_apply, plan_subscription_proxy_certificate_file,
+        plan_subscription_proxy_serve_mode, plan_subscription_proxy_validation_file,
+        prepare_subscription_proxy_certificate_status,
         prepare_subscription_proxy_certificate_status_with_file_writes,
         resolve_subscription_certificate_domain, subscription_proxy_certificate_owner_site_id,
-        subscription_proxy_fingerprint, write_subscription_proxy_file, SubscriptionProxyFileWrite,
-        SubscriptionProxyInboundRequest, SubscriptionProxyRoute, SubscriptionProxyRouteError,
-        SubscriptionProxyServeMode, SubscriptionProxyUpstreamResponse,
+        subscription_proxy_fingerprint, write_subscription_proxy_file,
+        SubscriptionProxyApplyAction, SubscriptionProxyFileWrite, SubscriptionProxyInboundRequest,
+        SubscriptionProxyRoute, SubscriptionProxyRouteError, SubscriptionProxyServeMode,
+        SubscriptionProxyStatus, SubscriptionProxyUpstreamResponse,
         DEFAULT_CHALLENGE_DIR, DEFAULT_HTTPS_LISTEN, DEFAULT_MAX_RESPONSE_BYTES,
     };
     use crate::config::{
@@ -1172,6 +1302,86 @@ mod tests {
     }
 
     #[test]
+    fn apply_plan_disables_empty_proxy() {
+        let plan = plan_subscription_proxy_apply(
+            &SubscriptionProxyConfig::default(),
+            "",
+            SubscriptionProxyStatus::default(),
+            |_| false,
+        );
+
+        assert_eq!(plan.action, SubscriptionProxyApplyAction::Disabled);
+        assert_eq!(plan.status.status, "disabled");
+        assert_eq!(plan.status.mode, "disabled");
+        assert!(plan.profiles.is_empty());
+    }
+
+    #[test]
+    fn apply_plan_skips_unchanged_fingerprint() {
+        let config = normalized_proxy_for_apply();
+        let fingerprint = subscription_proxy_fingerprint(&config);
+
+        let plan = plan_subscription_proxy_apply(
+            &config,
+            &fingerprint,
+            SubscriptionProxyStatus {
+                certificate_domain: "proxy.example.test".to_string(),
+                ..SubscriptionProxyStatus::default()
+            },
+            |_| true,
+        );
+
+        assert_eq!(plan.action, SubscriptionProxyApplyAction::Unchanged);
+        assert_eq!(plan.fingerprint, fingerprint);
+        assert_eq!(plan.status.certificate_domain, "proxy.example.test");
+    }
+
+    #[test]
+    fn apply_plan_starts_with_http_fallback_when_cert_files_missing() {
+        let mut config = normalized_proxy_for_apply();
+        config.allow_http_fallback = true;
+        let plan = plan_subscription_proxy_apply(
+            &config,
+            "",
+            SubscriptionProxyStatus {
+                certificate_domain: "proxy.example.test".to_string(),
+                need_certificate: true,
+                csr_pem: "csr".to_string(),
+                ..SubscriptionProxyStatus::default()
+            },
+            |_| false,
+        );
+
+        assert_eq!(plan.action, SubscriptionProxyApplyAction::Start);
+        assert_eq!(plan.serve_mode, Some(SubscriptionProxyServeMode::HttpFallback));
+        assert_eq!(plan.status.status, "running");
+        assert_eq!(plan.status.mode, "http");
+        assert_eq!(plan.status.certificate_owner_site_id, "site-a");
+        assert!(plan.status.need_certificate);
+        assert_eq!(plan.status.csr_pem, "csr");
+    }
+
+    #[test]
+    fn apply_plan_reports_error_when_cert_files_missing_without_fallback() {
+        let config = normalized_proxy_for_apply();
+        let plan = plan_subscription_proxy_apply(
+            &config,
+            "",
+            SubscriptionProxyStatus {
+                last_error: "csr failed".to_string(),
+                ..SubscriptionProxyStatus::default()
+            },
+            |_| false,
+        );
+
+        assert_eq!(plan.action, SubscriptionProxyApplyAction::Error);
+        assert_eq!(plan.status.status, "error");
+        assert_eq!(plan.status.mode, "error");
+        assert_eq!(plan.status.last_error, "csr failed");
+        assert_eq!(plan.status.certificate_owner_site_id, "site-a");
+    }
+
+    #[test]
     fn certificate_status_records_file_write_errors() {
         let status = prepare_subscription_proxy_certificate_status_with_file_writes(
             &SubscriptionProxyConfig {
@@ -1466,5 +1676,21 @@ mod tests {
         let path = std::env::temp_dir().join(format!("kelinode-rs-{label}-{nanos}"));
         fs::create_dir_all(&path).unwrap();
         path
+    }
+
+    fn normalized_proxy_for_apply() -> SubscriptionProxyConfig {
+        normalize_subscription_proxy_config(&SubscriptionProxyConfig {
+            enabled: true,
+            https_listen: "0.0.0.0:443".to_string(),
+            cert_file: "/etc/v2node/fullchain.pem".to_string(),
+            key_file: "/etc/v2node/private.key".to_string(),
+            profiles: vec![SubscriptionProxyProfile {
+                site_id: "site-a".to_string(),
+                upstream_base_url: "https://panel.example.test".to_string(),
+                subscribe_path: "s".to_string(),
+            }],
+            ..SubscriptionProxyConfig::default()
+        })
+        .unwrap()
     }
 }
