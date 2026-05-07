@@ -25,6 +25,7 @@
 - Core process spec and supervisor abstraction for start/reload/stop/status.
 - Health and machine status payload aggregation matching keliboard status contract.
 - Runtime control apply path that writes core config, reconciles HY2 state, starts core, and builds machine status.
+- Runtime panel report boundary that maps machine status responses into reload/upgrade actions.
 - Machine node resolution and subscription proxy config merging.
 - Compatibility tests around protocol parsing and endpoint construction.
 

@@ -1,6 +1,7 @@
 use crate::core::{write_core_config, CoreConfigWriteResult};
 use crate::health::{build_machine_status_payload, HealthReportInput};
-use crate::machine::MachineStatusPayload;
+use crate::machine::{MachineStatusPayload, MachineStatusResponse, MachineUpgradeCommand};
+use crate::panel::PanelClient;
 use crate::port_forward::{
     inspect_hysteria_port_forward, repair_hysteria_port_forward, HysteriaPortForwardStatus,
     PortForwardExecutor,
@@ -23,6 +24,12 @@ pub struct RuntimeApplyResult {
     pub core_process: Option<ProcessStatus>,
     pub hy2_port_forward: HysteriaPortForwardStatus,
     pub machine_status: MachineStatusPayload,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RuntimePanelAction {
+    pub reload: bool,
+    pub upgrade: Option<MachineUpgradeCommand>,
 }
 
 pub fn apply_runtime_plan<P, F>(
@@ -77,6 +84,31 @@ where
     })
 }
 
+pub async fn report_runtime_apply_result(
+    client: &PanelClient,
+    result: &RuntimeApplyResult,
+) -> Result<RuntimePanelAction, String> {
+    report_machine_status_payload(client, result.machine_status.clone()).await
+}
+
+pub async fn report_machine_status_payload(
+    client: &PanelClient,
+    payload: MachineStatusPayload,
+) -> Result<RuntimePanelAction, String> {
+    let response = client
+        .report_machine_status(payload)
+        .await
+        .map_err(|err| err.to_string())?;
+    Ok(runtime_panel_action(&response))
+}
+
+pub fn runtime_panel_action(response: &MachineStatusResponse) -> RuntimePanelAction {
+    RuntimePanelAction {
+        reload: response.reload,
+        upgrade: response.upgrade.clone(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
@@ -91,7 +123,9 @@ mod tests {
     use crate::process::MemoryProcessSupervisor;
     use crate::runtime::build_runtime_bootstrap_plan;
 
-    use super::{apply_runtime_plan, RuntimeControlOptions};
+    use crate::machine::{MachineStatusResponse, MachineUpgradeCommand};
+
+    use super::{apply_runtime_plan, runtime_panel_action, RuntimeControlOptions};
 
     #[test]
     fn applies_plan_by_writing_config_starting_core_and_building_status() {
@@ -182,6 +216,22 @@ mod tests {
         assert!(result.core_process.is_none());
         assert!(process.starts.is_empty());
         assert_eq!(result.machine_status.machine_id, 9);
+    }
+
+    #[test]
+    fn panel_action_preserves_reload_and_upgrade_command() {
+        let response = MachineStatusResponse {
+            reload: true,
+            upgrade: Some(MachineUpgradeCommand {
+                id: "upgrade-1".to_string(),
+                target_version: "v0.4.1".to_string(),
+            }),
+        };
+
+        let action = runtime_panel_action(&response);
+
+        assert!(action.reload);
+        assert_eq!(action.upgrade.unwrap().target_version, "v0.4.1");
     }
 
     #[derive(Default)]
