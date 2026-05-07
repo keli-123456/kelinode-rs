@@ -77,6 +77,7 @@ pub enum SubscriptionProxyServeMode {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SubscriptionProxyRoute {
     Health,
+    ChallengeFile(String),
     Upstream(SubscriptionProxyUpstreamRequest),
 }
 
@@ -251,6 +252,33 @@ pub fn plan_subscription_proxy_request(
     ))
 }
 
+pub fn plan_subscription_proxy_http_request(
+    config: &SubscriptionProxyConfig,
+    request: &SubscriptionProxyInboundRequest,
+) -> Result<SubscriptionProxyRoute, SubscriptionProxyRouteError> {
+    let method = request.method.trim().to_ascii_uppercase();
+    if method != "GET" && method != "HEAD" {
+        return Err(SubscriptionProxyRouteError::MethodNotAllowed);
+    }
+
+    if request.path == "/health" {
+        return Ok(SubscriptionProxyRoute::Health);
+    }
+
+    let Some(name) = request
+        .path
+        .strip_prefix("/.well-known/pki-validation/")
+        .and_then(challenge_request_file_name)
+    else {
+        return Err(SubscriptionProxyRouteError::NotFound);
+    };
+    let challenge_dir = first_non_empty(config.challenge_dir.trim(), DEFAULT_CHALLENGE_DIR);
+    Ok(SubscriptionProxyRoute::ChallengeFile(join_posix_path(
+        &challenge_dir,
+        &name,
+    )))
+}
+
 pub fn build_subscription_upstream_url(
     profile: &SubscriptionProxyProfile,
     token: &str,
@@ -306,6 +334,20 @@ pub fn plan_subscription_proxy_response(
         headers: forwarded_headers(&response.headers),
         body: if head_only { Vec::new() } else { response.body },
     })
+}
+
+pub fn plan_subscription_proxy_health_response(head_only: bool) -> SubscriptionProxyClientResponse {
+    let mut headers = BTreeMap::new();
+    headers.insert("Content-Type".to_string(), "application/json".to_string());
+    SubscriptionProxyClientResponse {
+        status: 200,
+        headers,
+        body: if head_only {
+            Vec::new()
+        } else {
+            br#"{"status":"ok"}"#.to_vec()
+        },
+    }
 }
 
 pub fn subscription_proxy_certificate_owner_site_id(
@@ -563,6 +605,14 @@ fn validation_file_name(path: &str) -> Option<String> {
     Some(name.to_string())
 }
 
+fn challenge_request_file_name(path: &str) -> Option<String> {
+    let name = path.trim();
+    if name.is_empty() || name.contains('/') || name.contains("..") || name.contains('\\') {
+        return None;
+    }
+    Some(name.to_string())
+}
+
 fn validation_content_string(content: &str) -> String {
     format!("{}\n", content.trim())
 }
@@ -719,6 +769,7 @@ mod tests {
     use super::{
         build_subscription_upstream_url, normalize_subscription_proxy_config,
         normalize_subscription_proxy_config_with_public_ipv4,
+        plan_subscription_proxy_health_response, plan_subscription_proxy_http_request,
         plan_subscription_proxy_request, plan_subscription_proxy_response,
         plan_subscription_proxy_certificate_file, plan_subscription_proxy_serve_mode,
         plan_subscription_proxy_validation_file, prepare_subscription_proxy_certificate_status,
@@ -1217,6 +1268,65 @@ mod tests {
         .unwrap();
 
         assert_eq!(route, SubscriptionProxyRoute::Health);
+    }
+
+    #[test]
+    fn plans_health_response_like_go_handler() {
+        let response = plan_subscription_proxy_health_response(false);
+        assert_eq!(response.status, 200);
+        assert_eq!(response.headers["Content-Type"], "application/json");
+        assert_eq!(response.body, br#"{"status":"ok"}"#.to_vec());
+
+        let response = plan_subscription_proxy_health_response(true);
+        assert!(response.body.is_empty());
+    }
+
+    #[test]
+    fn plans_http_challenge_file_request() {
+        let route = plan_subscription_proxy_http_request(
+            &SubscriptionProxyConfig {
+                challenge_dir: "/var/lib/v2node/challenges".to_string(),
+                ..SubscriptionProxyConfig::default()
+            },
+            &SubscriptionProxyInboundRequest {
+                method: "HEAD".to_string(),
+                path: "/.well-known/pki-validation/token.txt".to_string(),
+                ..SubscriptionProxyInboundRequest::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            route,
+            SubscriptionProxyRoute::ChallengeFile(
+                "/var/lib/v2node/challenges/token.txt".to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_http_challenge_file_request() {
+        let err = plan_subscription_proxy_http_request(
+            &SubscriptionProxyConfig::default(),
+            &SubscriptionProxyInboundRequest {
+                method: "POST".to_string(),
+                path: "/.well-known/pki-validation/token.txt".to_string(),
+                ..SubscriptionProxyInboundRequest::default()
+            },
+        )
+        .unwrap_err();
+        assert_eq!(err.status_code(), 405);
+
+        let err = plan_subscription_proxy_http_request(
+            &SubscriptionProxyConfig::default(),
+            &SubscriptionProxyInboundRequest {
+                method: "GET".to_string(),
+                path: "/.well-known/pki-validation/../token.txt".to_string(),
+                ..SubscriptionProxyInboundRequest::default()
+            },
+        )
+        .unwrap_err();
+        assert_eq!(err, SubscriptionProxyRouteError::NotFound);
     }
 
     #[test]

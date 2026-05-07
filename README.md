@@ -78,6 +78,7 @@ First cut:
 - Write planned subscription proxy files with parent directory creation and Unix mode handling.
 - Map runtime subscription proxy status into the machine health payload.
 - Generate stable subscription proxy fingerprints for reload decisions.
+- Plan subscription proxy HTTP health and ZeroSSL challenge-file routes.
 
 Not implemented yet:
 
