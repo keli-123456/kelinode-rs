@@ -493,12 +493,7 @@ fn validate_keli_core_rs_plain_tcp_inbound(inbound: &InboundPlan) -> Result<(), 
             inbound.tag, inbound.security
         )));
     }
-    if !inbound.flow.trim().is_empty() {
-        return Err(CoreError::new(format!(
-            "keli-core-rs {protocol} currently does not support flow {}; inbound {}",
-            inbound.flow, inbound.tag
-        )));
-    }
+    validate_keli_core_rs_flow(inbound, &network)?;
     if !json_value_is_empty(&inbound.network_settings) {
         return Err(CoreError::new(format!(
             "keli-core-rs {protocol} currently does not support transport settings on inbound {}",
@@ -526,12 +521,7 @@ fn validate_keli_core_rs_tcp_or_ws_inbound(inbound: &InboundPlan) -> Result<(), 
     if inbound.security == "tls" {
         validate_keli_core_rs_tls_inbound(inbound)?;
     }
-    if !inbound.flow.trim().is_empty() {
-        return Err(CoreError::new(format!(
-            "keli-core-rs {protocol} currently does not support flow {}; inbound {}",
-            inbound.flow, inbound.tag
-        )));
-    }
+    validate_keli_core_rs_flow(inbound, &network)?;
     if network == "tcp" {
         if !json_value_is_empty(&inbound.network_settings) {
             return Err(CoreError::new(format!(
@@ -547,6 +537,38 @@ fn validate_keli_core_rs_tcp_or_ws_inbound(inbound: &InboundPlan) -> Result<(), 
     } else {
         validate_keli_core_rs_http_transport_settings(inbound, &network)
     }
+}
+
+fn validate_keli_core_rs_flow(inbound: &InboundPlan, network: &str) -> Result<(), CoreError> {
+    let flow = inbound.flow.trim();
+    if flow.is_empty() {
+        return Ok(());
+    }
+    if inbound.protocol != "vless" {
+        return Err(CoreError::new(format!(
+            "keli-core-rs {} currently does not support flow {}; inbound {}",
+            inbound.protocol, inbound.flow, inbound.tag
+        )));
+    }
+    if flow != "xtls-rprx-vision" {
+        return Err(CoreError::new(format!(
+            "keli-core-rs vless currently supports only xtls-rprx-vision flow; inbound {} uses {}",
+            inbound.tag, inbound.flow
+        )));
+    }
+    if network != "tcp" {
+        return Err(CoreError::new(format!(
+            "keli-core-rs vless vision currently requires tcp transport; inbound {} uses {}",
+            inbound.tag, network
+        )));
+    }
+    if inbound.security != "tls" {
+        return Err(CoreError::new(format!(
+            "keli-core-rs vless vision currently requires tls security; inbound {} uses {}",
+            inbound.tag, inbound.security
+        )));
+    }
+    Ok(())
 }
 
 fn validate_keli_core_rs_tls_inbound(inbound: &InboundPlan) -> Result<(), CoreError> {
@@ -829,6 +851,7 @@ fn render_keli_core_rs_inbound(inbound: &InboundPlan) -> Value {
         } else {
             Value::Null
         },
+        "flow": &inbound.flow,
         "users": inbound
             .users
             .iter()
@@ -2409,7 +2432,31 @@ mod tests {
     }
 
     #[test]
-    fn keli_core_rs_rejects_vless_flow_until_core_supports_it() {
+    fn renders_keli_core_rs_vless_vision_flow() {
+        let mut node = test_node("vless", 48, "");
+        node.common.flow = "xtls-rprx-vision".to_string();
+        node.security = Security::Tls;
+        node.common.cert_info.as_mut().unwrap().cert_file = "/srv/v2node/vless.cer".to_string();
+        node.common.cert_info.as_mut().unwrap().key_file = "/srv/v2node/vless.key".to_string();
+        node.common.cert_info.as_mut().unwrap().cert_domain = "vless.example.test".to_string();
+        let plan = CorePlan::from_nodes(
+            CoreKind::KeliCoreRs,
+            PathBuf::from("/srv/v2node/keli-core-rs.json"),
+            &[node],
+        )
+        .unwrap();
+
+        let config = render_core_config(&plan).unwrap();
+
+        assert_eq!(config["inbounds"][0]["flow"], "xtls-rprx-vision");
+        assert_eq!(
+            config["inbounds"][0]["tls"]["cert_file"],
+            "/srv/v2node/vless.cer"
+        );
+    }
+
+    #[test]
+    fn keli_core_rs_rejects_vless_vision_without_tls() {
         let mut node = test_node("vless", 48, "");
         node.common.flow = "xtls-rprx-vision".to_string();
         let plan = CorePlan::from_nodes(
@@ -2421,7 +2468,7 @@ mod tests {
 
         let err = render_core_config(&plan).unwrap_err();
 
-        assert!(err.message.contains("does not support flow"));
+        assert!(err.message.contains("requires tls security"));
     }
 
     #[test]
