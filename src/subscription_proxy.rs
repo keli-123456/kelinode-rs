@@ -1,11 +1,14 @@
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::fs;
-use std::io::Read;
-use std::net::IpAddr;
-use std::net::Ipv4Addr;
+use std::io::{ErrorKind, Read, Write};
+use std::net::{IpAddr, Ipv4Addr, Shutdown, TcpListener, TcpStream};
 use std::path::Path;
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::thread::{self, JoinHandle};
+use std::time::Duration;
 
 use crate::config::{SubscriptionProxyConfig, SubscriptionProxyProfile};
 
@@ -117,6 +120,13 @@ pub struct SubscriptionProxyCsrPlan {
     pub generate_key: bool,
 }
 
+#[derive(Debug)]
+pub struct SubscriptionProxyServerHandle {
+    listen: String,
+    stop: Arc<AtomicBool>,
+    join: Option<JoinHandle<()>>,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct SubscriptionProxyRuntimeManager {
     fingerprint: String,
@@ -144,6 +154,29 @@ impl SubscriptionProxyRouteError {
             Self::MethodNotAllowed => 405,
             Self::BadGateway(_) => 502,
         }
+    }
+}
+
+impl SubscriptionProxyServerHandle {
+    pub fn listen(&self) -> &str {
+        &self.listen
+    }
+
+    pub fn stop(mut self) {
+        self.stop_inner();
+    }
+
+    fn stop_inner(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+        if let Some(join) = self.join.take() {
+            let _ = join.join();
+        }
+    }
+}
+
+impl Drop for SubscriptionProxyServerHandle {
+    fn drop(&mut self) {
+        self.stop_inner();
     }
 }
 
@@ -243,6 +276,16 @@ pub fn subscription_proxy_error_response(
         status: error.status_code(),
         headers,
         body: format!("{message}\n").into_bytes(),
+    }
+}
+
+fn subscription_proxy_bad_request_response(error: &str) -> SubscriptionProxyClientResponse {
+    let mut headers = BTreeMap::new();
+    headers.insert("Content-Type".to_string(), "text/plain; charset=utf-8".to_string());
+    SubscriptionProxyClientResponse {
+        status: 400,
+        headers,
+        body: format!("{error}\n").into_bytes(),
     }
 }
 
@@ -530,6 +573,49 @@ pub fn plan_subscription_proxy_main_server(
         },
         profiles: config.profiles.clone(),
     }
+}
+
+pub fn spawn_subscription_proxy_main_http_fallback_server(
+    plan: SubscriptionProxyMainServerPlan,
+) -> Result<SubscriptionProxyServerHandle, String> {
+    if plan.mode != SubscriptionProxyServeMode::HttpFallback {
+        return Err(
+            "subscription proxy main server only supports HTTP fallback in this runtime"
+                .to_string(),
+        );
+    }
+    let listen = plan.listen.clone();
+    let profiles = plan.profiles.clone();
+    let max_response_bytes = plan.max_response_bytes;
+    spawn_subscription_proxy_blocking_server(listen, move |request| {
+        handle_subscription_proxy_request(
+            &profiles,
+            &request,
+            max_response_bytes,
+            |upstream| fetch_subscription_proxy_upstream_blocking(upstream, max_response_bytes),
+        )
+        .unwrap_or_else(|err| subscription_proxy_error_response(&err))
+    })
+}
+
+pub fn spawn_subscription_proxy_http_challenge_server(
+    config: SubscriptionProxyConfig,
+) -> Result<Option<SubscriptionProxyServerHandle>, String> {
+    let Some(plan) = plan_subscription_proxy_http_server(&config) else {
+        return Ok(None);
+    };
+    let mut config = config;
+    config.challenge_dir = plan.challenge_dir;
+    let listen = plan.listen;
+    spawn_subscription_proxy_blocking_server(listen, move |request| {
+        handle_subscription_proxy_http_request(
+            &config,
+            &request,
+            read_subscription_proxy_file_optional,
+        )
+        .unwrap_or_else(|err| subscription_proxy_error_response(&err))
+    })
+    .map(Some)
 }
 
 pub fn build_subscription_upstream_url(
@@ -1212,6 +1298,118 @@ fn run_openssl(args: &[String]) -> Result<Vec<u8>, String> {
     Err(format!("openssl {} failed: {detail}", args.join(" ")))
 }
 
+fn spawn_subscription_proxy_blocking_server<F>(
+    listen: String,
+    handler: F,
+) -> Result<SubscriptionProxyServerHandle, String>
+where
+    F: Fn(SubscriptionProxyInboundRequest) -> SubscriptionProxyClientResponse
+        + Send
+        + Sync
+        + 'static,
+{
+    let listener = TcpListener::bind(&listen)
+        .map_err(|err| format!("bind subscription proxy server {listen}: {err}"))?;
+    listener
+        .set_nonblocking(true)
+        .map_err(|err| format!("set subscription proxy server nonblocking {listen}: {err}"))?;
+    let stop = Arc::new(AtomicBool::new(false));
+    let thread_stop = Arc::clone(&stop);
+    let handler = Arc::new(handler);
+    let join = thread::spawn(move || {
+        serve_subscription_proxy_listener(listener, thread_stop, handler);
+    });
+    Ok(SubscriptionProxyServerHandle {
+        listen,
+        stop,
+        join: Some(join),
+    })
+}
+
+fn serve_subscription_proxy_listener<F>(
+    listener: TcpListener,
+    stop: Arc<AtomicBool>,
+    handler: Arc<F>,
+) where
+    F: Fn(SubscriptionProxyInboundRequest) -> SubscriptionProxyClientResponse
+        + Send
+        + Sync
+        + 'static,
+{
+    while !stop.load(Ordering::SeqCst) {
+        match listener.accept() {
+            Ok((stream, _)) => {
+                let handler = Arc::clone(&handler);
+                thread::spawn(move || {
+                    let _ = serve_subscription_proxy_stream(stream, handler);
+                });
+            }
+            Err(err) if err.kind() == ErrorKind::WouldBlock => {
+                thread::sleep(Duration::from_millis(50));
+            }
+            Err(_) => return,
+        }
+    }
+}
+
+fn serve_subscription_proxy_stream<F>(
+    mut stream: TcpStream,
+    handler: Arc<F>,
+) -> Result<(), String>
+where
+    F: Fn(SubscriptionProxyInboundRequest) -> SubscriptionProxyClientResponse,
+{
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
+    let _ = stream.set_write_timeout(Some(Duration::from_secs(10)));
+    let remote_addr = stream
+        .peer_addr()
+        .map(|addr| addr.to_string())
+        .unwrap_or_default();
+    let response = match read_subscription_proxy_http_request_head(&mut stream, 32 * 1024)
+        .and_then(|raw| parse_subscription_proxy_http_request(&raw, &remote_addr))
+    {
+        Ok(request) => handler(request),
+        Err(err) => subscription_proxy_bad_request_response(&err),
+    };
+    let bytes = render_subscription_proxy_http_response(&response);
+    stream
+        .write_all(&bytes)
+        .map_err(|err| format!("write subscription proxy response: {err}"))?;
+    let _ = stream.shutdown(Shutdown::Both);
+    Ok(())
+}
+
+fn read_subscription_proxy_http_request_head<R: Read>(
+    mut reader: R,
+    max_header_bytes: usize,
+) -> Result<Vec<u8>, String> {
+    let mut output = Vec::new();
+    let mut chunk = [0u8; 1024];
+    loop {
+        let read = reader
+            .read(&mut chunk)
+            .map_err(|err| format!("read subscription proxy request: {err}"))?;
+        if read == 0 {
+            return Err("incomplete http request".to_string());
+        }
+        output.extend_from_slice(&chunk[..read]);
+        if output.len() > max_header_bytes {
+            return Err("http request header too large".to_string());
+        }
+        if output.windows(4).any(|window| window == b"\r\n\r\n") {
+            return Ok(output);
+        }
+    }
+}
+
+fn read_subscription_proxy_file_optional(path: &str) -> Result<Option<Vec<u8>>, String> {
+    match fs::read(path) {
+        Ok(content) => Ok(Some(content)),
+        Err(err) if err.kind() == ErrorKind::NotFound => Ok(None),
+        Err(err) => Err(format!("read subscription proxy file {path}: {err}")),
+    }
+}
+
 fn read_limited_upstream_body<R: Read>(
     reader: R,
     max_response_bytes: u64,
@@ -1481,12 +1679,15 @@ mod tests {
         plan_subscription_proxy_serve_mode, plan_subscription_proxy_validation_file,
         prepare_subscription_proxy_certificate_status,
         prepare_subscription_proxy_certificate_status_with_file_writes,
-        read_limited_upstream_body,
+        read_limited_upstream_body, read_subscription_proxy_http_request_head,
         render_subscription_proxy_http_response,
         resolve_subscription_certificate_domain, subscription_proxy_certificate_owner_site_id,
         subscription_proxy_error_response,
+        spawn_subscription_proxy_http_challenge_server,
+        spawn_subscription_proxy_main_http_fallback_server,
         subscription_proxy_file_readable, subscription_proxy_fingerprint,
         write_subscription_proxy_file, SubscriptionProxyApplyAction, SubscriptionProxyFileWrite,
+        SubscriptionProxyMainServerPlan,
         SubscriptionProxyInboundRequest, SubscriptionProxyRoute, SubscriptionProxyRouteError,
         SubscriptionProxyRuntimeManager, SubscriptionProxyServeMode, SubscriptionProxyStatus,
         SubscriptionProxyUpstreamResponse,
@@ -2482,6 +2683,21 @@ mod tests {
     }
 
     #[test]
+    fn reads_http_request_head_with_size_limit() {
+        let raw = b"GET /health HTTP/1.1\r\nHost: proxy.example.test\r\n\r\n";
+        let head = read_subscription_proxy_http_request_head(Cursor::new(raw.to_vec()), 1024)
+            .unwrap();
+        assert_eq!(head, raw);
+
+        let err = read_subscription_proxy_http_request_head(
+            Cursor::new(b"GET /health HTTP/1.1\r\nHost: x\r\n\r\n".to_vec()),
+            8,
+        )
+        .unwrap_err();
+        assert_eq!(err, "http request header too large");
+    }
+
+    #[test]
     fn renders_http_response_and_route_errors() {
         let mut headers = BTreeMap::new();
         headers.insert("Content-Type".to_string(), "text/plain".to_string());
@@ -2502,6 +2718,28 @@ mod tests {
             subscription_proxy_error_response(&SubscriptionProxyRouteError::MethodNotAllowed);
         assert_eq!(response.status, 405);
         assert_eq!(response.body, b"method not allowed\n".to_vec());
+    }
+
+    #[test]
+    fn server_spawn_boundaries_do_not_fake_https_support() {
+        let err = spawn_subscription_proxy_main_http_fallback_server(
+            SubscriptionProxyMainServerPlan {
+                listen: "127.0.0.1:0".to_string(),
+                mode: SubscriptionProxyServeMode::Https,
+                cert_file: "/etc/v2node/fullchain.pem".to_string(),
+                key_file: "/etc/v2node/private.key".to_string(),
+                max_response_bytes: 1024,
+                profiles: Vec::new(),
+            },
+        )
+        .unwrap_err();
+        assert!(err.contains("only supports HTTP fallback"));
+
+        let handle = spawn_subscription_proxy_http_challenge_server(
+            SubscriptionProxyConfig::default(),
+        )
+        .unwrap();
+        assert!(handle.is_none());
     }
 
     #[test]
