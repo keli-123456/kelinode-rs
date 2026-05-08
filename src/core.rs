@@ -191,14 +191,14 @@ pub fn split_core_plans_for_nodes_with_kind(
 ) -> Result<CorePlanBundle, CoreError> {
     let core_nodes = nodes
         .iter()
-        .filter(|node| sidecar_protocol_name(node.protocol).is_none())
+        .filter(|node| sidecar_protocol_name_for_kind(&core_kind, node.protocol).is_none())
         .cloned()
         .collect::<Vec<_>>();
     let xray = if core_nodes.is_empty() {
         None
     } else {
         Some(CorePlan::from_nodes_with_users(
-            core_kind,
+            core_kind.clone(),
             config_path.clone(),
             &core_nodes,
             users_by_node_tag,
@@ -207,7 +207,7 @@ pub fn split_core_plans_for_nodes_with_kind(
 
     let mut sidecars = Vec::new();
     for node in nodes {
-        let Some(protocol) = sidecar_protocol_name(node.protocol) else {
+        let Some(protocol) = sidecar_protocol_name_for_kind(&core_kind, node.protocol) else {
             continue;
         };
         sidecars.push(CorePlan::from_nodes_with_users(
@@ -227,6 +227,13 @@ pub fn sidecar_protocol_name(protocol: Protocol) -> Option<&'static str> {
         Protocol::Mieru => Some("mieru"),
         _ => None,
     }
+}
+
+fn sidecar_protocol_name_for_kind(kind: &CoreKind, protocol: Protocol) -> Option<&'static str> {
+    if matches!(kind, CoreKind::KeliCoreRs) && protocol == Protocol::Mieru {
+        return None;
+    }
+    sidecar_protocol_name(protocol)
 }
 
 pub fn sidecar_config_path(
@@ -990,6 +997,10 @@ fn validate_keli_core_rs_inbound(inbound: &InboundPlan) -> Result<(), CoreError>
             validate_keli_core_rs_plain_tcp_inbound(inbound)?;
             Ok(())
         }
+        "mieru" => {
+            validate_keli_core_rs_plain_tcp_inbound(inbound)?;
+            Ok(())
+        }
         "vless" | "trojan" | "vmess" => {
             validate_keli_core_rs_tcp_or_ws_inbound(inbound)?;
             Ok(())
@@ -997,7 +1008,7 @@ fn validate_keli_core_rs_inbound(inbound: &InboundPlan) -> Result<(), CoreError>
         "tuic" => validate_keli_core_rs_tuic_inbound(inbound),
         "hysteria" => validate_keli_core_rs_hysteria2_inbound(inbound),
         value => Err(CoreError::new(format!(
-            "keli-core-rs native renderer only supports socks/http/shadowsocks/vmess/vless/trojan/anytls tcp, vmess/vless/trojan ws/httpupgrade/grpc, tuic tcp/udp relay, and hysteria2 tcp/udp relay today; inbound {} uses {}",
+            "keli-core-rs native renderer only supports socks/http/shadowsocks/vmess/vless/trojan/anytls/mieru tcp, vmess/vless/trojan ws/httpupgrade/grpc, tuic tcp/udp relay, and hysteria2 tcp/udp relay today; inbound {} uses {}",
             inbound.tag, value
         ))),
     }
@@ -2726,7 +2737,8 @@ mod tests {
     use super::{
         build_inbound_plan, core_file_layout, core_kind_from_name, render_core_config,
         resolve_node_listen_ip, should_fallback_node_listen_ip, sidecar_config_path,
-        split_core_plans_for_nodes, write_core_config, CoreKind, CorePlan,
+        split_core_plans_for_nodes, split_core_plans_for_nodes_with_kind, write_core_config,
+        CoreKind, CorePlan,
     };
     use crate::panel::types::{CommonNode, NodeInfo, PortValue, Route, Security, UserInfo};
 
@@ -2809,6 +2821,33 @@ mod tests {
     }
 
     #[test]
+    fn keeps_mieru_native_for_keli_core_rs_and_splits_naive() {
+        let nodes = vec![
+            test_node("vless", 34, ""),
+            test_node("mieru", 35, ""),
+            test_node("naive", 36, ""),
+        ];
+        let bundle = split_core_plans_for_nodes_with_kind(
+            CoreKind::KeliCoreRs,
+            PathBuf::from("/srv/v2node/config.json"),
+            &nodes,
+            &std::collections::BTreeMap::new(),
+        )
+        .unwrap();
+
+        let core = bundle.xray.unwrap();
+        assert_eq!(core.kind, CoreKind::KeliCoreRs);
+        assert_eq!(core.inbounds.len(), 2);
+        assert_eq!(core.inbounds[0].protocol, "vless");
+        assert_eq!(core.inbounds[1].protocol, "mieru");
+        assert_eq!(bundle.sidecars.len(), 1);
+        assert_eq!(
+            bundle.sidecars[0].kind,
+            CoreKind::Sidecar("naive".to_string())
+        );
+    }
+
+    #[test]
     fn derives_sidecar_config_path_next_to_core_config() {
         assert_eq!(
             sidecar_config_path("/srv/v2node/config.json", "naive", 36),
@@ -2863,6 +2902,36 @@ mod tests {
 
         assert_eq!(config["portBindings"][0]["portRange"], "2100-2200");
         assert!(config["portBindings"][0]["port"].is_null());
+    }
+
+    #[test]
+    fn renders_keli_core_rs_mieru_inbound() {
+        let node = test_node("mieru", 40, "");
+        let tag = node.tag.clone();
+        let mut users = std::collections::BTreeMap::new();
+        users.insert(
+            tag,
+            vec![UserInfo {
+                id: 40,
+                uuid: "mieru-secret".to_string(),
+                speed_limit: 0,
+                device_limit: 0,
+            }],
+        );
+        let plan = CorePlan::from_nodes_with_users(
+            CoreKind::KeliCoreRs,
+            PathBuf::from("/srv/v2node/config.json"),
+            &[node],
+            &users,
+        )
+        .unwrap();
+
+        let config = render_core_config(&plan).unwrap();
+
+        assert_eq!(config["inbounds"][0]["protocol"], "mieru");
+        assert_eq!(config["inbounds"][0]["transport"]["network"], "tcp");
+        assert_eq!(config["inbounds"][0]["users"][0]["uuid"], "mieru-secret");
+        assert!(config["inbounds"][0]["users"][0]["password"].is_null());
     }
 
     #[test]

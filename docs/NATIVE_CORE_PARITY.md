@@ -17,7 +17,7 @@ When the native core is already running, `kelinode-rs` writes the rendered confi
 
 - Render only options that `keli-core-rs` validates and has a runtime path for.
 - Reject panel options that are only supported by Xray or sidecars.
-- Keep Naive and Mieru outside the native core renderer.
+- Keep Naive outside the native core renderer; render Mieru into `keli-core-rs` only for the supported TCP path.
 - Preserve production `xray` rendering compatibility even when native rendering rejects a feature.
 
 ## Protocol Renderer Matrix
@@ -34,7 +34,7 @@ When the native core is already running, `kelinode-rs` writes the rendered confi
 | Hysteria2 | Partial | TLS, bandwidth options, salamander obfs | Transport settings, non-salamander obfs |
 | TUIC | Partial | TLS, UUID users, cubic/bbr/new_reno congestion | zero-RTT, non-UUID users |
 | Naive | Sidecar | Caddyfile sidecar plan | Native core rendering |
-| Mieru | Sidecar | `mita` JSON sidecar plan | Native core rendering |
+| Mieru | Partial | Native TCP inbound when `kernel.type: keli-core-rs`; `mita` JSON sidecar plan for Xray/default path | UDP, multiplexing, traffic-pattern tuning, real-client matrix |
 
 ## Route Renderer Matrix
 

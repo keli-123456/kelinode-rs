@@ -50,7 +50,7 @@
 - Unified node traffic/online activity reporting with legacy endpoint fallback.
 - Per-node activity batch reporting keyed by runtime tag for multi-node machines.
 - Naive and Mieru protocol parsing with explicit Xray rejection until sidecar runtimes are wired.
-- Core plan splitting for Xray-compatible nodes and per-node Naive/Mieru sidecars.
+- Core plan splitting for Xray-compatible nodes and per-node Naive/Mieru sidecars, while keeping Mieru native for `keli-core-rs`.
 - Explicit sidecar process spec construction from configured command and arguments.
 - Runtime bootstrap preservation of sidecar plans without fake Xray rendering.
 - Mieru sidecar `mita` server config rendering from panel port and user fields.
@@ -141,5 +141,5 @@
 ## Phase 5: Protocol Coverage
 
 - Match Go `kelinode` for vmess, vless, trojan, shadowsocks, hysteria2, tuic, anytls, socks, and http.
-- Add sidecar path for protocols that should not be faked inside Xray, such as Naive and Mieru.
+- Add sidecar path for protocols that should not be faked inside Xray, such as Naive and the default-path Mieru runtime.
 - Consider Rust-native fast paths only after contract and reporting are stable.

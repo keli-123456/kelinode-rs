@@ -46,11 +46,11 @@ Initial supported protocol names mirror Go `kelinode`:
 - `anytls`
 - `socks`
 - `http`
-- `mieru` when a matching sidecar process is explicitly configured
+- `mieru` natively with `kernel.type: keli-core-rs`, or through a matching sidecar process on the default Xray path
 
 Naive still requires explicit Caddy forward_proxy integration before the panel should expose it as a Rust node supported protocol.
 
-The experimental `keli-core-rs` native core path now renders SOCKS, HTTP, Shadowsocks, VMess, VLESS, Trojan, AnyTLS, Hysteria2, TUIC, common TCP/WS/HTTPUpgrade/gRPC transports, and VLESS REALITY config into the Rust core schema. Naive and Mieru remain explicit sidecar protocols.
+The experimental `keli-core-rs` native core path now renders SOCKS, HTTP, Shadowsocks, VMess, VLESS, Trojan, AnyTLS, Hysteria2, TUIC, Mieru TCP, common TCP/WS/HTTPUpgrade/gRPC transports, and VLESS REALITY config into the Rust core schema. Naive remains an explicit sidecar protocol.
 
 Operators opt into that path with `kernel.type: keli-core-rs`; the default remains `xray` for production compatibility.
 
