@@ -81,6 +81,7 @@ First cut:
 - Plan subscription proxy HTTP health and ZeroSSL challenge-file routes.
 - Plan subscription proxy apply decisions for disabled, unchanged, start, and error states.
 - Add a subscription proxy runtime manager that tracks fingerprint and reportable status.
+- Wire the subscription proxy runtime manager to filesystem writes and readable-file checks.
 
 Not implemented yet:
 

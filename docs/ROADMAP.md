@@ -87,6 +87,7 @@
 - Subscription proxy HTTP health and ZeroSSL challenge-file route planning.
 - Subscription proxy apply decision planning for disabled, unchanged, start, and error states.
 - Subscription proxy runtime manager state tracking for fingerprint and machine-report status.
+- Subscription proxy runtime manager filesystem write and readable-file integration.
 - Compatibility tests around protocol parsing and endpoint construction.
 
 ## Phase 2: Runtime Control

@@ -176,6 +176,23 @@ impl SubscriptionProxyRuntimeManager {
         self.status = plan.status.clone();
         Ok(plan)
     }
+
+    pub fn apply_with_file_system<G>(
+        &mut self,
+        config: &SubscriptionProxyConfig,
+        ensure_csr: G,
+    ) -> Result<SubscriptionProxyApplyPlan, String>
+    where
+        G: FnMut(&str, &str) -> Result<String, String>,
+    {
+        self.apply(
+            config,
+            |_| String::new(),
+            ensure_csr,
+            subscription_proxy_file_readable,
+            write_subscription_proxy_file,
+        )
+    }
 }
 
 pub fn normalize_subscription_proxy_config(
@@ -626,6 +643,16 @@ pub fn write_subscription_proxy_file(write: &SubscriptionProxyFileWrite) -> Resu
     Ok(())
 }
 
+pub fn subscription_proxy_file_readable(path: &str) -> bool {
+    let path = path.trim();
+    if path.is_empty() {
+        return false;
+    }
+    fs::metadata(path)
+        .map(|metadata| metadata.is_file())
+        .unwrap_or(false)
+}
+
 pub fn plan_subscription_proxy_apply<F>(
     config: &SubscriptionProxyConfig,
     current_fingerprint: &str,
@@ -967,10 +994,11 @@ mod tests {
         prepare_subscription_proxy_certificate_status,
         prepare_subscription_proxy_certificate_status_with_file_writes,
         resolve_subscription_certificate_domain, subscription_proxy_certificate_owner_site_id,
-        subscription_proxy_fingerprint, write_subscription_proxy_file,
-        SubscriptionProxyApplyAction, SubscriptionProxyFileWrite, SubscriptionProxyInboundRequest,
-        SubscriptionProxyRoute, SubscriptionProxyRouteError, SubscriptionProxyRuntimeManager,
-        SubscriptionProxyServeMode, SubscriptionProxyStatus, SubscriptionProxyUpstreamResponse,
+        subscription_proxy_file_readable, subscription_proxy_fingerprint,
+        write_subscription_proxy_file, SubscriptionProxyApplyAction, SubscriptionProxyFileWrite,
+        SubscriptionProxyInboundRequest, SubscriptionProxyRoute, SubscriptionProxyRouteError,
+        SubscriptionProxyRuntimeManager, SubscriptionProxyServeMode, SubscriptionProxyStatus,
+        SubscriptionProxyUpstreamResponse,
         DEFAULT_CHALLENGE_DIR, DEFAULT_HTTPS_LISTEN, DEFAULT_MAX_RESPONSE_BYTES,
     };
     use crate::config::{
@@ -1326,6 +1354,22 @@ mod tests {
     }
 
     #[test]
+    fn detects_readable_subscription_proxy_files() {
+        let dir = temp_test_dir("subscription-proxy-readable");
+        let path = dir.join("token.txt");
+        fs::write(&path, "ok").unwrap();
+
+        assert!(subscription_proxy_file_readable(&path.to_string_lossy()));
+        assert!(!subscription_proxy_file_readable(""));
+        assert!(!subscription_proxy_file_readable(&dir.to_string_lossy()));
+        assert!(!subscription_proxy_file_readable(
+            &dir.join("missing.txt").to_string_lossy()
+        ));
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn subscription_proxy_fingerprint_is_stable_for_profile_order() {
         let mut left = SubscriptionProxyConfig {
             https_listen: "0.0.0.0:443".to_string(),
@@ -1509,6 +1553,35 @@ mod tests {
         assert_eq!(plan.action, SubscriptionProxyApplyAction::Disabled);
         assert!(manager.fingerprint().is_empty());
         assert_eq!(manager.status().status, "disabled");
+    }
+
+    #[test]
+    fn runtime_manager_can_apply_with_real_file_system_helpers() {
+        let dir = temp_test_dir("subscription-proxy-manager-fs");
+        let cert_file = dir.join("fullchain.pem");
+        let key_file = dir.join("private.key");
+        fs::write(&key_file, "key").unwrap();
+
+        let mut config = normalized_proxy_for_apply();
+        config.cert_file = cert_file.to_string_lossy().to_string();
+        config.key_file = key_file.to_string_lossy().to_string();
+        config.challenge_dir = dir.join("challenges").to_string_lossy().to_string();
+        config.zerossl.validation_path = "/.well-known/pki-validation/token.txt".to_string();
+        config.zerossl.validation_content = "challenge-token".to_string();
+        config.zerossl.certificate_pem = "-----BEGIN CERTIFICATE-----\nleaf".to_string();
+
+        let mut manager = SubscriptionProxyRuntimeManager::new();
+        let plan = manager
+            .apply_with_file_system(&config, |_, _| Ok("csr".to_string()))
+            .unwrap();
+
+        assert_eq!(plan.action, SubscriptionProxyApplyAction::Start);
+        assert_eq!(plan.serve_mode, Some(SubscriptionProxyServeMode::Https));
+        assert_eq!(manager.status().csr_pem, "csr");
+        assert!(dir.join("challenges").join("token.txt").is_file());
+        assert!(cert_file.is_file());
+
+        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]
