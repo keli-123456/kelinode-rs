@@ -91,6 +91,12 @@ pub struct SubscriptionProxyApplyPlan {
     pub profiles: Vec<SubscriptionProxyProfile>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SubscriptionProxyHttpServerPlan {
+    pub listen: String,
+    pub challenge_dir: String,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct SubscriptionProxyRuntimeManager {
     fingerprint: String,
@@ -374,6 +380,19 @@ pub fn plan_subscription_proxy_http_request(
         &challenge_dir,
         &name,
     )))
+}
+
+pub fn plan_subscription_proxy_http_server(
+    config: &SubscriptionProxyConfig,
+) -> Option<SubscriptionProxyHttpServerPlan> {
+    let listen = config.http_listen.trim();
+    if listen.is_empty() {
+        return None;
+    }
+    Some(SubscriptionProxyHttpServerPlan {
+        listen: listen.to_string(),
+        challenge_dir: first_non_empty(config.challenge_dir.trim(), DEFAULT_CHALLENGE_DIR),
+    })
 }
 
 pub fn build_subscription_upstream_url(
@@ -988,7 +1007,8 @@ mod tests {
         build_subscription_upstream_url, normalize_subscription_proxy_config,
         normalize_subscription_proxy_config_with_public_ipv4,
         plan_subscription_proxy_health_response, plan_subscription_proxy_http_request,
-        plan_subscription_proxy_request, plan_subscription_proxy_response,
+        plan_subscription_proxy_http_server, plan_subscription_proxy_request,
+        plan_subscription_proxy_response,
         plan_subscription_proxy_apply, plan_subscription_proxy_certificate_file,
         plan_subscription_proxy_serve_mode, plan_subscription_proxy_validation_file,
         prepare_subscription_proxy_certificate_status,
@@ -1715,6 +1735,20 @@ mod tests {
                 "/var/lib/v2node/challenges/token.txt".to_string()
             )
         );
+    }
+
+    #[test]
+    fn plans_http_server_only_when_listen_is_configured() {
+        assert!(plan_subscription_proxy_http_server(&SubscriptionProxyConfig::default()).is_none());
+
+        let plan = plan_subscription_proxy_http_server(&SubscriptionProxyConfig {
+            http_listen: " 0.0.0.0:80 ".to_string(),
+            ..SubscriptionProxyConfig::default()
+        })
+        .unwrap();
+
+        assert_eq!(plan.listen, "0.0.0.0:80");
+        assert_eq!(plan.challenge_dir, DEFAULT_CHALLENGE_DIR);
     }
 
     #[test]

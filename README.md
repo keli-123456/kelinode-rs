@@ -83,6 +83,7 @@ First cut:
 - Add a subscription proxy runtime manager that tracks fingerprint and reportable status.
 - Wire the subscription proxy runtime manager to filesystem writes and readable-file checks.
 - Feed subscription proxy manager status into runtime health refresh.
+- Plan the optional subscription proxy HTTP challenge server from `http_listen`.
 
 Not implemented yet:
 
