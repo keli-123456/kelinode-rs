@@ -75,6 +75,7 @@ First cut:
 - Handle subscription proxy main and HTTP challenge requests through injectable execution boundaries.
 - Parse and render minimal HTTP/1.1 requests and responses for the subscription proxy server boundary.
 - Add blocking TCP server boundaries for subscription proxy HTTP challenge and HTTP fallback modes.
+- Wire subscription proxy runtime manager to start/stop HTTP fallback servers while refusing fake HTTPS serving.
 - Plan subscription proxy response forwarding with size limits, header filtering, and HEAD handling.
 - Resolve IPv6 subscription proxy certificate domains through an injectable public IPv4 detector.
 - Plan subscription proxy certificate status, owner site selection, and HTTP fallback mode.

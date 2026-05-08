@@ -127,10 +127,12 @@ pub struct SubscriptionProxyServerHandle {
     join: Option<JoinHandle<()>>,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Debug, Default)]
 pub struct SubscriptionProxyRuntimeManager {
     fingerprint: String,
     status: SubscriptionProxyStatus,
+    main_server: Option<SubscriptionProxyServerHandle>,
+    http_server: Option<SubscriptionProxyServerHandle>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -360,6 +362,82 @@ impl SubscriptionProxyRuntimeManager {
             subscription_proxy_file_readable,
             write_subscription_proxy_file,
         )
+    }
+
+    pub fn apply_and_start_with_file_system<G>(
+        &mut self,
+        config: &SubscriptionProxyConfig,
+        ensure_csr: G,
+    ) -> Result<SubscriptionProxyApplyPlan, String>
+    where
+        G: FnMut(&str, &str) -> Result<String, String>,
+    {
+        let normalized = normalize_subscription_proxy_config(config)?;
+        let plan = self.apply_with_file_system(&normalized, ensure_csr)?;
+        if let Err(err) = self.sync_servers_for_apply_plan(&normalized, &plan) {
+            self.status.status = "error".to_string();
+            self.status.running = false;
+            self.status.mode = "error".to_string();
+            self.status.last_error = err.clone();
+            return Err(err);
+        }
+        Ok(plan)
+    }
+
+    fn sync_servers_for_apply_plan(
+        &mut self,
+        config: &SubscriptionProxyConfig,
+        plan: &SubscriptionProxyApplyPlan,
+    ) -> Result<(), String> {
+        match plan.action {
+            SubscriptionProxyApplyAction::Disabled => {
+                self.stop_servers();
+                Ok(())
+            }
+            SubscriptionProxyApplyAction::Unchanged => Ok(()),
+            SubscriptionProxyApplyAction::Error => {
+                self.stop_main_server();
+                self.http_server = spawn_subscription_proxy_http_challenge_server(config.clone())?;
+                Ok(())
+            }
+            SubscriptionProxyApplyAction::Start => {
+                self.http_server = spawn_subscription_proxy_http_challenge_server(config.clone())?;
+                let Some(mode) = plan.serve_mode else {
+                    self.stop_main_server();
+                    return Ok(());
+                };
+                match mode {
+                    SubscriptionProxyServeMode::HttpFallback => {
+                        self.main_server = Some(
+                            spawn_subscription_proxy_main_http_fallback_server(
+                                plan_subscription_proxy_main_server(config, mode),
+                            )?,
+                        );
+                        Ok(())
+                    }
+                    SubscriptionProxyServeMode::Https => {
+                        self.stop_main_server();
+                        Err(
+                            "subscription proxy HTTPS serving is not wired in the Rust runtime yet"
+                                .to_string(),
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    fn stop_servers(&mut self) {
+        self.stop_main_server();
+        if let Some(server) = self.http_server.take() {
+            server.stop();
+        }
+    }
+
+    fn stop_main_server(&mut self) {
+        if let Some(server) = self.main_server.take() {
+            server.stop();
+        }
     }
 }
 
@@ -2353,6 +2431,31 @@ mod tests {
         assert_eq!(manager.status().csr_pem, "csr");
         assert!(dir.join("challenges").join("token.txt").is_file());
         assert!(cert_file.is_file());
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn runtime_manager_start_boundary_rejects_https_until_tls_server_is_wired() {
+        let dir = temp_test_dir("subscription-proxy-manager-https-boundary");
+        let cert_file = dir.join("fullchain.pem");
+        let key_file = dir.join("private.key");
+        fs::write(&cert_file, "cert").unwrap();
+        fs::write(&key_file, "key").unwrap();
+
+        let mut config = normalized_proxy_for_apply();
+        config.https_listen = "127.0.0.1:0".to_string();
+        config.cert_file = cert_file.to_string_lossy().to_string();
+        config.key_file = key_file.to_string_lossy().to_string();
+        let mut manager = SubscriptionProxyRuntimeManager::new();
+
+        let err = manager
+            .apply_and_start_with_file_system(&config, |_, _| Ok("csr".to_string()))
+            .unwrap_err();
+
+        assert!(err.contains("HTTPS serving is not wired"));
+        assert_eq!(manager.status().status, "error");
+        assert!(!manager.status().running);
 
         let _ = fs::remove_dir_all(dir);
     }

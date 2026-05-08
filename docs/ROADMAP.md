@@ -81,6 +81,7 @@
 - Subscription proxy request handlers for main upstream and HTTP challenge traffic.
 - Subscription proxy minimal HTTP/1.1 request parsing and response rendering boundary.
 - Subscription proxy blocking TCP server boundaries for HTTP challenge and HTTP fallback modes.
+- Subscription proxy runtime manager start/stop wiring for HTTP fallback with explicit HTTPS refusal.
 - Subscription proxy response forwarding plan with size limits and HEAD handling.
 - Subscription proxy certificate domain normalization with IPv6-to-public-IPv4 fallback planning.
 - Subscription proxy certificate status, owner site selection, and serve-mode fallback planning.
