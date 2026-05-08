@@ -76,6 +76,7 @@ First cut:
 - Plan ZeroSSL validation-file and fullchain certificate writes without touching the filesystem.
 - Prepare subscription proxy certificate status through an injectable file-write executor.
 - Report ZeroSSL expiry as certificate not-after when local certificate parsing is unavailable.
+- Plan subscription proxy CSR generation and provide an OpenSSL-backed execution boundary.
 - Write planned subscription proxy files with parent directory creation and Unix mode handling.
 - Map runtime subscription proxy status into the machine health payload.
 - Generate stable subscription proxy fingerprints for reload decisions.

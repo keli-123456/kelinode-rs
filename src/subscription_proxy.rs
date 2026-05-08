@@ -4,6 +4,7 @@ use std::fs;
 use std::net::IpAddr;
 use std::net::Ipv4Addr;
 use std::path::Path;
+use std::process::Command;
 
 use crate::config::{SubscriptionProxyConfig, SubscriptionProxyProfile};
 
@@ -105,6 +106,14 @@ pub struct SubscriptionProxyMainServerPlan {
     pub key_file: String,
     pub max_response_bytes: u64,
     pub profiles: Vec<SubscriptionProxyProfile>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SubscriptionProxyCsrPlan {
+    pub key_file: String,
+    pub common_name: String,
+    pub subject_alt_name: String,
+    pub generate_key: bool,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -688,6 +697,61 @@ pub fn plan_subscription_proxy_certificate_file(
     }))
 }
 
+pub fn plan_subscription_proxy_csr(
+    key_file: &str,
+    certificate_domain: &str,
+    key_exists: bool,
+) -> Result<SubscriptionProxyCsrPlan, String> {
+    let key_file = key_file.trim();
+    if key_file.is_empty() {
+        return Err("subscription proxy key file is empty".to_string());
+    }
+    let common_name = normalize_certificate_name(certificate_domain)?;
+    let subject_alt_name = certificate_subject_alt_name(&common_name)?;
+
+    Ok(SubscriptionProxyCsrPlan {
+        key_file: key_file.to_string(),
+        common_name,
+        subject_alt_name,
+        generate_key: !key_exists,
+    })
+}
+
+pub fn ensure_subscription_proxy_csr_with_openssl(
+    key_file: &str,
+    certificate_domain: &str,
+) -> Result<String, String> {
+    let plan = plan_subscription_proxy_csr(
+        key_file,
+        certificate_domain,
+        subscription_proxy_file_readable(key_file),
+    )?;
+    if plan.generate_key {
+        create_subscription_proxy_key_parent(&plan.key_file)?;
+        run_openssl(&[
+            "genrsa".to_string(),
+            "-out".to_string(),
+            plan.key_file.clone(),
+            "2048".to_string(),
+        ])?;
+        set_subscription_proxy_file_mode(Path::new(&plan.key_file), 0o600)?;
+    }
+
+    let output = run_openssl(&[
+        "req".to_string(),
+        "-new".to_string(),
+        "-sha256".to_string(),
+        "-batch".to_string(),
+        "-key".to_string(),
+        plan.key_file,
+        "-subj".to_string(),
+        format!("/CN={}", plan.common_name),
+        "-addext".to_string(),
+        format!("subjectAltName={}", plan.subject_alt_name),
+    ])?;
+    String::from_utf8(output).map_err(|err| format!("decode openssl csr output: {err}"))
+}
+
 pub fn write_subscription_proxy_file(write: &SubscriptionProxyFileWrite) -> Result<(), String> {
     let path = Path::new(write.path.trim());
     if path.as_os_str().is_empty() {
@@ -862,6 +926,75 @@ where
     F: FnMut(&str) -> String,
 {
     first_non_empty(certificate_not_after(cert_file).trim(), expires_at.trim())
+}
+
+fn normalize_certificate_name(value: &str) -> Result<String, String> {
+    let name = value.trim();
+    if name.is_empty() {
+        return Err("subscription proxy certificate domain is empty".to_string());
+    }
+    if name
+        .chars()
+        .any(|character| character.is_control() || matches!(character, '/' | ',' | '\\'))
+    {
+        return Err(format!("invalid subscription proxy certificate domain: {name}"));
+    }
+    Ok(name.to_string())
+}
+
+fn certificate_subject_alt_name(name: &str) -> Result<String, String> {
+    if let Ok(ip) = name.parse::<IpAddr>() {
+        return Ok(format!("IP:{ip}"));
+    }
+    if !is_valid_dns_certificate_name(name) {
+        return Err(format!("invalid subscription proxy certificate domain: {name}"));
+    }
+    Ok(format!("DNS:{name}"))
+}
+
+fn is_valid_dns_certificate_name(name: &str) -> bool {
+    let name = name.trim().trim_start_matches("*.");
+    !name.is_empty()
+        && name.len() <= 253
+        && name.split('.').all(|label| {
+            !label.is_empty()
+                && label.len() <= 63
+                && label
+                    .chars()
+                    .all(|character| character.is_ascii_alphanumeric() || character == '-')
+                && !label.starts_with('-')
+                && !label.ends_with('-')
+        })
+}
+
+fn create_subscription_proxy_key_parent(key_file: &str) -> Result<(), String> {
+    let path = Path::new(key_file);
+    let Some(parent) = path.parent() else {
+        return Ok(());
+    };
+    if parent.as_os_str().is_empty() {
+        return Ok(());
+    }
+    fs::create_dir_all(parent)
+        .map_err(|err| format!("create subscription proxy key dir {}: {err}", parent.display()))
+}
+
+fn run_openssl(args: &[String]) -> Result<Vec<u8>, String> {
+    let output = Command::new("openssl")
+        .args(args)
+        .output()
+        .map_err(|err| format!("run openssl: {err}"))?;
+    if output.status.success() {
+        return Ok(output.stdout);
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let detail = if stderr.is_empty() {
+        format!("exit status {}", output.status)
+    } else {
+        stderr
+    };
+    Err(format!("openssl {} failed: {detail}", args.join(" ")))
 }
 
 fn first_non_empty(value: &str, fallback: &str) -> String {
@@ -1065,6 +1198,7 @@ mod tests {
         plan_subscription_proxy_http_server, plan_subscription_proxy_main_server,
         plan_subscription_proxy_request, plan_subscription_proxy_response,
         plan_subscription_proxy_apply, plan_subscription_proxy_certificate_file,
+        plan_subscription_proxy_csr,
         plan_subscription_proxy_serve_mode, plan_subscription_proxy_validation_file,
         prepare_subscription_proxy_certificate_status,
         prepare_subscription_proxy_certificate_status_with_file_writes,
@@ -1386,6 +1520,47 @@ mod tests {
         })
         .unwrap_err();
         assert!(err.contains("cert file is empty"));
+    }
+
+    #[test]
+    fn plans_subscription_proxy_csr_for_dns_and_ip_domains() {
+        let dns = plan_subscription_proxy_csr(
+            "/etc/v2node/subproxy/private.key",
+            "sub.example.test",
+            false,
+        )
+        .unwrap();
+        assert!(dns.generate_key);
+        assert_eq!(dns.common_name, "sub.example.test");
+        assert_eq!(dns.subject_alt_name, "DNS:sub.example.test");
+
+        let ipv6 = plan_subscription_proxy_csr(
+            "/etc/v2node/subproxy/private.key",
+            "2607:f358:1a:e::d4d9:5831",
+            true,
+        )
+        .unwrap();
+        assert!(!ipv6.generate_key);
+        assert_eq!(ipv6.subject_alt_name, "IP:2607:f358:1a:e::d4d9:5831");
+    }
+
+    #[test]
+    fn rejects_invalid_subscription_proxy_csr_inputs() {
+        let err = plan_subscription_proxy_csr("", "sub.example.test", true).unwrap_err();
+        assert!(err.contains("key file is empty"));
+
+        let err =
+            plan_subscription_proxy_csr("/etc/v2node/private.key", "bad/name", true)
+                .unwrap_err();
+        assert!(err.contains("invalid subscription proxy certificate domain"));
+
+        let err = plan_subscription_proxy_csr(
+            "/etc/v2node/private.key",
+            "-bad.example.test",
+            true,
+        )
+        .unwrap_err();
+        assert!(err.contains("invalid subscription proxy certificate domain"));
     }
 
     #[test]

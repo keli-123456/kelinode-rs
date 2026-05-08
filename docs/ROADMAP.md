@@ -82,6 +82,7 @@
 - Subscription proxy ZeroSSL validation-file and fullchain certificate write planning.
 - Subscription proxy certificate status preparation through an injectable file-write executor.
 - Subscription proxy ZeroSSL expiry fallback for certificate not-after reporting.
+- Subscription proxy CSR command planning with an OpenSSL-backed execution boundary.
 - Subscription proxy planned file writer with parent directory creation and Unix mode handling.
 - Runtime subscription proxy status mapping into machine health payloads.
 - Stable subscription proxy fingerprint generation for reload decisions.
