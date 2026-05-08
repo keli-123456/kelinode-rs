@@ -472,7 +472,7 @@ fn validate_keli_core_rs_inbound(inbound: &InboundPlan) -> Result<(), CoreError>
         "tuic" => validate_keli_core_rs_tuic_inbound(inbound),
         "hysteria" => validate_keli_core_rs_hysteria2_inbound(inbound),
         value => Err(CoreError::new(format!(
-            "keli-core-rs native renderer only supports socks/http/shadowsocks/vmess/vless/trojan/anytls tcp, vmess/vless/trojan ws, tuic tcp/udp relay, and hysteria2 tcp/udp relay today; inbound {} uses {}",
+            "keli-core-rs native renderer only supports socks/http/shadowsocks/vmess/vless/trojan/anytls tcp, vmess/vless/trojan ws/httpupgrade, tuic tcp/udp relay, and hysteria2 tcp/udp relay today; inbound {} uses {}",
             inbound.tag, value
         ))),
     }
@@ -511,9 +511,9 @@ fn validate_keli_core_rs_plain_tcp_inbound(inbound: &InboundPlan) -> Result<(), 
 fn validate_keli_core_rs_tcp_or_ws_inbound(inbound: &InboundPlan) -> Result<(), CoreError> {
     let protocol = inbound.protocol.as_str();
     let network = keli_core_rs_transport_network(inbound);
-    if !matches!(network.as_str(), "tcp" | "ws") {
+    if !matches!(network.as_str(), "tcp" | "ws" | "httpupgrade") {
         return Err(CoreError::new(format!(
-            "keli-core-rs {protocol} currently supports only tcp/ws transport; inbound {} uses {}",
+            "keli-core-rs {protocol} currently supports only tcp/ws/httpupgrade transport; inbound {} uses {}",
             inbound.tag, network
         )));
     }
@@ -542,15 +542,15 @@ fn validate_keli_core_rs_tcp_or_ws_inbound(inbound: &InboundPlan) -> Result<(), 
         return Ok(());
     }
 
-    validate_keli_core_rs_websocket_settings(inbound)
+    validate_keli_core_rs_http_transport_settings(inbound, &network)
 }
 
 fn validate_keli_core_rs_tls_inbound(inbound: &InboundPlan) -> Result<(), CoreError> {
     let protocol = inbound.protocol.as_str();
     let network = keli_core_rs_transport_network(inbound);
-    if !matches!(network.as_str(), "tcp" | "ws") {
+    if !matches!(network.as_str(), "tcp" | "ws" | "httpupgrade") {
         return Err(CoreError::new(format!(
-            "keli-core-rs {protocol} tls currently supports only tcp/ws transport; inbound {} uses {}",
+            "keli-core-rs {protocol} tls currently supports only tcp/ws/httpupgrade transport; inbound {} uses {}",
             inbound.tag, network
         )));
     }
@@ -678,14 +678,17 @@ fn validate_keli_core_rs_hysteria2_inbound(inbound: &InboundPlan) -> Result<(), 
     Ok(())
 }
 
-fn validate_keli_core_rs_websocket_settings(inbound: &InboundPlan) -> Result<(), CoreError> {
+fn validate_keli_core_rs_http_transport_settings(
+    inbound: &InboundPlan,
+    network: &str,
+) -> Result<(), CoreError> {
     if json_value_is_empty(&inbound.network_settings) {
         return Ok(());
     }
     let Some(settings) = inbound.network_settings.as_object() else {
         return Err(CoreError::new(format!(
-            "keli-core-rs websocket settings on inbound {} must be an object",
-            inbound.tag
+            "keli-core-rs {network} settings on inbound {} must be an object",
+            inbound.tag,
         )));
     };
     for (key, value) in settings {
@@ -693,16 +696,16 @@ fn validate_keli_core_rs_websocket_settings(inbound: &InboundPlan) -> Result<(),
             "path" | "Host" | "host" => {
                 if !value.is_string() {
                     return Err(CoreError::new(format!(
-                        "keli-core-rs websocket setting {key} on inbound {} must be a string",
-                        inbound.tag
+                        "keli-core-rs {network} setting {key} on inbound {} must be a string",
+                        inbound.tag,
                     )));
                 }
             }
-            "headers" => validate_keli_core_rs_websocket_headers(inbound, value)?,
+            "headers" => validate_keli_core_rs_http_transport_headers(inbound, network, value)?,
             _ => {
                 return Err(CoreError::new(format!(
-                    "keli-core-rs websocket setting {key} on inbound {} is not supported yet",
-                    inbound.tag
+                    "keli-core-rs {network} setting {key} on inbound {} is not supported yet",
+                    inbound.tag,
                 )));
             }
         }
@@ -710,27 +713,28 @@ fn validate_keli_core_rs_websocket_settings(inbound: &InboundPlan) -> Result<(),
     Ok(())
 }
 
-fn validate_keli_core_rs_websocket_headers(
+fn validate_keli_core_rs_http_transport_headers(
     inbound: &InboundPlan,
+    network: &str,
     headers: &Value,
 ) -> Result<(), CoreError> {
     let Some(headers) = headers.as_object() else {
         return Err(CoreError::new(format!(
-            "keli-core-rs websocket headers on inbound {} must be an object",
-            inbound.tag
+            "keli-core-rs {network} headers on inbound {} must be an object",
+            inbound.tag,
         )));
     };
     for (key, value) in headers {
         if !matches!(key.as_str(), "Host" | "host") {
             return Err(CoreError::new(format!(
-                "keli-core-rs websocket header {key} on inbound {} is not supported yet",
-                inbound.tag
+                "keli-core-rs {network} header {key} on inbound {} is not supported yet",
+                inbound.tag,
             )));
         }
         if !value.is_string() {
             return Err(CoreError::new(format!(
-                "keli-core-rs websocket header {key} on inbound {} must be a string",
-                inbound.tag
+                "keli-core-rs {network} header {key} on inbound {} must be a string",
+                inbound.tag,
             )));
         }
     }
@@ -824,7 +828,7 @@ fn render_keli_core_rs_transport(inbound: &InboundPlan) -> Value {
     transport.insert("network".to_string(), Value::String(network.clone()));
     transport.insert(
         "path".to_string(),
-        if network == "ws" {
+        if matches!(network.as_str(), "ws" | "httpupgrade") {
             websocket_path_setting(&inbound.network_settings)
                 .map(Value::String)
                 .unwrap_or(Value::Null)
@@ -834,7 +838,7 @@ fn render_keli_core_rs_transport(inbound: &InboundPlan) -> Value {
     );
     transport.insert(
         "host".to_string(),
-        if network == "ws" {
+        if matches!(network.as_str(), "ws" | "httpupgrade") {
             websocket_host_setting(&inbound.network_settings)
                 .map(Value::String)
                 .unwrap_or(Value::Null)
@@ -879,6 +883,7 @@ fn keli_core_rs_transport_network(inbound: &InboundPlan) -> String {
         .as_str()
     {
         "websocket" => "ws".to_string(),
+        "http_upgrade" | "http-upgrade" | "httpupgrade" => "httpupgrade".to_string(),
         value => value.to_string(),
     }
 }
@@ -2343,7 +2348,7 @@ mod tests {
 
         let err = render_core_config(&plan).unwrap_err();
 
-        assert!(err.message.contains("tcp/ws transport"));
+        assert!(err.message.contains("tcp/ws/httpupgrade transport"));
     }
 
     #[test]
@@ -2432,6 +2437,33 @@ mod tests {
         assert_eq!(
             config["inbounds"][2]["transport"]["host"],
             "trojan.example.test"
+        );
+    }
+
+    #[test]
+    fn renders_keli_core_rs_httpupgrade_transport_settings() {
+        let mut vless = test_node("vless", 62, "");
+        vless.common.network = "httpupgrade".to_string();
+        vless.common.network_settings = json!({
+            "path": "/edge",
+            "headers": {
+                "Host": "edge.example.test"
+            }
+        });
+        let plan = CorePlan::from_nodes(
+            CoreKind::KeliCoreRs,
+            PathBuf::from("/srv/v2node/keli-core-rs.json"),
+            &[vless],
+        )
+        .unwrap();
+
+        let config = render_core_config(&plan).unwrap();
+
+        assert_eq!(config["inbounds"][0]["transport"]["network"], "httpupgrade");
+        assert_eq!(config["inbounds"][0]["transport"]["path"], "/edge");
+        assert_eq!(
+            config["inbounds"][0]["transport"]["host"],
+            "edge.example.test"
         );
     }
 
@@ -2747,7 +2779,7 @@ mod tests {
 
         let err = render_core_config(&plan).unwrap_err();
 
-        assert!(err.message.contains("tcp/ws transport"));
+        assert!(err.message.contains("tcp/ws/httpupgrade transport"));
     }
 
     #[test]
