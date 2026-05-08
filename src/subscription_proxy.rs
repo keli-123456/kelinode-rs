@@ -97,6 +97,16 @@ pub struct SubscriptionProxyHttpServerPlan {
     pub challenge_dir: String,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SubscriptionProxyMainServerPlan {
+    pub listen: String,
+    pub mode: SubscriptionProxyServeMode,
+    pub cert_file: String,
+    pub key_file: String,
+    pub max_response_bytes: u64,
+    pub profiles: Vec<SubscriptionProxyProfile>,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct SubscriptionProxyRuntimeManager {
     fingerprint: String,
@@ -393,6 +403,24 @@ pub fn plan_subscription_proxy_http_server(
         listen: listen.to_string(),
         challenge_dir: first_non_empty(config.challenge_dir.trim(), DEFAULT_CHALLENGE_DIR),
     })
+}
+
+pub fn plan_subscription_proxy_main_server(
+    config: &SubscriptionProxyConfig,
+    mode: SubscriptionProxyServeMode,
+) -> SubscriptionProxyMainServerPlan {
+    SubscriptionProxyMainServerPlan {
+        listen: first_non_empty(config.https_listen.trim(), DEFAULT_HTTPS_LISTEN),
+        mode,
+        cert_file: config.cert_file.trim().to_string(),
+        key_file: config.key_file.trim().to_string(),
+        max_response_bytes: if config.max_response_bytes == 0 {
+            DEFAULT_MAX_RESPONSE_BYTES
+        } else {
+            config.max_response_bytes
+        },
+        profiles: config.profiles.clone(),
+    }
 }
 
 pub fn build_subscription_upstream_url(
@@ -1007,8 +1035,8 @@ mod tests {
         build_subscription_upstream_url, normalize_subscription_proxy_config,
         normalize_subscription_proxy_config_with_public_ipv4,
         plan_subscription_proxy_health_response, plan_subscription_proxy_http_request,
-        plan_subscription_proxy_http_server, plan_subscription_proxy_request,
-        plan_subscription_proxy_response,
+        plan_subscription_proxy_http_server, plan_subscription_proxy_main_server,
+        plan_subscription_proxy_request, plan_subscription_proxy_response,
         plan_subscription_proxy_apply, plan_subscription_proxy_certificate_file,
         plan_subscription_proxy_serve_mode, plan_subscription_proxy_validation_file,
         prepare_subscription_proxy_certificate_status,
@@ -1749,6 +1777,36 @@ mod tests {
 
         assert_eq!(plan.listen, "0.0.0.0:80");
         assert_eq!(plan.challenge_dir, DEFAULT_CHALLENGE_DIR);
+    }
+
+    #[test]
+    fn plans_main_server_from_https_listen_even_for_http_fallback() {
+        let config = normalize_subscription_proxy_config(&SubscriptionProxyConfig {
+            enabled: true,
+            https_listen: " 0.0.0.0:8443 ".to_string(),
+            cert_file: " /etc/v2node/fullchain.pem ".to_string(),
+            key_file: " /etc/v2node/private.key ".to_string(),
+            max_response_bytes: 4096,
+            profiles: vec![SubscriptionProxyProfile {
+                site_id: "site-a".to_string(),
+                upstream_base_url: "https://panel.example.test".to_string(),
+                subscribe_path: "s".to_string(),
+            }],
+            ..SubscriptionProxyConfig::default()
+        })
+        .unwrap();
+
+        let plan = plan_subscription_proxy_main_server(
+            &config,
+            SubscriptionProxyServeMode::HttpFallback,
+        );
+
+        assert_eq!(plan.listen, "0.0.0.0:8443");
+        assert_eq!(plan.mode, SubscriptionProxyServeMode::HttpFallback);
+        assert_eq!(plan.cert_file, "/etc/v2node/fullchain.pem");
+        assert_eq!(plan.key_file, "/etc/v2node/private.key");
+        assert_eq!(plan.max_response_bytes, 4096);
+        assert_eq!(plan.profiles.len(), 1);
     }
 
     #[test]
