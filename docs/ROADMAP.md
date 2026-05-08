@@ -74,6 +74,7 @@
 - Runtime `run` command that rebuilds bootstrap state after reload signals and reports upgrade state after upgrade commands.
 - Multi-panel machine status reporting for machine-bound deployments with more than one site profile.
 - Command shutdown signal handling that stops the active core process before exiting.
+- Runtime `run` command subscription proxy manager startup with machine-status error reporting.
 - Machine node resolution and subscription proxy config merging.
 - Subscription proxy profile normalization and upstream subscription URL construction.
 - Subscription proxy request routing for health checks and upstream subscription forwarding.

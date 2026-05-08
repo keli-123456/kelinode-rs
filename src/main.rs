@@ -11,6 +11,9 @@ use kelinode_rs::runner::{
     RuntimeLoopExit, RuntimeLoopExitReason, RuntimeLoopOptions,
 };
 use kelinode_rs::runtime::{bootstrap_from_config, Bootstrap, RuntimeBootstrapPlan};
+use kelinode_rs::subscription_proxy::{
+    ensure_subscription_proxy_csr_with_openssl, SubscriptionProxyRuntimeManager,
+};
 use kelinode_rs::upgrade::{SystemUpgradeExecutor, UpgradeManager};
 use serde_json::Value;
 use std::collections::BTreeSet;
@@ -120,6 +123,7 @@ async fn run_agent_once(
     let panel_clients = machine_panel_clients(&plan)?;
     let options = runtime_loop_options(&plan, !panel_clients.is_empty());
     let realtime_options = plan.realtime_options.clone();
+    let subscription_proxy_manager = start_subscription_proxy_manager(&plan);
     let mut runner = PanelRuntimeLoop::new(
         plan,
         process_supervisor,
@@ -130,6 +134,9 @@ async fn run_agent_once(
     .with_health_refresh(agent_version())
     .with_public_ip_probe(true)
     .with_upgrade_status(upgrade_status);
+    if let Some(manager) = subscription_proxy_manager {
+        runner = runner.with_subscription_proxy_manager(manager);
+    }
     let mut realtime_workers = start_realtime_runtime_workers(realtime_options);
     let mut shutdown = false;
     let result = tokio::select! {
@@ -153,6 +160,23 @@ async fn run_agent_once(
         stop_core_for_plan(&mut runner)?;
     }
     result
+}
+
+fn start_subscription_proxy_manager(
+    plan: &RuntimeBootstrapPlan,
+) -> Option<SubscriptionProxyRuntimeManager> {
+    let config = &plan.resolved.agent.subscription_proxy;
+    if !config.enabled {
+        return None;
+    }
+    let mut manager = SubscriptionProxyRuntimeManager::new();
+    if let Err(err) = manager.apply_and_start_with_file_system(
+        config,
+        ensure_subscription_proxy_csr_with_openssl,
+    ) {
+        eprintln!("subscription proxy start failed: {err}");
+    }
+    Some(manager)
 }
 
 fn stop_core_for_plan<P, F>(runner: &mut PanelRuntimeLoop<'_, P, F>) -> Result<(), String>
@@ -338,7 +362,10 @@ fn print_help() {
 
 #[cfg(test)]
 mod tests {
-    use super::{machine_panel_clients, runtime_loop_options, runtime_tick_interval};
+    use super::{
+        machine_panel_clients, runtime_loop_options, runtime_tick_interval,
+        start_subscription_proxy_manager,
+    };
     use kelinode_rs::config::{
         AgentConfig, MachineProfileConfig, NodeConfig, ResolvedConfig,
         ResolvedMachineConfig, SubscriptionProxyConfig,
@@ -441,6 +468,13 @@ mod tests {
         assert_eq!(clients[0].options().node_id, 0);
         assert_eq!(clients[0].options().timeout, Duration::from_secs(12));
         assert_eq!(options.control.machine_id, 6);
+    }
+
+    #[test]
+    fn subscription_proxy_manager_is_not_started_when_disabled() {
+        let plan = test_plan(Vec::new(), Vec::new());
+
+        assert!(start_subscription_proxy_manager(&plan).is_none());
     }
 
     fn test_plan(nodes: Vec<NodeInfo>, configs: Vec<NodeConfig>) -> RuntimeBootstrapPlan {

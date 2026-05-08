@@ -69,6 +69,7 @@ First cut:
 - Add a `run` command that keeps the runtime loop alive across reloads and carries upgrade status into machine reports.
 - Report machine status to each configured machine-bound panel profile instead of only the first resolved node.
 - Stop the active core process when the `run` command receives Ctrl-C or SIGTERM.
+- Start the subscription proxy runtime manager from the `run` command and report startup failures through machine status.
 - Normalize subscription proxy profiles and build upstream subscription URLs compatible with the Go agent.
 - Plan subscription proxy `/health` and `/sub/{site}/{token}` requests with Go-compatible header forwarding.
 - Fetch subscription proxy upstream responses through a bounded reqwest execution boundary.
