@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::fs;
+use std::io::Read;
 use std::net::IpAddr;
 use std::net::Ipv4Addr;
 use std::path::Path;
@@ -486,6 +487,70 @@ pub fn plan_subscription_proxy_response(
         status: response.status,
         headers: forwarded_headers(&response.headers),
         body: if head_only { Vec::new() } else { response.body },
+    })
+}
+
+pub fn fetch_subscription_proxy_upstream_blocking(
+    request: &SubscriptionProxyUpstreamRequest,
+    max_response_bytes: u64,
+) -> Result<SubscriptionProxyUpstreamResponse, SubscriptionProxyRouteError> {
+    let max_response_bytes = if max_response_bytes == 0 {
+        DEFAULT_MAX_RESPONSE_BYTES
+    } else {
+        max_response_bytes
+    };
+    let client = reqwest::blocking::Client::builder()
+        .redirect(reqwest::redirect::Policy::limited(5))
+        .build()
+        .map_err(|err| SubscriptionProxyRouteError::BadGateway(err.to_string()))?;
+    let mut builder = if request.head_only {
+        client.head(&request.url)
+    } else {
+        client.get(&request.url)
+    };
+    for (key, value) in &request.headers {
+        let name = reqwest::header::HeaderName::from_bytes(key.as_bytes())
+            .map_err(|err| SubscriptionProxyRouteError::BadGateway(err.to_string()))?;
+        let value = reqwest::header::HeaderValue::from_str(value)
+            .map_err(|err| SubscriptionProxyRouteError::BadGateway(err.to_string()))?;
+        builder = builder.header(name, value);
+    }
+
+    let response = builder
+        .send()
+        .map_err(|err| SubscriptionProxyRouteError::BadGateway(err.to_string()))?;
+    let status = response.status().as_u16();
+    let content_length = response.content_length();
+    if content_length
+        .map(|length| length > max_response_bytes)
+        .unwrap_or(false)
+    {
+        return Err(SubscriptionProxyRouteError::BadGateway(
+            "upstream response too large".to_string(),
+        ));
+    }
+    let headers = response
+        .headers()
+        .iter()
+        .filter_map(|(key, value)| {
+            value
+                .to_str()
+                .ok()
+                .map(|value| (key.as_str().to_string(), value.to_string()))
+        })
+        .collect();
+    let body = if request.head_only {
+        Vec::new()
+    } else {
+        read_limited_upstream_body(response, max_response_bytes)
+            .map_err(SubscriptionProxyRouteError::BadGateway)?
+    };
+
+    Ok(SubscriptionProxyUpstreamResponse {
+        status,
+        headers,
+        body,
+        content_length,
     })
 }
 
@@ -997,6 +1062,26 @@ fn run_openssl(args: &[String]) -> Result<Vec<u8>, String> {
     Err(format!("openssl {} failed: {detail}", args.join(" ")))
 }
 
+fn read_limited_upstream_body<R: Read>(
+    reader: R,
+    max_response_bytes: u64,
+) -> Result<Vec<u8>, String> {
+    let max_response_bytes = if max_response_bytes == 0 {
+        DEFAULT_MAX_RESPONSE_BYTES
+    } else {
+        max_response_bytes
+    };
+    let mut reader = reader.take(max_response_bytes.saturating_add(1));
+    let mut body = Vec::new();
+    reader
+        .read_to_end(&mut body)
+        .map_err(|err| format!("read upstream response: {err}"))?;
+    if body.len() as u64 > max_response_bytes {
+        return Err("upstream response too large".to_string());
+    }
+    Ok(body)
+}
+
 fn first_non_empty(value: &str, fallback: &str) -> String {
     if value.is_empty() {
         fallback.to_string()
@@ -1189,6 +1274,7 @@ mod tests {
     use std::cell::RefCell;
     use std::collections::BTreeMap;
     use std::fs;
+    use std::io::Cursor;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::{
@@ -1202,6 +1288,7 @@ mod tests {
         plan_subscription_proxy_serve_mode, plan_subscription_proxy_validation_file,
         prepare_subscription_proxy_certificate_status,
         prepare_subscription_proxy_certificate_status_with_file_writes,
+        read_limited_upstream_body,
         resolve_subscription_certificate_domain, subscription_proxy_certificate_owner_site_id,
         subscription_proxy_file_readable, subscription_proxy_fingerprint,
         write_subscription_proxy_file, SubscriptionProxyApplyAction, SubscriptionProxyFileWrite,
@@ -2203,6 +2290,16 @@ mod tests {
         .unwrap();
 
         assert!(response.body.is_empty());
+    }
+
+    #[test]
+    fn reads_limited_upstream_body_without_buffering_oversized_payloads() {
+        let body = read_limited_upstream_body(Cursor::new(b"hello".to_vec()), 5).unwrap();
+        assert_eq!(body, b"hello");
+
+        let err =
+            read_limited_upstream_body(Cursor::new(b"too-large".to_vec()), 3).unwrap_err();
+        assert_eq!(err, "upstream response too large");
     }
 
     fn temp_test_dir(label: &str) -> std::path::PathBuf {

@@ -69,6 +69,7 @@ First cut:
 - Stop the active core process when the `run` command receives Ctrl-C or SIGTERM.
 - Normalize subscription proxy profiles and build upstream subscription URLs compatible with the Go agent.
 - Plan subscription proxy `/health` and `/sub/{site}/{token}` requests with Go-compatible header forwarding.
+- Fetch subscription proxy upstream responses through a bounded reqwest execution boundary.
 - Plan subscription proxy response forwarding with size limits, header filtering, and HEAD handling.
 - Resolve IPv6 subscription proxy certificate domains through an injectable public IPv4 detector.
 - Plan subscription proxy certificate status, owner site selection, and HTTP fallback mode.
