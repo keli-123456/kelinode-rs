@@ -398,36 +398,37 @@ fn render_keli_core_rs_config(plan: &CorePlan) -> Result<Value, CoreError> {
 fn validate_keli_core_rs_inbound(inbound: &InboundPlan) -> Result<(), CoreError> {
     match inbound.protocol.as_str() {
         "socks" | "http" => Ok(()),
-        "vless" => {
+        "vless" | "trojan" => {
+            let protocol = inbound.protocol.as_str();
             let network = first_non_empty(inbound.network.trim(), "tcp");
             if network != "tcp" {
                 return Err(CoreError::new(format!(
-                    "keli-core-rs vless currently supports only tcp transport; inbound {} uses {}",
+                    "keli-core-rs {protocol} currently supports only tcp transport; inbound {} uses {}",
                     inbound.tag, network
                 )));
             }
             if inbound.security != "none" {
                 return Err(CoreError::new(format!(
-                    "keli-core-rs vless currently supports only security none; inbound {} uses {}",
+                    "keli-core-rs {protocol} currently supports only security none; inbound {} uses {}",
                     inbound.tag, inbound.security
                 )));
             }
             if !inbound.flow.trim().is_empty() {
                 return Err(CoreError::new(format!(
-                    "keli-core-rs vless currently does not support flow {}; inbound {}",
+                    "keli-core-rs {protocol} currently does not support flow {}; inbound {}",
                     inbound.flow, inbound.tag
                 )));
             }
             if !json_value_is_empty(&inbound.network_settings) {
                 return Err(CoreError::new(format!(
-                    "keli-core-rs vless currently does not support transport settings on inbound {}",
+                    "keli-core-rs {protocol} currently does not support transport settings on inbound {}",
                     inbound.tag
                 )));
             }
             Ok(())
         }
         value => Err(CoreError::new(format!(
-            "keli-core-rs native renderer only supports socks/http/vless tcp today; inbound {} uses {}",
+            "keli-core-rs native renderer only supports socks/http/vless/trojan tcp today; inbound {} uses {}",
             inbound.tag, value
         ))),
     }
@@ -1657,13 +1658,15 @@ mod tests {
     }
 
     #[test]
-    fn renders_keli_core_rs_native_socks_http_vless_config_from_panel_users() {
+    fn renders_keli_core_rs_native_socks_http_vless_trojan_config_from_panel_users() {
         let socks = test_node("socks", 40, "");
         let http = test_node("http", 41, "127.0.0.1");
         let vless = test_node("vless", 45, "127.0.0.1");
+        let trojan = test_node("trojan", 50, "127.0.0.1");
         let socks_tag = socks.tag.clone();
         let http_tag = http.tag.clone();
         let vless_tag = vless.tag.clone();
+        let trojan_tag = trojan.tag.clone();
         let mut users = std::collections::BTreeMap::new();
         users.insert(
             socks_tag.clone(),
@@ -1692,10 +1695,19 @@ mod tests {
                 device_limit: 0,
             }],
         );
+        users.insert(
+            trojan_tag,
+            vec![UserInfo {
+                id: 50,
+                uuid: "trojan-password".to_string(),
+                speed_limit: 2048,
+                device_limit: 3,
+            }],
+        );
         let plan = CorePlan::from_nodes_with_users(
             CoreKind::KeliCoreRs,
             PathBuf::from("/srv/v2node/keli-core-rs.json"),
-            &[socks, http, vless],
+            &[socks, http, vless, trojan],
             &users,
         )
         .unwrap();
@@ -1721,6 +1733,14 @@ mod tests {
             config["inbounds"][2]["users"][0]["uuid"],
             "11111111-1111-1111-1111-111111111111"
         );
+        assert_eq!(config["inbounds"][3]["protocol"], "trojan");
+        assert_eq!(config["inbounds"][3]["listen"], "127.0.0.1");
+        assert_eq!(
+            config["inbounds"][3]["users"][0]["uuid"],
+            "trojan-password"
+        );
+        assert_eq!(config["inbounds"][3]["users"][0]["speed_limit"], 2048);
+        assert_eq!(config["inbounds"][3]["users"][0]["device_limit"], 3);
         assert_eq!(config["outbounds"][0]["tag"], "direct");
         assert_eq!(config["stats"]["per_user"], true);
     }
@@ -1759,7 +1779,7 @@ mod tests {
 
         let err = render_core_config(&plan).unwrap_err();
 
-        assert!(err.message.contains("only supports socks/http/vless"));
+        assert!(err.message.contains("only supports socks/http/vless/trojan"));
     }
 
     #[test]
@@ -1817,6 +1837,56 @@ mod tests {
             "header": {
                 "type": "http"
             }
+        });
+        let plan = CorePlan::from_nodes(
+            CoreKind::KeliCoreRs,
+            PathBuf::from("/srv/v2node/keli-core-rs.json"),
+            &[node],
+        )
+        .unwrap();
+
+        let err = render_core_config(&plan).unwrap_err();
+
+        assert!(err.message.contains("transport settings"));
+    }
+
+    #[test]
+    fn keli_core_rs_rejects_trojan_tls_until_core_supports_it() {
+        let mut node = test_node("trojan", 51, "");
+        node.security = Security::Tls;
+        let plan = CorePlan::from_nodes(
+            CoreKind::KeliCoreRs,
+            PathBuf::from("/srv/v2node/keli-core-rs.json"),
+            &[node],
+        )
+        .unwrap();
+
+        let err = render_core_config(&plan).unwrap_err();
+
+        assert!(err.message.contains("security none"));
+    }
+
+    #[test]
+    fn keli_core_rs_rejects_trojan_non_tcp_transport_until_core_supports_it() {
+        let mut node = test_node("trojan", 52, "");
+        node.common.network = "ws".to_string();
+        let plan = CorePlan::from_nodes(
+            CoreKind::KeliCoreRs,
+            PathBuf::from("/srv/v2node/keli-core-rs.json"),
+            &[node],
+        )
+        .unwrap();
+
+        let err = render_core_config(&plan).unwrap_err();
+
+        assert!(err.message.contains("tcp transport"));
+    }
+
+    #[test]
+    fn keli_core_rs_rejects_trojan_transport_settings_until_core_supports_it() {
+        let mut node = test_node("trojan", 53, "");
+        node.common.network_settings = json!({
+            "path": "/trojan"
         });
         let plan = CorePlan::from_nodes(
             CoreKind::KeliCoreRs,
