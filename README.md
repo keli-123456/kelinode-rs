@@ -48,6 +48,7 @@ First cut:
 - Build explicit sidecar process specs only when a command and arguments are provided.
 - Preserve sidecar core plans in runtime bootstrap without forcing them through Xray.
 - Render Mieru sidecar `mita` server configs from panel ports and user credentials.
+- Write sidecar config files during runtime apply without starting unconfigured sidecar processes.
 - Report node traffic/online snapshots through the unified panel endpoint with legacy fallback.
 - Batch report per-node activity snapshots by runtime tag for multi-node machines.
 - Advance cached user sync state from delta or full-list responses with Go-compatible empty-list semantics.

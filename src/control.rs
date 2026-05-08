@@ -26,6 +26,7 @@ pub struct RuntimeControlOptions {
 #[derive(Clone, Debug, PartialEq)]
 pub struct RuntimeApplyResult {
     pub core_config: Option<CoreConfigWriteResult>,
+    pub sidecar_configs: Vec<CoreConfigWriteResult>,
     pub core_process: Option<ProcessStatus>,
     pub hy2_port_forward: HysteriaPortForwardStatus,
     pub machine_status: MachineStatusPayload,
@@ -69,6 +70,7 @@ where
     F: PortForwardExecutor,
 {
     let mut core_config = None;
+    let mut sidecar_configs = Vec::new();
     let mut core_process = None;
 
     if let Some(core_plan) = &plan.core_plan {
@@ -85,6 +87,10 @@ where
             core_process = Some(status);
         }
         core_config = Some(write_result);
+    }
+
+    for sidecar_plan in &plan.sidecar_core_plans {
+        sidecar_configs.push(write_core_config(sidecar_plan).map_err(|err| err.message)?);
     }
 
     let hy2_port_forward = if options.repair_port_forward {
@@ -104,6 +110,7 @@ where
 
     Ok(RuntimeApplyResult {
         core_config,
+        sidecar_configs,
         core_process,
         hy2_port_forward,
         machine_status,
@@ -296,7 +303,7 @@ mod tests {
     use crate::panel::types::{CommonNode, NodeInfo, UserInfo};
     use crate::port_forward::{PortForwardCommand, PortForwardExecutor};
     use crate::process::MemoryProcessSupervisor;
-    use crate::runtime::build_runtime_bootstrap_plan;
+    use crate::runtime::{build_runtime_bootstrap_plan, build_runtime_bootstrap_plan_with_users};
 
     use crate::machine::{MachineStatusPayload, MachineStatusResponse, MachineUpgradeCommand};
     use crate::upgrade::{MemoryUpgradeExecutor, UpgradeManager};
@@ -396,6 +403,68 @@ mod tests {
         assert!(result.core_process.is_none());
         assert!(process.starts.is_empty());
         assert_eq!(result.machine_status.machine_id, 9);
+    }
+
+    #[test]
+    fn applies_sidecar_configs_without_starting_xray_core() {
+        let dir = temp_test_dir("runtime-sidecar-config");
+        let mut resolved = ResolvedConfig {
+            kernel: Default::default(),
+            realtime: Default::default(),
+            machine: ResolvedMachineConfig {
+                enabled: true,
+                continue_on_error: true,
+                profiles: Vec::new(),
+            },
+            agent: Default::default(),
+            nodes: vec![NodeConfig {
+                url: "https://panel.example.test".to_string(),
+                token: "token".to_string(),
+                node_id: 22,
+                machine_id: 3,
+                ..NodeConfig::default()
+            }],
+        };
+        resolved.kernel.config_dir = dir.join("v2node").display().to_string();
+        let node = test_node("mieru", 22);
+        let tag = node.tag.clone();
+        let mut users = BTreeMap::new();
+        users.insert(
+            tag,
+            vec![UserInfo {
+                id: 22,
+                uuid: "mieru-secret".to_string(),
+                speed_limit: 0,
+                device_limit: 0,
+            }],
+        );
+        let plan =
+            build_runtime_bootstrap_plan_with_users(resolved, vec![node], Vec::new(), &users)
+                .unwrap();
+        let mut process = MemoryProcessSupervisor::default();
+        let mut port_forward = FakePortForwardExecutor::default();
+
+        let result = apply_runtime_plan(
+            &plan,
+            &mut process,
+            &mut port_forward,
+            RuntimeControlOptions {
+                machine_id: 3,
+                start_core: true,
+                ..RuntimeControlOptions::default()
+            },
+        )
+        .unwrap();
+        let saved = fs::read_to_string(dir.join("v2node").join("sidecar-mieru-22.json"))
+            .unwrap();
+
+        assert!(result.core_config.is_none());
+        assert_eq!(result.sidecar_configs.len(), 1);
+        assert!(result.sidecar_configs[0].changed);
+        assert!(process.starts.is_empty());
+        assert!(saved.contains("mieru-secret"));
+
+        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]
