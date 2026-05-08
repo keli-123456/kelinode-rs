@@ -59,6 +59,8 @@ pub struct SidecarProcessConfig {
     pub command: String,
     #[serde(default)]
     pub args: Vec<String>,
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
@@ -526,6 +528,7 @@ fn normalize_sidecar_processes(
             SidecarProcessConfig {
                 command: config.command.trim().to_string(),
                 args: normalize_sidecar_args(&config.args),
+                env: normalize_sidecar_env(&config.env),
             },
         );
     }
@@ -539,6 +542,18 @@ fn normalize_sidecar_args(values: &[String]) -> Vec<String> {
         .filter(|value| !value.is_empty())
         .map(str::to_string)
         .collect()
+}
+
+fn normalize_sidecar_env(values: &BTreeMap<String, String>) -> BTreeMap<String, String> {
+    let mut output = BTreeMap::new();
+    for (key, value) in values {
+        let key = key.trim();
+        if key.is_empty() {
+            continue;
+        }
+        output.insert(key.to_string(), value.trim().to_string());
+    }
+    output
 }
 
 fn normalize_string_list(values: &[String]) -> Vec<String> {
@@ -840,6 +855,10 @@ mod tests {
                     "--config".to_string(),
                     "{config}".to_string(),
                 ],
+                env: BTreeMap::from([
+                    (" MITA_CONFIG_JSON_FILE ".to_string(), " {config} ".to_string()),
+                    (" ".to_string(), "ignored".to_string()),
+                ]),
             },
         )]);
 
@@ -848,6 +867,11 @@ mod tests {
 
         assert_eq!(sidecar.command, "/usr/local/bin/mita");
         assert_eq!(sidecar.args, vec!["run", "--config", "{config}"]);
+        assert_eq!(
+            sidecar.env["MITA_CONFIG_JSON_FILE"],
+            "{config}".to_string()
+        );
+        assert!(!sidecar.env.contains_key(""));
     }
 
     #[test]

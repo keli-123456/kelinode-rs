@@ -101,6 +101,7 @@ where
                     sidecar_plan,
                     &config.command,
                     &config.args,
+                    &config.env,
                 )
                 .map_err(|err| err.message)?;
                 let status = if write_result.changed {
@@ -537,7 +538,15 @@ mod tests {
             "mieru".to_string(),
             SidecarProcessConfig {
                 command: "/usr/local/bin/mita".to_string(),
-                args: vec!["run".to_string(), "--config".to_string(), "{config}".to_string()],
+                args: vec![
+                    "run".to_string(),
+                    "--config".to_string(),
+                    "{config}".to_string(),
+                ],
+                env: BTreeMap::from([(
+                    "MITA_CONFIG_JSON_FILE".to_string(),
+                    "{config}".to_string(),
+                )]),
             },
         );
 
@@ -575,6 +584,13 @@ mod tests {
                     .display()
                     .to_string()
             ]
+        );
+        assert_eq!(
+            process.starts[0].env["MITA_CONFIG_JSON_FILE"],
+            dir.join("v2node")
+                .join("sidecar-mieru-23.json")
+                .display()
+                .to_string()
         );
 
         let _ = fs::remove_dir_all(dir);

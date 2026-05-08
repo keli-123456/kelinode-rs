@@ -202,8 +202,13 @@ where
         let Some(config) = runner.plan.resolved.kernel.sidecars.get(name) else {
             continue;
         };
-        let spec = sidecar_process_spec(sidecar_plan, &config.command, &config.args)
-            .map_err(|err| err.message)?;
+        let spec = sidecar_process_spec(
+            sidecar_plan,
+            &config.command,
+            &config.args,
+            &config.env,
+        )
+        .map_err(|err| err.message)?;
         runner
             .process_supervisor
             .stop(&spec.name)

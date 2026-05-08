@@ -239,6 +239,7 @@ pub fn sidecar_process_spec(
     plan: &CorePlan,
     command: &str,
     args: &[String],
+    env: &BTreeMap<String, String>,
 ) -> Result<ProcessSpec, ProcessError> {
     let CoreKind::Sidecar(_) = &plan.kind else {
         return Err(ProcessError::new("sidecar process spec requires a sidecar core plan"));
@@ -256,7 +257,17 @@ pub fn sidecar_process_spec(
             .map(|arg| arg.replace("{config}", &config))
             .collect(),
         working_dir: plan.config_path.parent().map(|path| path.to_path_buf()),
-        env: BTreeMap::new(),
+        env: env
+            .iter()
+            .filter_map(|(key, value)| {
+                let key = key.trim();
+                if key.is_empty() {
+                    None
+                } else {
+                    Some((key.to_string(), value.replace("{config}", &config)))
+                }
+            })
+            .collect(),
     })
 }
 
@@ -295,6 +306,7 @@ fn core_kind_label(kind: &CoreKind) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
     use std::path::PathBuf;
 
     use crate::core::{CoreKind, CorePlan};
@@ -363,6 +375,10 @@ mod tests {
             &plan,
             "/usr/local/bin/mieru",
             &["run".to_string(), "-c".to_string(), "{config}".to_string()],
+            &BTreeMap::from([(
+                "MITA_CONFIG_JSON_FILE".to_string(),
+                "{config}".to_string(),
+            )]),
         )
         .unwrap();
 
@@ -371,6 +387,10 @@ mod tests {
         assert_eq!(
             spec.args,
             vec!["run", "-c", "/srv/v2node/sidecar-mieru-2.json"]
+        );
+        assert_eq!(
+            spec.env["MITA_CONFIG_JSON_FILE"],
+            "/srv/v2node/sidecar-mieru-2.json"
         );
         assert_eq!(spec.working_dir, Some(PathBuf::from("/srv/v2node")));
     }
@@ -384,7 +404,13 @@ mod tests {
             inbounds: Vec::new(),
         };
 
-        let err = sidecar_process_spec(&plan, "/usr/local/bin/naive", &[]).unwrap_err();
+        let err = sidecar_process_spec(
+            &plan,
+            "/usr/local/bin/naive",
+            &[],
+            &BTreeMap::new(),
+        )
+        .unwrap_err();
 
         assert!(err.message.contains("requires a sidecar core plan"));
     }
@@ -398,7 +424,13 @@ mod tests {
             inbounds: Vec::new(),
         };
 
-        let err = sidecar_process_spec(&plan, "  ", &["{config}".to_string()]).unwrap_err();
+        let err = sidecar_process_spec(
+            &plan,
+            "  ",
+            &["{config}".to_string()],
+            &BTreeMap::new(),
+        )
+        .unwrap_err();
 
         assert!(err.message.contains("sidecar command is not configured"));
     }

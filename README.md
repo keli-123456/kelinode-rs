@@ -50,6 +50,7 @@ First cut:
 - Render Mieru sidecar `mita` server configs from panel ports and user credentials.
 - Write sidecar config files during runtime apply without starting unconfigured sidecar processes.
 - Start configured sidecar processes through explicit per-protocol command and argument settings.
+- Pass configured sidecar process environment variables with `{config}` path replacement for tools such as `mita`.
 - Report node traffic/online snapshots through the unified panel endpoint with legacy fallback.
 - Batch report per-node activity snapshots by runtime tag for multi-node machines.
 - Advance cached user sync state from delta or full-list responses with Go-compatible empty-list semantics.
@@ -107,7 +108,7 @@ Not implemented yet:
 - Realtime config reload receipts can still race with process restart because the runtime exits to rebuild immediately after replying.
 - Complete per-protocol user options for bandwidth limits, device-limit enforcement, and advanced protocol-specific credentials.
 - Naive sidecar runtime still needs a concrete Caddy forward_proxy integration before it can serve traffic.
-- Mieru sidecar traffic requires operators to configure the `mita` command/arguments for their deployment style.
+- Mieru sidecar traffic requires operators to configure the `mita` command, arguments, and optional environment for their deployment style.
 - Subscription reverse proxy.
 
 ## Compatibility Targets
