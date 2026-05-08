@@ -520,10 +520,15 @@ where
     let cert_file = config.cert_file.trim();
     let key_file = config.key_file.trim();
     let certificate_domain = config.certificate_domain.trim();
+    let cert_not_after = subscription_proxy_cert_not_after(
+        cert_file,
+        &config.zerossl.expires_at,
+        &mut certificate_not_after,
+    );
     let mut status = SubscriptionProxyStatus {
         certificate_domain: certificate_domain.to_string(),
         certificate_id: config.zerossl.certificate_id.trim().to_string(),
-        cert_not_after: certificate_not_after(cert_file),
+        cert_not_after,
         ..SubscriptionProxyStatus::default()
     };
 
@@ -562,10 +567,15 @@ where
     let cert_file = config.cert_file.trim();
     let key_file = config.key_file.trim();
     let certificate_domain = config.certificate_domain.trim();
+    let cert_not_after = subscription_proxy_cert_not_after(
+        cert_file,
+        &config.zerossl.expires_at,
+        &mut certificate_not_after,
+    );
     let mut status = SubscriptionProxyStatus {
         certificate_domain: certificate_domain.to_string(),
         certificate_id: config.zerossl.certificate_id.trim().to_string(),
-        cert_not_after: certificate_not_after(cert_file),
+        cert_not_after,
         ..SubscriptionProxyStatus::default()
     };
 
@@ -580,7 +590,13 @@ where
 
     match plan_subscription_proxy_certificate_file(config) {
         Ok(Some(write)) => match write_file(&write) {
-            Ok(()) => status.cert_not_after = certificate_not_after(cert_file),
+            Ok(()) => {
+                status.cert_not_after = subscription_proxy_cert_not_after(
+                    cert_file,
+                    &config.zerossl.expires_at,
+                    &mut certificate_not_after,
+                )
+            }
             Err(err) => status.last_error = err,
         },
         Ok(None) => {}
@@ -835,6 +851,17 @@ fn merge_subscription_proxy_status(
     if !source.last_error.is_empty() {
         target.last_error = source.last_error.clone();
     }
+}
+
+fn subscription_proxy_cert_not_after<F>(
+    cert_file: &str,
+    expires_at: &str,
+    certificate_not_after: &mut F,
+) -> String
+where
+    F: FnMut(&str) -> String,
+{
+    first_non_empty(certificate_not_after(cert_file).trim(), expires_at.trim())
 }
 
 fn first_non_empty(value: &str, fallback: &str) -> String {
@@ -1206,6 +1233,25 @@ mod tests {
     }
 
     #[test]
+    fn certificate_status_falls_back_to_zerossl_expiry_when_cert_date_unavailable() {
+        let status = prepare_subscription_proxy_certificate_status(
+            &SubscriptionProxyConfig {
+                cert_file: "/etc/v2node/fullchain.pem".to_string(),
+                zerossl: SubscriptionProxyZeroSslConfig {
+                    expires_at: "2026-07-01T00:00:00Z".to_string(),
+                    ..SubscriptionProxyZeroSslConfig::default()
+                },
+                ..SubscriptionProxyConfig::default()
+            },
+            |_| " ".to_string(),
+            |_, _| Ok("csr".to_string()),
+            |_| true,
+        );
+
+        assert_eq!(status.cert_not_after, "2026-07-01T00:00:00Z");
+    }
+
+    #[test]
     fn certificate_status_keeps_csr_errors_non_fatal() {
         let status = prepare_subscription_proxy_certificate_status(
             &SubscriptionProxyConfig {
@@ -1382,6 +1428,27 @@ mod tests {
             "/var/lib/v2node/challenges/token.txt"
         );
         assert_eq!(writes.borrow()[1].path, "/etc/v2node/fullchain.pem");
+    }
+
+    #[test]
+    fn certificate_status_file_write_falls_back_to_zerossl_expiry() {
+        let status = prepare_subscription_proxy_certificate_status_with_file_writes(
+            &SubscriptionProxyConfig {
+                cert_file: "/etc/v2node/fullchain.pem".to_string(),
+                zerossl: SubscriptionProxyZeroSslConfig {
+                    certificate_pem: "-----BEGIN CERTIFICATE-----\nleaf".to_string(),
+                    expires_at: "2026-07-02T00:00:00Z".to_string(),
+                    ..SubscriptionProxyZeroSslConfig::default()
+                },
+                ..SubscriptionProxyConfig::default()
+            },
+            |_| String::new(),
+            |_, _| Ok("csr".to_string()),
+            |_| true,
+            |_| Ok(()),
+        );
+
+        assert_eq!(status.cert_not_after, "2026-07-02T00:00:00Z");
     }
 
     #[test]
