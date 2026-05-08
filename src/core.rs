@@ -393,11 +393,17 @@ fn render_mieru_sidecar_config(plan: &CorePlan) -> Result<Value, CoreError> {
 
 fn render_keli_core_rs_config(plan: &CorePlan) -> Result<Value, CoreError> {
     let mut routes = Vec::new();
+    let mut outbounds = vec![json!({
+        "tag": "direct",
+        "protocol": "freedom",
+        "address": null,
+        "port": null
+    })];
     for inbound in &plan.inbounds {
         validate_keli_core_rs_inbound(inbound)?;
 
         for route in &inbound.routes {
-            if route.match_rules.is_empty() {
+            if route.match_rules.is_empty() && route.action != "default_out" {
                 continue;
             }
             match route.action.as_str() {
@@ -411,6 +417,58 @@ fn render_keli_core_rs_config(plan: &CorePlan) -> Result<Value, CoreError> {
                 })),
                 "block_port" => routes.push(json!({
                     "targets": prefixed_keli_core_rs_port_route_targets(inbound, route)?,
+                    "action": "block"
+                })),
+                "route" => {
+                    if let Some((tag, outbound)) = keli_core_rs_route_outbound(inbound, route)? {
+                        push_keli_core_rs_outbound_once(
+                            &mut outbounds,
+                            tag.as_str(),
+                            outbound.clone(),
+                        );
+                        routes.push(json!({
+                            "targets": keli_core_rs_route_targets(inbound, route)?,
+                            "action": {
+                                "outbound": tag
+                            },
+                            "outbound": outbound
+                        }));
+                    }
+                }
+                "route_ip" => {
+                    if let Some((tag, outbound)) = keli_core_rs_route_outbound(inbound, route)? {
+                        push_keli_core_rs_outbound_once(
+                            &mut outbounds,
+                            tag.as_str(),
+                            outbound.clone(),
+                        );
+                        routes.push(json!({
+                            "targets": prefixed_keli_core_rs_ip_route_targets(inbound, route)?,
+                            "action": {
+                                "outbound": tag
+                            },
+                            "outbound": outbound
+                        }));
+                    }
+                }
+                "default_out" => {
+                    if let Some((tag, outbound)) = keli_core_rs_route_outbound(inbound, route)? {
+                        push_keli_core_rs_outbound_once(
+                            &mut outbounds,
+                            tag.as_str(),
+                            outbound.clone(),
+                        );
+                        routes.push(json!({
+                            "targets": ["*"],
+                            "action": {
+                                "outbound": tag
+                            },
+                            "outbound": outbound
+                        }));
+                    }
+                }
+                "protocol" => routes.push(json!({
+                    "targets": prefixed_keli_core_rs_protocol_route_targets(inbound, route)?,
                     "action": "block"
                 })),
                 value => {
@@ -431,20 +489,192 @@ fn render_keli_core_rs_config(plan: &CorePlan) -> Result<Value, CoreError> {
             .iter()
             .map(render_keli_core_rs_inbound)
             .collect::<Vec<_>>(),
-        "outbounds": [
-            {
-                "tag": "direct",
-                "protocol": "freedom",
-                "address": null,
-                "port": null
-            }
-        ],
+        "outbounds": outbounds,
         "routes": routes,
         "stats": {
             "enabled": true,
             "per_user": true
         }
     }))
+}
+
+fn push_keli_core_rs_outbound_once(outbounds: &mut Vec<Value>, tag: &str, outbound: Value) {
+    if outbounds
+        .iter()
+        .any(|item| item.get("tag").and_then(Value::as_str) == Some(tag))
+    {
+        return;
+    }
+    outbounds.push(outbound);
+}
+
+fn keli_core_rs_route_outbound(
+    inbound: &InboundPlan,
+    route: &RoutePlan,
+) -> Result<Option<(String, Value)>, CoreError> {
+    let Some((tag, outbound)) = parse_route_outbound(route) else {
+        return Ok(None);
+    };
+    let protocol = outbound
+        .get("protocol")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or_default();
+    if protocol != "freedom" {
+        return Err(CoreError::new(format!(
+            "keli-core-rs route outbound {tag} protocol {protocol} on inbound {} is not supported yet",
+            inbound.tag
+        )));
+    }
+
+    let (address, port) = keli_core_rs_route_outbound_endpoint(&outbound);
+
+    Ok(Some((
+        tag.clone(),
+        json!({
+            "tag": tag,
+            "protocol": "freedom",
+            "address": address,
+            "port": port
+        }),
+    )))
+}
+
+fn keli_core_rs_route_outbound_endpoint(outbound: &Value) -> (Option<String>, Option<u16>) {
+    let address = outbound
+        .get("address")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    let port = outbound
+        .get("port")
+        .and_then(Value::as_u64)
+        .and_then(|value| u16::try_from(value).ok());
+    if address.is_some() || port.is_some() {
+        return (address, port);
+    }
+
+    let redirect = outbound
+        .get("settings")
+        .and_then(|settings| settings.get("redirect"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    redirect
+        .map(parse_route_redirect_endpoint)
+        .unwrap_or((None, None))
+}
+
+fn parse_route_redirect_endpoint(value: &str) -> (Option<String>, Option<u16>) {
+    if let Some(rest) = value.strip_prefix('[') {
+        if let Some(end) = rest.find(']') {
+            let host = rest[..end].trim();
+            let port = rest[end + 1..]
+                .strip_prefix(':')
+                .and_then(|port| port.parse::<u16>().ok());
+            return ((!host.is_empty()).then(|| host.to_string()), port);
+        }
+    }
+    if let Some((host, port)) = value.rsplit_once(':') {
+        if let Ok(port) = port.parse::<u16>() {
+            let host = host.trim().trim_matches(['[', ']']);
+            return ((!host.is_empty()).then(|| host.to_string()), Some(port));
+        }
+    }
+    (Some(value.trim_matches(['[', ']']).to_string()), None)
+}
+
+fn keli_core_rs_route_targets(
+    inbound: &InboundPlan,
+    route: &RoutePlan,
+) -> Result<Vec<String>, CoreError> {
+    route
+        .match_rules
+        .iter()
+        .map(|rule| {
+            let rule = rule.trim();
+            if rule.is_empty() {
+                return Err(CoreError::new(format!(
+                    "keli-core-rs empty route rule on inbound {} is not supported",
+                    inbound.tag
+                )));
+            }
+            let normalized = rule.to_ascii_lowercase();
+            if let Some(value) = normalized.strip_prefix("ip:") {
+                if !is_keli_core_rs_ip_route_rule(value) {
+                    return Err(CoreError::new(format!(
+                        "keli-core-rs route rule {rule} on inbound {} is not supported yet",
+                        inbound.tag
+                    )));
+                }
+            } else if let Some(value) = normalized.strip_prefix("port:") {
+                if !is_keli_core_rs_port_route_rule(value) {
+                    return Err(CoreError::new(format!(
+                        "keli-core-rs route rule {rule} on inbound {} is not supported yet",
+                        inbound.tag
+                    )));
+                }
+            } else if let Some(value) = normalized.strip_prefix("network:") {
+                if !matches!(value.trim(), "tcp" | "udp") {
+                    return Err(CoreError::new(format!(
+                        "keli-core-rs route rule {rule} on inbound {} is not supported yet",
+                        inbound.tag
+                    )));
+                }
+            } else if let Some(value) = normalized.strip_prefix("domain:") {
+                if value.trim().trim_start_matches('.').is_empty() {
+                    return Err(CoreError::new(format!(
+                        "keli-core-rs route rule {rule} on inbound {} is not supported yet",
+                        inbound.tag
+                    )));
+                }
+            } else if let Some(value) = normalized.strip_prefix("full:") {
+                if value.trim().trim_matches(['[', ']']).is_empty() {
+                    return Err(CoreError::new(format!(
+                        "keli-core-rs route rule {rule} on inbound {} is not supported yet",
+                        inbound.tag
+                    )));
+                }
+            } else if let Some(value) = normalized.strip_prefix("keyword:") {
+                if value.trim().is_empty() {
+                    return Err(CoreError::new(format!(
+                        "keli-core-rs route rule {rule} on inbound {} is not supported yet",
+                        inbound.tag
+                    )));
+                }
+            } else if let Some(value) = normalized.strip_prefix("geoip:") {
+                if value.trim().is_empty() {
+                    return Err(CoreError::new(format!(
+                        "keli-core-rs route rule {rule} on inbound {} is not supported yet",
+                        inbound.tag
+                    )));
+                }
+            } else if let Some(value) = normalized.strip_prefix("geosite:") {
+                if value.trim().is_empty() {
+                    return Err(CoreError::new(format!(
+                        "keli-core-rs route rule {rule} on inbound {} is not supported yet",
+                        inbound.tag
+                    )));
+                }
+            } else if let Some(value) = normalized.strip_prefix("regexp:") {
+                if value.trim().is_empty() {
+                    return Err(CoreError::new(format!(
+                        "keli-core-rs route rule {rule} on inbound {} is not supported yet",
+                        inbound.tag
+                    )));
+                }
+            } else if let Some(value) = normalized.strip_prefix("protocol:") {
+                if value.trim().is_empty() {
+                    return Err(CoreError::new(format!(
+                        "keli-core-rs route rule {rule} on inbound {} is not supported yet",
+                        inbound.tag
+                    )));
+                }
+            }
+            Ok(rule.to_string())
+        })
+        .collect()
 }
 
 fn keli_core_rs_block_route_targets(
@@ -505,15 +735,34 @@ fn keli_core_rs_block_route_targets(
                         inbound.tag
                     )));
                 }
-            } else if normalized.starts_with("geoip:")
-                || normalized.starts_with("geosite:")
-                || normalized.starts_with("regexp:")
-                || normalized.starts_with("protocol:")
-            {
-                return Err(CoreError::new(format!(
-                    "keli-core-rs block rule {rule} on inbound {} is not supported yet",
-                    inbound.tag
-                )));
+            } else if let Some(value) = normalized.strip_prefix("geoip:") {
+                if value.trim().is_empty() {
+                    return Err(CoreError::new(format!(
+                        "keli-core-rs block rule {rule} on inbound {} is not supported yet",
+                        inbound.tag
+                    )));
+                }
+            } else if let Some(value) = normalized.strip_prefix("geosite:") {
+                if value.trim().is_empty() {
+                    return Err(CoreError::new(format!(
+                        "keli-core-rs block rule {rule} on inbound {} is not supported yet",
+                        inbound.tag
+                    )));
+                }
+            } else if let Some(value) = normalized.strip_prefix("regexp:") {
+                if value.trim().is_empty() {
+                    return Err(CoreError::new(format!(
+                        "keli-core-rs block rule {rule} on inbound {} is not supported yet",
+                        inbound.tag
+                    )));
+                }
+            } else if let Some(value) = normalized.strip_prefix("protocol:") {
+                if value.trim().is_empty() {
+                    return Err(CoreError::new(format!(
+                        "keli-core-rs block rule {rule} on inbound {} is not supported yet",
+                        inbound.tag
+                    )));
+                }
             }
             Ok(rule.to_string())
         })
@@ -535,7 +784,32 @@ fn prefixed_keli_core_rs_ip_route_targets(
                     inbound.tag
                 )));
             }
-            Ok(format!("ip:{rule}"))
+            let normalized = rule.to_ascii_lowercase();
+            if normalized.starts_with("geoip:") || normalized.starts_with("ip:geoip:") {
+                Ok(rule.to_string())
+            } else {
+                Ok(format!("ip:{rule}"))
+            }
+        })
+        .collect()
+}
+
+fn prefixed_keli_core_rs_protocol_route_targets(
+    inbound: &InboundPlan,
+    route: &RoutePlan,
+) -> Result<Vec<String>, CoreError> {
+    route
+        .match_rules
+        .iter()
+        .map(|rule| {
+            let rule = rule.trim();
+            if rule.is_empty() {
+                return Err(CoreError::new(format!(
+                    "keli-core-rs protocol rule on inbound {} is not supported yet",
+                    inbound.tag
+                )));
+            }
+            Ok(format!("protocol:{rule}"))
         })
         .collect()
 }
@@ -562,6 +836,14 @@ fn prefixed_keli_core_rs_port_route_targets(
 
 fn is_keli_core_rs_ip_route_rule(rule: &str) -> bool {
     let rule = rule.trim().trim_matches(['[', ']']);
+    if rule
+        .to_ascii_lowercase()
+        .strip_prefix("ip:")
+        .is_some_and(|value| value.starts_with("geoip:"))
+        || rule.to_ascii_lowercase().starts_with("geoip:")
+    {
+        return true;
+    }
     if rule.parse::<IpAddr>().is_ok() {
         return true;
     }
@@ -1453,7 +1735,7 @@ pub fn normalize_node_listen_ip(raw: &str) -> String {
 
 pub fn resolve_node_listen_ip(raw: &str) -> String {
     match normalize_node_listen_ip(raw).as_str() {
-        "" | "0.0.0.0" => "::".to_string(),
+        "" => "0.0.0.0".to_string(),
         value => value.to_string(),
     }
 }
@@ -2391,7 +2673,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(plan.listen_tags.len(), 1);
-        assert_eq!(plan.inbounds[0].listen, "::");
+        assert_eq!(plan.inbounds[0].listen, "0.0.0.0");
         assert!(plan.inbounds[0].fallback_to_ipv4);
     }
 
@@ -2627,7 +2909,7 @@ mod tests {
 
         assert_eq!(config["instance_id"], "keli-core-rs");
         assert_eq!(config["inbounds"][0]["protocol"], "socks");
-        assert_eq!(config["inbounds"][0]["listen"], "::");
+        assert_eq!(config["inbounds"][0]["listen"], "0.0.0.0");
         assert_eq!(config["inbounds"][0]["transport"]["network"], "tcp");
         assert_eq!(config["inbounds"][0]["users"][0]["uuid"], "socks-user");
         assert_eq!(
@@ -2714,6 +2996,78 @@ mod tests {
         assert_eq!(config["routes"][1]["targets"][0], "ip:10.0.0.0/8");
         assert_eq!(config["routes"][1]["targets"][1], "ip:2001:db8::/32");
         assert_eq!(config["routes"][2]["targets"][0], "port:6881-6889,6969");
+    }
+
+    #[test]
+    fn renders_keli_core_rs_freedom_route_outbounds() {
+        let mut node = test_node("http", 82, "");
+        node.common.routes = vec![
+            Route {
+                id: 1,
+                match_rules: vec!["domain:example.com".to_string()],
+                action: "route".to_string(),
+                action_value: Some(
+                    r#"{"tag":"warp","protocol":"freedom","settings":{"redirect":"127.0.0.1:40000"}}"#
+                        .to_string(),
+                ),
+            },
+            Route {
+                id: 2,
+                match_rules: vec!["10.0.0.0/8".to_string()],
+                action: "route_ip".to_string(),
+                action_value: Some(r#"{"tag":"warp","protocol":"freedom"}"#.to_string()),
+            },
+            Route {
+                id: 3,
+                match_rules: Vec::new(),
+                action: "default_out".to_string(),
+                action_value: Some(r#"{"tag":"warp","protocol":"freedom"}"#.to_string()),
+            },
+        ];
+        let plan = CorePlan::from_nodes(
+            CoreKind::KeliCoreRs,
+            PathBuf::from("/srv/v2node/keli-core-rs.json"),
+            &[node],
+        )
+        .unwrap();
+
+        let config = render_core_config(&plan).unwrap();
+        let outbounds = config["outbounds"].as_array().unwrap();
+
+        assert_eq!(
+            outbounds
+                .iter()
+                .filter(|outbound| outbound["tag"] == "warp")
+                .count(),
+            1
+        );
+        assert_eq!(config["routes"][0]["targets"][0], "domain:example.com");
+        assert_eq!(config["routes"][0]["action"]["outbound"], "warp");
+        assert_eq!(config["routes"][0]["outbound"]["address"], "127.0.0.1");
+        assert_eq!(config["routes"][0]["outbound"]["port"], 40000);
+        assert_eq!(config["routes"][1]["targets"][0], "ip:10.0.0.0/8");
+        assert_eq!(config["routes"][2]["targets"][0], "*");
+    }
+
+    #[test]
+    fn keli_core_rs_rejects_non_freedom_route_outbound() {
+        let mut node = test_node("http", 83, "");
+        node.common.routes = vec![Route {
+            id: 1,
+            match_rules: vec!["domain:example.com".to_string()],
+            action: "route".to_string(),
+            action_value: Some(r#"{"tag":"proxy","protocol":"socks"}"#.to_string()),
+        }];
+        let plan = CorePlan::from_nodes(
+            CoreKind::KeliCoreRs,
+            PathBuf::from("/srv/v2node/keli-core-rs.json"),
+            &[node],
+        )
+        .unwrap();
+
+        let err = render_core_config(&plan).unwrap_err();
+
+        assert!(err.message.contains("protocol socks"));
     }
 
     #[test]
@@ -3515,7 +3869,7 @@ mod tests {
     }
 
     #[test]
-    fn keli_core_rs_rejects_unsupported_route_actions() {
+    fn renders_keli_core_rs_protocol_route_action() {
         let mut node = test_node("socks", 44, "");
         node.common.routes = vec![Route {
             id: 1,
@@ -3530,31 +3884,14 @@ mod tests {
         )
         .unwrap();
 
-        let err = render_core_config(&plan).unwrap_err();
+        let config = render_core_config(&plan).unwrap();
 
-        assert!(err.message.contains("route action protocol"));
+        assert_eq!(config["routes"][0]["targets"][0], "protocol:bittorrent");
+        assert_eq!(config["routes"][0]["action"], "block");
     }
 
     #[test]
     fn keli_core_rs_rejects_unsupported_ip_and_port_route_rules() {
-        let mut node = test_node("socks", 78, "");
-        node.common.routes = vec![Route {
-            id: 1,
-            match_rules: vec!["geoip:private".to_string()],
-            action: "block_ip".to_string(),
-            action_value: None,
-        }];
-        let plan = CorePlan::from_nodes(
-            CoreKind::KeliCoreRs,
-            PathBuf::from("/srv/v2node/keli-core-rs.json"),
-            &[node],
-        )
-        .unwrap();
-
-        let err = render_core_config(&plan).unwrap_err();
-
-        assert!(err.message.contains("block_ip rule geoip:private"));
-
         let mut node = test_node("socks", 79, "");
         node.common.routes = vec![Route {
             id: 1,
@@ -3576,24 +3913,6 @@ mod tests {
         let mut node = test_node("socks", 80, "");
         node.common.routes = vec![Route {
             id: 1,
-            match_rules: vec!["geosite:private".to_string()],
-            action: "block".to_string(),
-            action_value: None,
-        }];
-        let plan = CorePlan::from_nodes(
-            CoreKind::KeliCoreRs,
-            PathBuf::from("/srv/v2node/keli-core-rs.json"),
-            &[node],
-        )
-        .unwrap();
-
-        let err = render_core_config(&plan).unwrap_err();
-
-        assert!(err.message.contains("block rule geosite:private"));
-
-        let mut node = test_node("socks", 81, "");
-        node.common.routes = vec![Route {
-            id: 1,
             match_rules: vec!["keyword:".to_string()],
             action: "block".to_string(),
             action_value: None,
@@ -3608,6 +3927,42 @@ mod tests {
         let err = render_core_config(&plan).unwrap_err();
 
         assert!(err.message.contains("block rule keyword:"));
+    }
+
+    #[test]
+    fn renders_keli_core_rs_advanced_route_rules() {
+        let mut node = test_node("socks", 81, "");
+        node.common.routes = vec![
+            Route {
+                id: 1,
+                match_rules: vec!["geoip:private".to_string()],
+                action: "block_ip".to_string(),
+                action_value: None,
+            },
+            Route {
+                id: 2,
+                match_rules: vec![
+                    "geosite:private".to_string(),
+                    "regexp:^api\\.".to_string(),
+                    "protocol:udp".to_string(),
+                ],
+                action: "block".to_string(),
+                action_value: None,
+            },
+        ];
+        let plan = CorePlan::from_nodes(
+            CoreKind::KeliCoreRs,
+            PathBuf::from("/srv/v2node/keli-core-rs.json"),
+            &[node],
+        )
+        .unwrap();
+
+        let config = render_core_config(&plan).unwrap();
+
+        assert_eq!(config["routes"][0]["targets"][0], "geoip:private");
+        assert_eq!(config["routes"][1]["targets"][0], "geosite:private");
+        assert_eq!(config["routes"][1]["targets"][1], "regexp:^api\\.");
+        assert_eq!(config["routes"][1]["targets"][2], "protocol:udp");
     }
 
     #[test]
@@ -3670,9 +4025,9 @@ mod tests {
     }
 
     #[test]
-    fn resolve_node_listen_ip_defaults_wildcard_to_dual_stack() {
-        assert_eq!(resolve_node_listen_ip("0.0.0.0"), "::");
-        assert_eq!(resolve_node_listen_ip(" "), "::");
+    fn resolve_node_listen_ip_preserves_ipv4_wildcard() {
+        assert_eq!(resolve_node_listen_ip("0.0.0.0"), "0.0.0.0");
+        assert_eq!(resolve_node_listen_ip(" "), "0.0.0.0");
         assert_eq!(resolve_node_listen_ip("[::]"), "::");
         assert_eq!(resolve_node_listen_ip("127.0.0.1"), "127.0.0.1");
     }
@@ -3737,7 +4092,7 @@ mod tests {
 
         let config = render_core_config(&plan).unwrap();
 
-        assert_eq!(config["inbounds"][0]["listen"], "::");
+        assert_eq!(config["inbounds"][0]["listen"], "0.0.0.0");
         assert_eq!(config["inbounds"][0]["streamSettings"]["security"], "tls");
         assert_eq!(
             config["inbounds"][0]["streamSettings"]["tlsSettings"]["certificates"][0]

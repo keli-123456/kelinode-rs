@@ -121,9 +121,26 @@ async fn run_agent_once(
     port_forward_executor: &mut SystemPortForwardExecutor,
     upgrade_status: Option<Value>,
 ) -> Result<RuntimeLoopExit, String> {
+    eprintln!("loading config: {path}");
     let config = AppConfig::load_from_path(path)?;
+    eprintln!("building runtime bootstrap");
     let plan = bootstrap_from_config(&config).await?;
+    eprintln!(
+        "runtime bootstrap ready: mode={:?} resolved_nodes={} active_nodes={} machine_profiles={} realtime_workers={}",
+        plan.bootstrap.mode,
+        plan.resolved.nodes.len(),
+        plan.node_count,
+        plan.resolved.machine.profiles.len(),
+        plan.realtime_options.len()
+    );
+    for failure in &plan.node_failures {
+        eprintln!(
+            "node failure: api_host={} node_id={} machine_id={} error={}",
+            failure.config.url, failure.config.node_id, failure.config.machine_id, failure.error
+        );
+    }
     let panel_clients = machine_panel_clients(&plan)?;
+    eprintln!("panel clients: {}", panel_clients.len());
     let options = runtime_loop_options(&plan, !panel_clients.is_empty());
     let realtime_options = plan.realtime_options.clone();
     let subscription_proxy_manager = start_subscription_proxy_manager(&plan);
@@ -136,6 +153,7 @@ async fn run_agent_once(
         runner = runner.with_subscription_proxy_manager(manager);
     }
     let mut realtime_workers = start_realtime_runtime_workers(realtime_options);
+    eprintln!("runtime loop started");
     let mut shutdown = false;
     let result = tokio::select! {
         result = run_runtime_loop_async_with_events(

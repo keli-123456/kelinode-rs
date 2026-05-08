@@ -38,12 +38,12 @@ The matching core-side gate is `keli-core-rs/docs/PARITY.md`.
 
 | Route type | Native renderer status | Notes |
 | --- | --- | --- |
-| Domain block | Code path | Renders exact/wildcard/suffix and `domain:`/`full:`/`keyword:` rules; `geosite:`/`regexp:` stay on Xray. |
+| Domain block | Code path | Renders exact/wildcard/suffix plus `domain:`/`full:`/`keyword:`/`geosite:`/`regexp:` rules. |
 | Direct/default direct | Code path | Native core uses the built-in `direct` outbound. |
 | DNS route | Rejected | Xray renderer still supports DNS route rendering. |
-| Custom outbound route | Rejected | Native core does not yet have custom outbound data paths. |
-| IP/port block | Partial | Numeric IP/CIDR and port/port-range block rules render into native core; `geoip:` remains on Xray. |
-| Protocol block | Rejected | Native core does not yet expose application protocol sniffing results. |
+| Custom outbound route | Partial | Freedom outbound tags render and execute in native core, including optional `address`/`port` redirects; non-freedom outbounds remain Xray-only. |
+| IP/port block | Partial | Numeric IP/CIDR, `geoip:`, and port/port-range block rules render into native core; domain targets are resolved lazily for IP matching, and arbitrary geo databases require native core rule files. |
+| Protocol block | Partial | Renders into native core and matches network labels, HTTP proxy plaintext, and UDP payload sniffing for common HTTP/TLS/QUIC/BitTorrent signatures. |
 
 ## Code-Complete Checklist Before Interop
 

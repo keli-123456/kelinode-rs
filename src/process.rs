@@ -1,4 +1,6 @@
 use std::collections::BTreeMap;
+use std::env;
+use std::path::Path;
 use std::path::PathBuf;
 use std::process::{Child, Command};
 
@@ -227,11 +229,13 @@ pub fn core_process_spec(
         .or_else(|| default_core_command(&plan.kind).map(str::to_string))
         .ok_or_else(|| ProcessError::new("core command is not configured"))?;
 
+    let config_path = absolute_process_path(&plan.config_path);
+
     Ok(ProcessSpec {
         name: format!("core:{}", core_kind_label(&plan.kind)),
         command,
-        args: core_process_args(&plan.kind, &plan.config_path)?,
-        working_dir: plan.config_path.parent().map(|path| path.to_path_buf()),
+        args: core_process_args(&plan.kind, &config_path)?,
+        working_dir: config_path.parent().map(|path| path.to_path_buf()),
         env: BTreeMap::new(),
     })
 }
@@ -251,7 +255,8 @@ pub fn sidecar_process_spec(
     if command.is_empty() {
         return Err(ProcessError::new("sidecar command is not configured"));
     }
-    let config = plan.config_path.display().to_string();
+    let config_path = absolute_process_path(&plan.config_path);
+    let config = config_path.display().to_string();
     Ok(ProcessSpec {
         name: format!("core:{}", core_kind_label(&plan.kind)),
         command: command.to_string(),
@@ -259,7 +264,7 @@ pub fn sidecar_process_spec(
             .iter()
             .map(|arg| arg.replace("{config}", &config))
             .collect(),
-        working_dir: plan.config_path.parent().map(|path| path.to_path_buf()),
+        working_dir: config_path.parent().map(|path| path.to_path_buf()),
         env: env
             .iter()
             .filter_map(|(key, value)| {
@@ -303,8 +308,18 @@ fn core_process_args(kind: &CoreKind, config_path: &PathBuf) -> Result<Vec<Strin
 }
 
 pub fn keli_core_rs_control_addr(config_path: &PathBuf) -> String {
+    let config_path = absolute_process_path(config_path);
     let hash = fnv1a64(config_path.display().to_string().as_bytes());
     format!("127.0.0.1:{}", 18080 + (hash % 1000))
+}
+
+fn absolute_process_path(path: &Path) -> PathBuf {
+    if path.is_absolute() || path.to_string_lossy().starts_with('/') {
+        return path.to_path_buf();
+    }
+    env::current_dir()
+        .map(|current_dir| current_dir.join(path))
+        .unwrap_or_else(|_| path.to_path_buf())
 }
 
 fn fnv1a64(bytes: &[u8]) -> u64 {
@@ -394,6 +409,22 @@ mod tests {
 
         assert_eq!(spec.command, "/usr/local/bin/sing-box");
         assert_eq!(spec.args, vec!["run", "-c", "/etc/v2node/sing-box.json"]);
+    }
+
+    #[test]
+    fn core_process_spec_absolutizes_relative_config_path() {
+        let plan = CorePlan {
+            kind: CoreKind::KeliCoreRs,
+            config_path: PathBuf::from("runtime/v2node/config.json"),
+            listen_tags: Vec::new(),
+            inbounds: Vec::new(),
+        };
+
+        let spec = core_process_spec(&plan, None).unwrap();
+
+        assert!(PathBuf::from(&spec.args[1]).is_absolute());
+        assert!(spec.working_dir.as_ref().unwrap().is_absolute());
+        assert_eq!(spec.args[3], keli_core_rs_control_addr(&plan.config_path));
     }
 
     #[test]

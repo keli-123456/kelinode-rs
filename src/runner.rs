@@ -278,9 +278,11 @@ where
             }
             if self.refresh_health {
                 let resources = if self.public_ip_probe {
-                    let mut probe = SystemPublicIpProbe::default();
-                    self.resource_sampler
-                        .sample_with_public_ip_probe(&mut probe)
+                    tokio::task::block_in_place(|| {
+                        let mut probe = SystemPublicIpProbe::default();
+                        self.resource_sampler
+                            .sample_with_public_ip_probe(&mut probe)
+                    })
                 } else {
                     self.resource_sampler.sample()
                 };

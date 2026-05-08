@@ -21,9 +21,9 @@ pub struct NodeInfo {
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 pub struct CommonNode {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_string_from_any")]
     pub protocol: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_string_from_any")]
     pub listen_ip: String,
     #[serde(default, deserialize_with = "deserialize_u16_from_any")]
     pub server_port: u16,
@@ -41,39 +41,43 @@ pub struct CommonNode {
     pub tls_settings: TlsSettings,
     #[serde(skip)]
     pub cert_info: Option<CertInfo>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_string_from_any")]
     pub network: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_string_from_any")]
     pub transport: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_string_from_any")]
     pub multiplexing: String,
     #[serde(default)]
     pub network_settings: Value,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_string_from_any")]
     pub encryption: String,
     #[serde(default)]
     pub encryption_settings: EncSettings,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_string_from_any")]
     pub server_name: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_string_from_any")]
     pub flow: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_string_from_any")]
     pub cipher: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_string_from_any")]
     pub server_key: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_string_from_any")]
     pub congestion_control: String,
     #[serde(default)]
     pub zero_rtt_handshake: bool,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_string_vec_from_any")]
     pub padding_scheme: Vec<String>,
     #[serde(default)]
     pub up_mbps: u32,
     #[serde(default)]
     pub down_mbps: u32,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_string_from_any")]
     pub obfs: String,
-    #[serde(default, rename = "obfs-password")]
+    #[serde(
+        default,
+        rename = "obfs-password",
+        deserialize_with = "deserialize_string_from_any"
+    )]
     pub obfs_password: String,
     #[serde(default)]
     pub ignore_client_bandwidth: bool,
@@ -83,11 +87,15 @@ pub struct CommonNode {
 pub struct Route {
     #[serde(default)]
     pub id: u32,
-    #[serde(default, rename = "match")]
+    #[serde(
+        default,
+        rename = "match",
+        deserialize_with = "deserialize_string_vec_from_any"
+    )]
     pub match_rules: Vec<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_string_from_any")]
     pub action: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_option_string_from_any")]
     pub action_value: Option<String>,
 }
 
@@ -125,33 +133,37 @@ pub struct RealtimeBootstrap {
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq)]
 pub struct TlsSettings {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_string_from_any")]
     pub server_name: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_string_vec_from_any")]
     pub alpn: Vec<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_string_from_any")]
     pub dest: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_string_from_any")]
     pub server_port: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_string_from_any")]
     pub short_id: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_string_from_any")]
     pub private_key: String,
-    #[serde(default, rename = "mldsa65Seed")]
+    #[serde(
+        default,
+        rename = "mldsa65Seed",
+        deserialize_with = "deserialize_string_from_any"
+    )]
     pub mldsa65_seed: String,
     #[serde(default)]
     pub xver: Value,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_string_from_any")]
     pub cert_mode: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_string_from_any")]
     pub cert_file: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_string_from_any")]
     pub key_file: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_string_from_any")]
     pub provider: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_string_from_any")]
     pub dns_env: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_string_from_any")]
     pub reject_unknown_sni: String,
 }
 
@@ -168,13 +180,13 @@ pub struct CertInfo {
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq)]
 pub struct EncSettings {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_string_from_any")]
     pub mode: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_string_from_any")]
     pub ticket: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_string_from_any")]
     pub server_padding: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_string_from_any")]
     pub private_key: String,
 }
 
@@ -422,6 +434,67 @@ where
     }
 }
 
+fn deserialize_string_from_any<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Ok(match Option::<Value>::deserialize(deserializer)? {
+        None | Some(Value::Null) => String::new(),
+        Some(Value::String(value)) => value,
+        Some(Value::Number(value)) => value.to_string(),
+        Some(Value::Bool(value)) => value.to_string(),
+        Some(_) => {
+            return Err(de::Error::custom(
+                "value must be a string, number, bool, or null",
+            ))
+        }
+    })
+}
+
+fn deserialize_option_string_from_any<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = deserialize_string_from_any(deserializer)?;
+    if value.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(value))
+    }
+}
+
+fn deserialize_string_vec_from_any<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let Some(value) = Option::<Value>::deserialize(deserializer)? else {
+        return Ok(Vec::new());
+    };
+    match value {
+        Value::Null => Ok(Vec::new()),
+        Value::String(value) => {
+            if value.is_empty() {
+                Ok(Vec::new())
+            } else {
+                Ok(vec![value])
+            }
+        }
+        Value::Array(values) => values
+            .into_iter()
+            .filter(|value| !value.is_null())
+            .map(|value| match value {
+                Value::String(value) => Ok(value),
+                Value::Number(value) => Ok(value.to_string()),
+                Value::Bool(value) => Ok(value.to_string()),
+                _ => Err(de::Error::custom(
+                    "array values must be strings, numbers, bools, or null",
+                )),
+            })
+            .collect(),
+        _ => Err(de::Error::custom("value must be an array, string, or null")),
+    }
+}
+
 fn interval_to_duration(value: &Value) -> Option<Duration> {
     match value {
         Value::Number(number) => number.as_u64().map(Duration::from_secs),
@@ -536,6 +609,32 @@ mod tests {
         assert_eq!(common.server_port, 2999);
         assert_eq!(common.transport, "udp");
         assert_eq!(common.multiplexing, "MULTIPLEXING_HIGH");
+    }
+
+    #[test]
+    fn common_node_accepts_nullable_panel_fields() {
+        let common: CommonNode = serde_json::from_value(json!({
+            "protocol": "hysteria2",
+            "listen_ip": "0.0.0.0",
+            "server_port": 19009,
+            "network": null,
+            "networkSettings": null,
+            "obfs": null,
+            "obfs-password": null,
+            "tls": 1,
+            "tls_settings": {
+                "server_name": "example.test",
+                "alpn": null,
+                "cert_mode": "file"
+            }
+        }))
+        .unwrap();
+
+        assert_eq!(common.protocol, "hysteria2");
+        assert_eq!(common.network, "");
+        assert_eq!(common.obfs, "");
+        assert_eq!(common.obfs_password, "");
+        assert_eq!(common.tls_settings.alpn, Vec::<String>::new());
     }
 
     #[test]
