@@ -466,11 +466,11 @@ fn validate_keli_core_rs_inbound(inbound: &InboundPlan) -> Result<(), CoreError>
             Ok(())
         }
         "vless" | "trojan" => {
-            validate_keli_core_rs_plain_tcp_inbound(inbound)?;
+            validate_keli_core_rs_tcp_or_ws_inbound(inbound)?;
             Ok(())
         }
         value => Err(CoreError::new(format!(
-            "keli-core-rs native renderer only supports socks/http/shadowsocks/vless/trojan/anytls tcp today; inbound {} uses {}",
+            "keli-core-rs native renderer only supports socks/http/shadowsocks/vless/trojan/anytls tcp and vless/trojan ws today; inbound {} uses {}",
             inbound.tag, value
         ))),
     }
@@ -502,6 +502,99 @@ fn validate_keli_core_rs_plain_tcp_inbound(inbound: &InboundPlan) -> Result<(), 
             "keli-core-rs {protocol} currently does not support transport settings on inbound {}",
             inbound.tag
         )));
+    }
+    Ok(())
+}
+
+fn validate_keli_core_rs_tcp_or_ws_inbound(inbound: &InboundPlan) -> Result<(), CoreError> {
+    let protocol = inbound.protocol.as_str();
+    let network = keli_core_rs_transport_network(inbound);
+    if !matches!(network.as_str(), "tcp" | "ws") {
+        return Err(CoreError::new(format!(
+            "keli-core-rs {protocol} currently supports only tcp/ws transport; inbound {} uses {}",
+            inbound.tag, network
+        )));
+    }
+    if inbound.security != "none" {
+        return Err(CoreError::new(format!(
+            "keli-core-rs {protocol} currently supports only security none; inbound {} uses {}",
+            inbound.tag, inbound.security
+        )));
+    }
+    if !inbound.flow.trim().is_empty() {
+        return Err(CoreError::new(format!(
+            "keli-core-rs {protocol} currently does not support flow {}; inbound {}",
+            inbound.flow, inbound.tag
+        )));
+    }
+    if network == "tcp" {
+        if !json_value_is_empty(&inbound.network_settings) {
+            return Err(CoreError::new(format!(
+                "keli-core-rs {protocol} currently does not support transport settings on tcp inbound {}",
+                inbound.tag
+            )));
+        }
+        return Ok(());
+    }
+
+    validate_keli_core_rs_websocket_settings(inbound)
+}
+
+fn validate_keli_core_rs_websocket_settings(inbound: &InboundPlan) -> Result<(), CoreError> {
+    if json_value_is_empty(&inbound.network_settings) {
+        return Ok(());
+    }
+    let Some(settings) = inbound.network_settings.as_object() else {
+        return Err(CoreError::new(format!(
+            "keli-core-rs websocket settings on inbound {} must be an object",
+            inbound.tag
+        )));
+    };
+    for (key, value) in settings {
+        match key.as_str() {
+            "path" | "Host" | "host" => {
+                if !value.is_string() {
+                    return Err(CoreError::new(format!(
+                        "keli-core-rs websocket setting {key} on inbound {} must be a string",
+                        inbound.tag
+                    )));
+                }
+            }
+            "headers" => validate_keli_core_rs_websocket_headers(inbound, value)?,
+            _ => {
+                return Err(CoreError::new(format!(
+                    "keli-core-rs websocket setting {key} on inbound {} is not supported yet",
+                    inbound.tag
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_keli_core_rs_websocket_headers(
+    inbound: &InboundPlan,
+    headers: &Value,
+) -> Result<(), CoreError> {
+    let Some(headers) = headers.as_object() else {
+        return Err(CoreError::new(format!(
+            "keli-core-rs websocket headers on inbound {} must be an object",
+            inbound.tag
+        )));
+    };
+    for (key, value) in headers {
+        if !matches!(key.as_str(), "Host" | "host") {
+            return Err(CoreError::new(format!(
+                "keli-core-rs websocket header {key} on inbound {} is not supported yet",
+                inbound.tag
+            )));
+        }
+        if !value.is_string() {
+            return Err(CoreError::new(format!(
+                "keli-core-rs websocket header {key} on inbound {} must be a string",
+                inbound.tag
+            )));
+        }
     }
     Ok(())
 }
@@ -547,18 +640,57 @@ fn render_keli_core_rs_inbound(inbound: &InboundPlan) -> Value {
             .iter()
             .map(render_keli_core_rs_user)
             .collect::<Vec<_>>(),
-        "transport": {
-            "network": first_non_empty(inbound.network.trim(), "tcp"),
-            "path": null,
-            "host": null,
-            "service_name": null,
-            "proxy_protocol": false
-        },
+        "transport": render_keli_core_rs_transport(inbound),
         "tls": null,
         "sniffing": {
             "enabled": true,
             "dest_override": ["http", "tls"]
         }
+    })
+}
+
+fn render_keli_core_rs_transport(inbound: &InboundPlan) -> Value {
+    let network = keli_core_rs_transport_network(inbound);
+    json!({
+        "network": &network,
+        "path": if network == "ws" {
+            websocket_path_setting(&inbound.network_settings)
+                .map(Value::String)
+                .unwrap_or(Value::Null)
+        } else {
+            Value::Null
+        },
+        "host": if network == "ws" {
+            websocket_host_setting(&inbound.network_settings)
+                .map(Value::String)
+                .unwrap_or(Value::Null)
+        } else {
+            Value::Null
+        },
+        "service_name": null,
+        "proxy_protocol": false
+    })
+}
+
+fn keli_core_rs_transport_network(inbound: &InboundPlan) -> String {
+    match first_non_empty(inbound.network.trim(), "tcp")
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "websocket" => "ws".to_string(),
+        value => value.to_string(),
+    }
+}
+
+fn websocket_path_setting(settings: &Value) -> Option<String> {
+    network_setting_string(settings, &["path"])
+}
+
+fn websocket_host_setting(settings: &Value) -> Option<String> {
+    network_setting_string(settings, &["Host", "host"]).or_else(|| {
+        settings
+            .get("headers")
+            .and_then(|headers| network_setting_string(headers, &["Host", "host"]))
     })
 }
 
@@ -1981,9 +2113,9 @@ mod tests {
     }
 
     #[test]
-    fn keli_core_rs_rejects_vless_non_tcp_transport_until_core_supports_it() {
+    fn keli_core_rs_rejects_vless_unsupported_transport_until_core_supports_it() {
         let mut node = test_node("vless", 47, "");
-        node.common.network = "ws".to_string();
+        node.common.network = "grpc".to_string();
         let plan = CorePlan::from_nodes(
             CoreKind::KeliCoreRs,
             PathBuf::from("/srv/v2node/keli-core-rs.json"),
@@ -1993,7 +2125,7 @@ mod tests {
 
         let err = render_core_config(&plan).unwrap_err();
 
-        assert!(err.message.contains("tcp transport"));
+        assert!(err.message.contains("tcp/ws transport"));
     }
 
     #[test]
@@ -2030,6 +2162,45 @@ mod tests {
         let err = render_core_config(&plan).unwrap_err();
 
         assert!(err.message.contains("transport settings"));
+    }
+
+    #[test]
+    fn renders_keli_core_rs_vless_and_trojan_websocket_transport_settings() {
+        let mut vless = test_node("vless", 60, "");
+        vless.common.network = "ws".to_string();
+        vless.common.network_settings = json!({
+            "path": "/vless",
+            "headers": {
+                "Host": "vless.example.test"
+            }
+        });
+        let mut trojan = test_node("trojan", 61, "");
+        trojan.common.network = "websocket".to_string();
+        trojan.common.network_settings = json!({
+            "path": "/trojan",
+            "Host": "trojan.example.test"
+        });
+        let plan = CorePlan::from_nodes(
+            CoreKind::KeliCoreRs,
+            PathBuf::from("/srv/v2node/keli-core-rs.json"),
+            &[vless, trojan],
+        )
+        .unwrap();
+
+        let config = render_core_config(&plan).unwrap();
+
+        assert_eq!(config["inbounds"][0]["transport"]["network"], "ws");
+        assert_eq!(config["inbounds"][0]["transport"]["path"], "/vless");
+        assert_eq!(
+            config["inbounds"][0]["transport"]["host"],
+            "vless.example.test"
+        );
+        assert_eq!(config["inbounds"][1]["transport"]["network"], "ws");
+        assert_eq!(config["inbounds"][1]["transport"]["path"], "/trojan");
+        assert_eq!(
+            config["inbounds"][1]["transport"]["host"],
+            "trojan.example.test"
+        );
     }
 
     #[test]
@@ -2101,9 +2272,9 @@ mod tests {
     }
 
     #[test]
-    fn keli_core_rs_rejects_trojan_non_tcp_transport_until_core_supports_it() {
+    fn keli_core_rs_rejects_trojan_unsupported_transport_until_core_supports_it() {
         let mut node = test_node("trojan", 52, "");
-        node.common.network = "ws".to_string();
+        node.common.network = "grpc".to_string();
         let plan = CorePlan::from_nodes(
             CoreKind::KeliCoreRs,
             PathBuf::from("/srv/v2node/keli-core-rs.json"),
@@ -2113,7 +2284,7 @@ mod tests {
 
         let err = render_core_config(&plan).unwrap_err();
 
-        assert!(err.message.contains("tcp transport"));
+        assert!(err.message.contains("tcp/ws transport"));
     }
 
     #[test]
