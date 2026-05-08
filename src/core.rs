@@ -546,9 +546,9 @@ fn validate_keli_core_rs_tcp_or_ws_inbound(inbound: &InboundPlan) -> Result<(), 
 fn validate_keli_core_rs_tls_inbound(inbound: &InboundPlan) -> Result<(), CoreError> {
     let protocol = inbound.protocol.as_str();
     let network = keli_core_rs_transport_network(inbound);
-    if network != "tcp" {
+    if !matches!(network.as_str(), "tcp" | "ws") {
         return Err(CoreError::new(format!(
-            "keli-core-rs {protocol} tls currently supports only tcp transport; inbound {} uses {}",
+            "keli-core-rs {protocol} tls currently supports only tcp/ws transport; inbound {} uses {}",
             inbound.tag, network
         )));
     }
@@ -2303,6 +2303,10 @@ mod tests {
         vless.common.cert_info.as_mut().unwrap().cert_file = "/srv/v2node/vless.cer".to_string();
         vless.common.cert_info.as_mut().unwrap().key_file = "/srv/v2node/vless.key".to_string();
         vless.common.cert_info.as_mut().unwrap().cert_domain = "vless.example.test".to_string();
+        vless.common.network = "ws".to_string();
+        vless.common.network_settings = json!({
+            "path": "/vless-tls"
+        });
         let mut trojan = test_node("trojan", 62, "");
         trojan.security = Security::Tls;
         trojan.common.cert_info.as_mut().unwrap().cert_file = "/srv/v2node/trojan.cer".to_string();
@@ -2321,6 +2325,8 @@ mod tests {
         assert_eq!(config["inbounds"][0]["tls"]["server_name"], "vless.example.test");
         assert_eq!(config["inbounds"][0]["tls"]["cert_file"], "/srv/v2node/vless.cer");
         assert_eq!(config["inbounds"][0]["tls"]["key_file"], "/srv/v2node/vless.key");
+        assert_eq!(config["inbounds"][0]["transport"]["network"], "ws");
+        assert_eq!(config["inbounds"][0]["transport"]["path"], "/vless-tls");
         assert_eq!(
             config["inbounds"][1]["tls"]["server_name"],
             "trojan.example.test"
