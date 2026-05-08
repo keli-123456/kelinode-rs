@@ -398,40 +398,55 @@ fn render_keli_core_rs_config(plan: &CorePlan) -> Result<Value, CoreError> {
 fn validate_keli_core_rs_inbound(inbound: &InboundPlan) -> Result<(), CoreError> {
     match inbound.protocol.as_str() {
         "socks" | "http" => Ok(()),
-        "vless" | "trojan" => {
-            let protocol = inbound.protocol.as_str();
-            let network = first_non_empty(inbound.network.trim(), "tcp");
-            if network != "tcp" {
+        "shadowsocks" => {
+            validate_keli_core_rs_plain_tcp_inbound(inbound)?;
+            if !is_keli_core_rs_shadowsocks_cipher(&inbound.cipher) {
                 return Err(CoreError::new(format!(
-                    "keli-core-rs {protocol} currently supports only tcp transport; inbound {} uses {}",
-                    inbound.tag, network
-                )));
-            }
-            if inbound.security != "none" {
-                return Err(CoreError::new(format!(
-                    "keli-core-rs {protocol} currently supports only security none; inbound {} uses {}",
-                    inbound.tag, inbound.security
-                )));
-            }
-            if !inbound.flow.trim().is_empty() {
-                return Err(CoreError::new(format!(
-                    "keli-core-rs {protocol} currently does not support flow {}; inbound {}",
-                    inbound.flow, inbound.tag
-                )));
-            }
-            if !json_value_is_empty(&inbound.network_settings) {
-                return Err(CoreError::new(format!(
-                    "keli-core-rs {protocol} currently does not support transport settings on inbound {}",
-                    inbound.tag
+                    "keli-core-rs shadowsocks cipher {} on inbound {} is not supported yet",
+                    inbound.cipher, inbound.tag
                 )));
             }
             Ok(())
         }
+        "vless" | "trojan" => {
+            validate_keli_core_rs_plain_tcp_inbound(inbound)?;
+            Ok(())
+        }
         value => Err(CoreError::new(format!(
-            "keli-core-rs native renderer only supports socks/http/vless/trojan tcp today; inbound {} uses {}",
+            "keli-core-rs native renderer only supports socks/http/shadowsocks/vless/trojan tcp today; inbound {} uses {}",
             inbound.tag, value
         ))),
     }
+}
+
+fn validate_keli_core_rs_plain_tcp_inbound(inbound: &InboundPlan) -> Result<(), CoreError> {
+    let protocol = inbound.protocol.as_str();
+    let network = first_non_empty(inbound.network.trim(), "tcp");
+    if network != "tcp" {
+        return Err(CoreError::new(format!(
+            "keli-core-rs {protocol} currently supports only tcp transport; inbound {} uses {}",
+            inbound.tag, network
+        )));
+    }
+    if inbound.security != "none" {
+        return Err(CoreError::new(format!(
+            "keli-core-rs {protocol} currently supports only security none; inbound {} uses {}",
+            inbound.tag, inbound.security
+        )));
+    }
+    if !inbound.flow.trim().is_empty() {
+        return Err(CoreError::new(format!(
+            "keli-core-rs {protocol} currently does not support flow {}; inbound {}",
+            inbound.flow, inbound.tag
+        )));
+    }
+    if !json_value_is_empty(&inbound.network_settings) {
+        return Err(CoreError::new(format!(
+            "keli-core-rs {protocol} currently does not support transport settings on inbound {}",
+            inbound.tag
+        )));
+    }
+    Ok(())
 }
 
 fn json_value_is_empty(value: &Value) -> bool {
@@ -440,6 +455,13 @@ fn json_value_is_empty(value: &Value) -> bool {
             .as_object()
             .map(|object| object.is_empty())
             .unwrap_or(false)
+}
+
+fn is_keli_core_rs_shadowsocks_cipher(cipher: &str) -> bool {
+    matches!(
+        cipher.trim().to_ascii_lowercase().replace('_', "-").as_str(),
+        "aes-128-gcm" | "aes-256-gcm" | "chacha20-ietf-poly1305"
+    )
 }
 
 fn keli_core_rs_instance_id(plan: &CorePlan) -> String {
@@ -458,6 +480,11 @@ fn render_keli_core_rs_inbound(inbound: &InboundPlan) -> Value {
         "protocol": &inbound.protocol,
         "listen": &inbound.listen,
         "port": inbound.port,
+        "cipher": if inbound.protocol == "shadowsocks" {
+            Value::String(inbound.cipher.clone())
+        } else {
+            Value::Null
+        },
         "users": inbound
             .users
             .iter()
@@ -1658,13 +1685,16 @@ mod tests {
     }
 
     #[test]
-    fn renders_keli_core_rs_native_socks_http_vless_trojan_config_from_panel_users() {
+    fn renders_keli_core_rs_native_socks_http_shadowsocks_vless_trojan_config_from_panel_users() {
         let socks = test_node("socks", 40, "");
         let http = test_node("http", 41, "127.0.0.1");
+        let mut shadowsocks = test_node("shadowsocks", 54, "127.0.0.1");
+        shadowsocks.common.cipher = "aes-128-gcm".to_string();
         let vless = test_node("vless", 45, "127.0.0.1");
         let trojan = test_node("trojan", 50, "127.0.0.1");
         let socks_tag = socks.tag.clone();
         let http_tag = http.tag.clone();
+        let shadowsocks_tag = shadowsocks.tag.clone();
         let vless_tag = vless.tag.clone();
         let trojan_tag = trojan.tag.clone();
         let mut users = std::collections::BTreeMap::new();
@@ -1696,6 +1726,15 @@ mod tests {
             }],
         );
         users.insert(
+            shadowsocks_tag,
+            vec![UserInfo {
+                id: 54,
+                uuid: "ss-password".to_string(),
+                speed_limit: 3072,
+                device_limit: 4,
+            }],
+        );
+        users.insert(
             trojan_tag,
             vec![UserInfo {
                 id: 50,
@@ -1707,7 +1746,7 @@ mod tests {
         let plan = CorePlan::from_nodes_with_users(
             CoreKind::KeliCoreRs,
             PathBuf::from("/srv/v2node/keli-core-rs.json"),
-            &[socks, http, vless, trojan],
+            &[socks, http, shadowsocks, vless, trojan],
             &users,
         )
         .unwrap();
@@ -1727,20 +1766,25 @@ mod tests {
         assert_eq!(config["inbounds"][0]["users"][0]["device_limit"], 2);
         assert_eq!(config["inbounds"][1]["protocol"], "http");
         assert_eq!(config["inbounds"][1]["listen"], "127.0.0.1");
-        assert_eq!(config["inbounds"][2]["protocol"], "vless");
-        assert_eq!(config["inbounds"][2]["listen"], "127.0.0.1");
-        assert_eq!(
-            config["inbounds"][2]["users"][0]["uuid"],
-            "11111111-1111-1111-1111-111111111111"
-        );
-        assert_eq!(config["inbounds"][3]["protocol"], "trojan");
+        assert_eq!(config["inbounds"][2]["protocol"], "shadowsocks");
+        assert_eq!(config["inbounds"][2]["cipher"], "aes-128-gcm");
+        assert_eq!(config["inbounds"][2]["users"][0]["uuid"], "ss-password");
+        assert_eq!(config["inbounds"][2]["users"][0]["speed_limit"], 3072);
+        assert_eq!(config["inbounds"][2]["users"][0]["device_limit"], 4);
+        assert_eq!(config["inbounds"][3]["protocol"], "vless");
         assert_eq!(config["inbounds"][3]["listen"], "127.0.0.1");
         assert_eq!(
             config["inbounds"][3]["users"][0]["uuid"],
+            "11111111-1111-1111-1111-111111111111"
+        );
+        assert_eq!(config["inbounds"][4]["protocol"], "trojan");
+        assert_eq!(config["inbounds"][4]["listen"], "127.0.0.1");
+        assert_eq!(
+            config["inbounds"][4]["users"][0]["uuid"],
             "trojan-password"
         );
-        assert_eq!(config["inbounds"][3]["users"][0]["speed_limit"], 2048);
-        assert_eq!(config["inbounds"][3]["users"][0]["device_limit"], 3);
+        assert_eq!(config["inbounds"][4]["users"][0]["speed_limit"], 2048);
+        assert_eq!(config["inbounds"][4]["users"][0]["device_limit"], 3);
         assert_eq!(config["outbounds"][0]["tag"], "direct");
         assert_eq!(config["stats"]["per_user"], true);
     }
@@ -1779,7 +1823,9 @@ mod tests {
 
         let err = render_core_config(&plan).unwrap_err();
 
-        assert!(err.message.contains("only supports socks/http/vless/trojan"));
+        assert!(err
+            .message
+            .contains("only supports socks/http/shadowsocks/vless/trojan"));
     }
 
     #[test]
@@ -1837,6 +1883,58 @@ mod tests {
             "header": {
                 "type": "http"
             }
+        });
+        let plan = CorePlan::from_nodes(
+            CoreKind::KeliCoreRs,
+            PathBuf::from("/srv/v2node/keli-core-rs.json"),
+            &[node],
+        )
+        .unwrap();
+
+        let err = render_core_config(&plan).unwrap_err();
+
+        assert!(err.message.contains("transport settings"));
+    }
+
+    #[test]
+    fn keli_core_rs_rejects_shadowsocks_unsupported_cipher_until_core_supports_it() {
+        let mut node = test_node("shadowsocks", 55, "");
+        node.common.cipher = "2022-blake3-aes-128-gcm".to_string();
+        let plan = CorePlan::from_nodes(
+            CoreKind::KeliCoreRs,
+            PathBuf::from("/srv/v2node/keli-core-rs.json"),
+            &[node],
+        )
+        .unwrap();
+
+        let err = render_core_config(&plan).unwrap_err();
+
+        assert!(err.message.contains("shadowsocks cipher"));
+    }
+
+    #[test]
+    fn keli_core_rs_rejects_shadowsocks_non_tcp_transport_until_core_supports_it() {
+        let mut node = test_node("shadowsocks", 56, "");
+        node.common.cipher = "aes-128-gcm".to_string();
+        node.common.network = "ws".to_string();
+        let plan = CorePlan::from_nodes(
+            CoreKind::KeliCoreRs,
+            PathBuf::from("/srv/v2node/keli-core-rs.json"),
+            &[node],
+        )
+        .unwrap();
+
+        let err = render_core_config(&plan).unwrap_err();
+
+        assert!(err.message.contains("tcp transport"));
+    }
+
+    #[test]
+    fn keli_core_rs_rejects_shadowsocks_transport_settings_until_core_supports_it() {
+        let mut node = test_node("shadowsocks", 57, "");
+        node.common.cipher = "aes-128-gcm".to_string();
+        node.common.network_settings = json!({
+            "path": "/ss"
         });
         let plan = CorePlan::from_nodes(
             CoreKind::KeliCoreRs,
