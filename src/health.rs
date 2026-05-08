@@ -163,7 +163,46 @@ fn core_value(
         "sidecars": plan.sidecar_core_plans.len(),
         "sidecar_inbounds": sidecar_inbounds,
         "sidecar_statuses": sidecar_statuses,
+        "user_limits": user_limit_value(plan),
         "status": status
+    })
+}
+
+fn user_limit_value(plan: &RuntimeBootstrapPlan) -> Value {
+    let mut users = 0usize;
+    let mut speed_limited_users = 0usize;
+    let mut device_limited_users = 0usize;
+
+    for core in plan.core_plan.iter().chain(plan.sidecar_core_plans.iter()) {
+        for inbound in &core.inbounds {
+            for user in &inbound.users {
+                users += 1;
+                if user.speed_limit > 0 {
+                    speed_limited_users += 1;
+                }
+                if user.device_limit > 0 {
+                    device_limited_users += 1;
+                }
+            }
+        }
+    }
+
+    let active = speed_limited_users > 0 || device_limited_users > 0;
+    json!({
+        "users": users,
+        "speed_limited_users": speed_limited_users,
+        "device_limited_users": device_limited_users,
+        "active": active,
+        "enforcement": if active {
+            "external_core_pending"
+        } else {
+            "none_required"
+        },
+        "warning": if active {
+            "per-user speed and device limits are not enforced by the external-core runtime yet"
+        } else {
+            ""
+        }
     })
 }
 
@@ -290,6 +329,8 @@ fn process_state_label(state: &ProcessState) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use serde_json::json;
 
     use crate::config::{
@@ -297,9 +338,11 @@ mod tests {
         SubscriptionProxyProfile,
     };
     use crate::node::NodeFailure;
-    use crate::panel::types::{CommonNode, NodeInfo};
+    use crate::panel::types::{CommonNode, NodeInfo, UserInfo};
     use crate::process::ProcessStatus;
-    use crate::runtime::build_runtime_bootstrap_plan;
+    use crate::runtime::{
+        build_runtime_bootstrap_plan, build_runtime_bootstrap_plan_with_users,
+    };
     use crate::subscription_proxy::SubscriptionProxyStatus;
 
     use super::{
@@ -396,6 +439,45 @@ mod tests {
             payload.status["agent"]["subscription_proxy"]["profiles"][0]["site_id"],
             json!("site-a")
         );
+    }
+
+    #[test]
+    fn machine_status_surfaces_external_core_user_limit_gap() {
+        let resolved = ResolvedConfig {
+            kernel: Default::default(),
+            realtime: Default::default(),
+            machine: ResolvedMachineConfig {
+                enabled: true,
+                continue_on_error: true,
+                profiles: Vec::new(),
+            },
+            agent: AgentConfig::default(),
+            nodes: vec![node_config("https://panel.example.test", 7, 3)],
+        };
+        let node = test_node("vless", 7);
+        let tag = node.tag.clone();
+        let mut users = BTreeMap::new();
+        users.insert(
+            tag,
+            vec![UserInfo {
+                id: 1,
+                uuid: "11111111-1111-1111-1111-111111111111".to_string(),
+                speed_limit: 20,
+                device_limit: 2,
+            }],
+        );
+        let plan =
+            build_runtime_bootstrap_plan_with_users(resolved, vec![node], Vec::new(), &users)
+                .unwrap();
+
+        let payload = build_machine_status_payload(3, &plan, HealthReportInput::default());
+
+        let limits = &payload.status["core"]["user_limits"];
+        assert_eq!(limits["users"], json!(1));
+        assert_eq!(limits["speed_limited_users"], json!(1));
+        assert_eq!(limits["device_limited_users"], json!(1));
+        assert_eq!(limits["active"], json!(true));
+        assert_eq!(limits["enforcement"], json!("external_core_pending"));
     }
 
     #[test]

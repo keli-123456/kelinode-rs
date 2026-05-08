@@ -70,6 +70,7 @@ First cut:
 - Compute Linux CPU usage from `/proc/stat` samples, with `/proc/loadavg` as a fallback.
 - Collect local and public IPv4/IPv6 candidates for machine status payloads without external network calls.
 - Compute network byte rates across runtime loop samples for machine status payloads.
+- Surface non-enforced per-user speed/device limits in machine status while external-core enforcement is pending.
 - Add a runtime loop scheduler for periodic user refresh, panel reports, and reload/upgrade signal exits.
 - Add an async runtime loop variant for panel-backed user refresh and report ticks.
 - Add a panel-backed runtime loop adapter that reloads users by node tag before applying ticks.
@@ -106,7 +107,7 @@ First cut:
 
 Not implemented yet:
 
-- Complete per-protocol user options for bandwidth limits, device-limit enforcement, and advanced protocol-specific credentials.
+- Complete per-protocol user options for bandwidth limits, device-limit enforcement, and advanced protocol-specific credentials inside the runtime data path.
 - Naive sidecar runtime still needs a concrete Caddy forward_proxy integration before it can serve traffic.
 - Mieru sidecar traffic requires operators to configure the `mita` command, arguments, and optional environment for their deployment style.
 - Subscription reverse proxy.

@@ -74,6 +74,7 @@
 - Linux `/proc/stat` CPU usage sampler with loadavg fallback for machine status payloads.
 - Local/public IPv4/IPv6 candidate snapshot collection for machine status payloads.
 - Runtime resource sampler that derives network byte rates between machine status samples.
+- Machine status warning for non-enforced per-user speed/device limits while external-core enforcement is pending.
 - Runtime loop scheduler for periodic user refresh, panel reports, and reload/upgrade signal exits.
 - Async runtime loop variant for panel-backed user refresh and report ticks.
 - Panel-backed runtime loop adapter that refreshes users by node tag before applying ticks.
