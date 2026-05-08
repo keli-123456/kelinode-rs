@@ -659,12 +659,9 @@ fn validate_keli_core_rs_hysteria2_inbound(inbound: &InboundPlan) -> Result<(), 
             inbound.tag
         )));
     }
-    if (!inbound.ignore_client_bandwidth && (inbound.up_mbps > 0 || inbound.down_mbps > 0))
-        || !inbound.obfs.trim().is_empty()
-        || !inbound.obfs_password.trim().is_empty()
-    {
+    if !inbound.obfs.trim().is_empty() || !inbound.obfs_password.trim().is_empty() {
         return Err(CoreError::new(format!(
-            "keli-core-rs hysteria2 currently does not support bandwidth override or obfs on inbound {}",
+            "keli-core-rs hysteria2 currently does not support obfs on inbound {}",
             inbound.tag
         )));
     }
@@ -813,25 +810,45 @@ fn render_keli_core_rs_tls(inbound: &InboundPlan) -> Value {
 
 fn render_keli_core_rs_transport(inbound: &InboundPlan) -> Value {
     let network = keli_core_rs_transport_network(inbound);
-    json!({
-        "network": &network,
-        "path": if network == "ws" {
+    let mut transport = Map::new();
+    transport.insert("network".to_string(), Value::String(network.clone()));
+    transport.insert(
+        "path".to_string(),
+        if network == "ws" {
             websocket_path_setting(&inbound.network_settings)
                 .map(Value::String)
                 .unwrap_or(Value::Null)
         } else {
             Value::Null
         },
-        "host": if network == "ws" {
+    );
+    transport.insert(
+        "host".to_string(),
+        if network == "ws" {
             websocket_host_setting(&inbound.network_settings)
                 .map(Value::String)
                 .unwrap_or(Value::Null)
         } else {
             Value::Null
         },
-        "service_name": null,
-        "proxy_protocol": false
-    })
+    );
+    transport.insert("service_name".to_string(), Value::Null);
+    transport.insert("proxy_protocol".to_string(), Value::Bool(false));
+
+    if inbound.protocol == "hysteria" {
+        if inbound.ignore_client_bandwidth {
+            transport.insert("ignore_client_bandwidth".to_string(), Value::Bool(true));
+        } else {
+            if inbound.up_mbps > 0 {
+                transport.insert("up_mbps".to_string(), json!(inbound.up_mbps));
+            }
+            if inbound.down_mbps > 0 {
+                transport.insert("down_mbps".to_string(), json!(inbound.down_mbps));
+            }
+        }
+    }
+
+    Value::Object(transport)
 }
 
 fn keli_core_rs_transport_network(inbound: &InboundPlan) -> String {
@@ -2513,7 +2530,67 @@ mod tests {
 
         let err = render_core_config(&plan).unwrap_err();
 
-        assert!(err.message.contains("bandwidth override or obfs"));
+        assert!(err.message.contains("does not support obfs"));
+    }
+
+    #[test]
+    fn renders_keli_core_rs_hysteria2_bandwidth_options() {
+        let mut node = test_node("hysteria2", 68, "");
+        node.security = Security::Tls;
+        node.common.cert_info.as_mut().unwrap().cert_file = "/srv/v2node/hy2.cer".to_string();
+        node.common.cert_info.as_mut().unwrap().key_file = "/srv/v2node/hy2.key".to_string();
+        node.common.up_mbps = 100;
+        node.common.down_mbps = 200;
+        let tag = node.tag.clone();
+        let mut users = std::collections::BTreeMap::new();
+        users.insert(
+            tag,
+            vec![UserInfo {
+                id: 68,
+                uuid: "hy2-password".to_string(),
+                speed_limit: 0,
+                device_limit: 0,
+            }],
+        );
+        let plan = CorePlan::from_nodes_with_users(
+            CoreKind::KeliCoreRs,
+            PathBuf::from("/srv/v2node/keli-core-rs.json"),
+            &[node],
+            &users,
+        )
+        .unwrap();
+
+        let config = render_core_config(&plan).unwrap();
+
+        assert_eq!(config["inbounds"][0]["transport"]["up_mbps"], 100);
+        assert_eq!(config["inbounds"][0]["transport"]["down_mbps"], 200);
+        assert!(config["inbounds"][0]["transport"]["ignore_client_bandwidth"].is_null());
+    }
+
+    #[test]
+    fn renders_keli_core_rs_hysteria2_ignore_client_bandwidth() {
+        let mut node = test_node("hysteria2", 69, "");
+        node.security = Security::Tls;
+        node.common.cert_info.as_mut().unwrap().cert_file = "/srv/v2node/hy2.cer".to_string();
+        node.common.cert_info.as_mut().unwrap().key_file = "/srv/v2node/hy2.key".to_string();
+        node.common.up_mbps = 100;
+        node.common.down_mbps = 200;
+        node.common.ignore_client_bandwidth = true;
+        let plan = CorePlan::from_nodes(
+            CoreKind::KeliCoreRs,
+            PathBuf::from("/srv/v2node/keli-core-rs.json"),
+            &[node],
+        )
+        .unwrap();
+
+        let config = render_core_config(&plan).unwrap();
+
+        assert_eq!(
+            config["inbounds"][0]["transport"]["ignore_client_bandwidth"],
+            true
+        );
+        assert!(config["inbounds"][0]["transport"]["up_mbps"].is_null());
+        assert!(config["inbounds"][0]["transport"]["down_mbps"].is_null());
     }
 
     #[test]
