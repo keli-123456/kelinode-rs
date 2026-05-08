@@ -2941,6 +2941,35 @@ mod tests {
     }
 
     #[test]
+    fn renders_keli_core_rs_mieru_default_out_as_wildcard_http_outbound() {
+        let mut node = test_node("mieru", 42, "");
+        node.common.routes = vec![Route {
+            id: 1,
+            match_rules: Vec::new(),
+            action: "default_out".to_string(),
+            action_value: Some(
+                r#"{"tag":"http-out","protocol":"http","address":"127.0.0.1","port":8080}"#
+                    .to_string(),
+            ),
+        }];
+        let plan = CorePlan::from_nodes(
+            CoreKind::KeliCoreRs,
+            PathBuf::from("/srv/v2node/config.json"),
+            &[node],
+        )
+        .unwrap();
+
+        let config = render_core_config(&plan).unwrap();
+
+        assert_eq!(config["inbounds"][0]["protocol"], "mieru");
+        assert_eq!(config["routes"][0]["targets"][0], "*");
+        assert_eq!(config["routes"][0]["action"]["outbound"], "http-out");
+        assert_eq!(config["routes"][0]["outbound"]["protocol"], "http");
+        assert_eq!(config["routes"][0]["outbound"]["address"], "127.0.0.1");
+        assert_eq!(config["routes"][0]["outbound"]["port"], 8080);
+    }
+
+    #[test]
     fn keli_core_rs_rejects_mieru_port_range_until_native_udp_multiplexing_exists() {
         let mut node = test_node("mieru", 41, "");
         node.common.ports = PortValue("2100-2200".to_string());
