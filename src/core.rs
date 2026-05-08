@@ -408,12 +408,22 @@ fn validate_keli_core_rs_inbound(inbound: &InboundPlan) -> Result<(), CoreError>
             }
             Ok(())
         }
+        "anytls" => {
+            validate_keli_core_rs_plain_tcp_inbound(inbound)?;
+            if !inbound.padding_scheme.is_empty() {
+                return Err(CoreError::new(format!(
+                    "keli-core-rs anytls currently does not support padding scheme on inbound {}",
+                    inbound.tag
+                )));
+            }
+            Ok(())
+        }
         "vless" | "trojan" => {
             validate_keli_core_rs_plain_tcp_inbound(inbound)?;
             Ok(())
         }
         value => Err(CoreError::new(format!(
-            "keli-core-rs native renderer only supports socks/http/shadowsocks/vless/trojan tcp today; inbound {} uses {}",
+            "keli-core-rs native renderer only supports socks/http/shadowsocks/vless/trojan/anytls tcp today; inbound {} uses {}",
             inbound.tag, value
         ))),
     }
@@ -1685,18 +1695,20 @@ mod tests {
     }
 
     #[test]
-    fn renders_keli_core_rs_native_socks_http_shadowsocks_vless_trojan_config_from_panel_users() {
+    fn renders_keli_core_rs_native_socks_http_shadowsocks_vless_trojan_anytls_config_from_panel_users() {
         let socks = test_node("socks", 40, "");
         let http = test_node("http", 41, "127.0.0.1");
         let mut shadowsocks = test_node("shadowsocks", 54, "127.0.0.1");
         shadowsocks.common.cipher = "aes-128-gcm".to_string();
         let vless = test_node("vless", 45, "127.0.0.1");
         let trojan = test_node("trojan", 50, "127.0.0.1");
+        let anytls = test_node("anytls", 58, "127.0.0.1");
         let socks_tag = socks.tag.clone();
         let http_tag = http.tag.clone();
         let shadowsocks_tag = shadowsocks.tag.clone();
         let vless_tag = vless.tag.clone();
         let trojan_tag = trojan.tag.clone();
+        let anytls_tag = anytls.tag.clone();
         let mut users = std::collections::BTreeMap::new();
         users.insert(
             socks_tag.clone(),
@@ -1743,10 +1755,19 @@ mod tests {
                 device_limit: 3,
             }],
         );
+        users.insert(
+            anytls_tag,
+            vec![UserInfo {
+                id: 58,
+                uuid: "anytls-password".to_string(),
+                speed_limit: 4096,
+                device_limit: 5,
+            }],
+        );
         let plan = CorePlan::from_nodes_with_users(
             CoreKind::KeliCoreRs,
             PathBuf::from("/srv/v2node/keli-core-rs.json"),
-            &[socks, http, shadowsocks, vless, trojan],
+            &[socks, http, shadowsocks, vless, trojan, anytls],
             &users,
         )
         .unwrap();
@@ -1785,6 +1806,13 @@ mod tests {
         );
         assert_eq!(config["inbounds"][4]["users"][0]["speed_limit"], 2048);
         assert_eq!(config["inbounds"][4]["users"][0]["device_limit"], 3);
+        assert_eq!(config["inbounds"][5]["protocol"], "anytls");
+        assert_eq!(
+            config["inbounds"][5]["users"][0]["uuid"],
+            "anytls-password"
+        );
+        assert_eq!(config["inbounds"][5]["users"][0]["speed_limit"], 4096);
+        assert_eq!(config["inbounds"][5]["users"][0]["device_limit"], 5);
         assert_eq!(config["outbounds"][0]["tag"], "direct");
         assert_eq!(config["stats"]["per_user"], true);
     }
@@ -1825,7 +1853,7 @@ mod tests {
 
         assert!(err
             .message
-            .contains("only supports socks/http/shadowsocks/vless/trojan"));
+            .contains("only supports socks/http/shadowsocks/vless/trojan/anytls"));
     }
 
     #[test]
@@ -1996,6 +2024,22 @@ mod tests {
         let err = render_core_config(&plan).unwrap_err();
 
         assert!(err.message.contains("transport settings"));
+    }
+
+    #[test]
+    fn keli_core_rs_rejects_anytls_padding_until_core_supports_it() {
+        let mut node = test_node("anytls", 59, "");
+        node.common.padding_scheme = vec!["stop=8".to_string()];
+        let plan = CorePlan::from_nodes(
+            CoreKind::KeliCoreRs,
+            PathBuf::from("/srv/v2node/keli-core-rs.json"),
+            &[node],
+        )
+        .unwrap();
+
+        let err = render_core_config(&plan).unwrap_err();
+
+        assert!(err.message.contains("padding scheme"));
     }
 
     #[test]
