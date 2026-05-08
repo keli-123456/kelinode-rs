@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 
-use crate::core::{write_core_config, CoreConfigWriteResult};
+use crate::config::SidecarProcessConfig;
+use crate::core::{write_core_config, CoreConfigWriteResult, CoreKind, CorePlan};
 use crate::health::{build_machine_status_payload, HealthReportInput};
 use crate::machine::{MachineStatusPayload, MachineStatusResponse, MachineUpgradeCommand};
 use crate::panel::PanelClient;
@@ -9,7 +10,7 @@ use crate::port_forward::{
     inspect_hysteria_port_forward, repair_hysteria_port_forward, HysteriaPortForwardStatus,
     PortForwardExecutor,
 };
-use crate::process::{core_process_spec, ProcessStatus, ProcessSupervisor};
+use crate::process::{core_process_spec, sidecar_process_spec, ProcessStatus, ProcessSupervisor};
 use crate::runtime::{rebuild_runtime_plan_with_users, RuntimeBootstrapPlan};
 use crate::upgrade::{UpgradeExecutor, UpgradeManager, UpgradeStatus};
 use serde_json::Value;
@@ -18,6 +19,7 @@ use serde_json::Value;
 pub struct RuntimeControlOptions {
     pub machine_id: u32,
     pub core_command: Option<String>,
+    pub sidecar_processes: BTreeMap<String, SidecarProcessConfig>,
     pub start_core: bool,
     pub repair_port_forward: bool,
     pub health: HealthReportInput,
@@ -28,6 +30,7 @@ pub struct RuntimeApplyResult {
     pub core_config: Option<CoreConfigWriteResult>,
     pub sidecar_configs: Vec<CoreConfigWriteResult>,
     pub core_process: Option<ProcessStatus>,
+    pub sidecar_processes: Vec<ProcessStatus>,
     pub hy2_port_forward: HysteriaPortForwardStatus,
     pub machine_status: MachineStatusPayload,
 }
@@ -72,6 +75,7 @@ where
     let mut core_config = None;
     let mut sidecar_configs = Vec::new();
     let mut core_process = None;
+    let mut sidecar_processes = Vec::new();
 
     if let Some(core_plan) = &plan.core_plan {
         let write_result = write_core_config(core_plan).map_err(|err| err.message)?;
@@ -90,7 +94,25 @@ where
     }
 
     for sidecar_plan in &plan.sidecar_core_plans {
-        sidecar_configs.push(write_core_config(sidecar_plan).map_err(|err| err.message)?);
+        let write_result = write_core_config(sidecar_plan).map_err(|err| err.message)?;
+        if options.start_core {
+            if let Some(config) = configured_sidecar_process(sidecar_plan, &options) {
+                let spec = sidecar_process_spec(
+                    sidecar_plan,
+                    &config.command,
+                    &config.args,
+                )
+                .map_err(|err| err.message)?;
+                let status = if write_result.changed {
+                    process_supervisor.reload(&spec)
+                } else {
+                    process_supervisor.start(&spec)
+                }
+                .map_err(|err| err.message)?;
+                sidecar_processes.push(status);
+            }
+        }
+        sidecar_configs.push(write_result);
     }
 
     let hy2_port_forward = if options.repair_port_forward {
@@ -112,9 +134,21 @@ where
         core_config,
         sidecar_configs,
         core_process,
+        sidecar_processes,
         hy2_port_forward,
         machine_status,
     })
+}
+
+fn configured_sidecar_process<'a>(
+    plan: &CorePlan,
+    options: &'a RuntimeControlOptions,
+) -> Option<&'a SidecarProcessConfig> {
+    let CoreKind::Sidecar(name) = &plan.kind else {
+        return None;
+    };
+
+    options.sidecar_processes.get(name)
 }
 
 pub async fn report_runtime_apply_result(
@@ -298,7 +332,9 @@ mod tests {
 
     use serde_json::json;
 
-    use crate::config::{NodeConfig, ResolvedConfig, ResolvedMachineConfig};
+    use crate::config::{
+        NodeConfig, ResolvedConfig, ResolvedMachineConfig, SidecarProcessConfig,
+    };
     use crate::panel::client::{PanelClient, PanelClientOptions};
     use crate::panel::types::{CommonNode, NodeInfo, UserInfo};
     use crate::port_forward::{PortForwardCommand, PortForwardExecutor};
@@ -461,8 +497,74 @@ mod tests {
         assert!(result.core_config.is_none());
         assert_eq!(result.sidecar_configs.len(), 1);
         assert!(result.sidecar_configs[0].changed);
+        assert!(result.sidecar_processes.is_empty());
         assert!(process.starts.is_empty());
         assert!(saved.contains("mieru-secret"));
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn applies_configured_sidecar_processes() {
+        let dir = temp_test_dir("runtime-sidecar-process");
+        let mut resolved = ResolvedConfig {
+            kernel: Default::default(),
+            realtime: Default::default(),
+            machine: ResolvedMachineConfig {
+                enabled: true,
+                continue_on_error: true,
+                profiles: Vec::new(),
+            },
+            agent: Default::default(),
+            nodes: vec![NodeConfig {
+                url: "https://panel.example.test".to_string(),
+                token: "token".to_string(),
+                node_id: 23,
+                machine_id: 3,
+                ..NodeConfig::default()
+            }],
+        };
+        resolved.kernel.config_dir = dir.join("v2node").display().to_string();
+        let node = test_node("mieru", 23);
+        let plan = build_runtime_bootstrap_plan(resolved, vec![node], Vec::new()).unwrap();
+        let mut process = MemoryProcessSupervisor::default();
+        let mut port_forward = FakePortForwardExecutor::default();
+        let mut sidecar_processes = BTreeMap::new();
+        sidecar_processes.insert(
+            "mieru".to_string(),
+            SidecarProcessConfig {
+                command: "/usr/local/bin/mita".to_string(),
+                args: vec!["run".to_string(), "--config".to_string(), "{config}".to_string()],
+            },
+        );
+
+        let result = apply_runtime_plan(
+            &plan,
+            &mut process,
+            &mut port_forward,
+            RuntimeControlOptions {
+                machine_id: 3,
+                start_core: true,
+                sidecar_processes,
+                ..RuntimeControlOptions::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(result.sidecar_processes.len(), 1);
+        assert_eq!(process.starts.len(), 1);
+        assert_eq!(process.starts[0].name, "core:sidecar-mieru");
+        assert_eq!(
+            process.starts[0].args,
+            vec![
+                "run".to_string(),
+                "--config".to_string(),
+                dir.join("v2node")
+                    .join("sidecar-mieru-23.json")
+                    .display()
+                    .to_string()
+            ]
+        );
 
         let _ = fs::remove_dir_all(dir);
     }

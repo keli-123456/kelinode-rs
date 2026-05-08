@@ -2,10 +2,13 @@
 
 use kelinode_rs::config::{AppConfig, MachineProfileConfig, DEFAULT_TIMEOUT_SECS};
 use kelinode_rs::control::{handle_runtime_signal, RuntimeControlOptions, RuntimeLoopSignal};
+use kelinode_rs::core::CoreKind;
 use kelinode_rs::panel::client::{PanelClient, PanelClientOptions};
 use kelinode_rs::panel::contract::NODE_API_CONTRACT_VERSION;
 use kelinode_rs::port_forward::SystemPortForwardExecutor;
-use kelinode_rs::process::{core_process_spec, ProcessSupervisor, SystemProcessSupervisor};
+use kelinode_rs::process::{
+    core_process_spec, sidecar_process_spec, ProcessSupervisor, SystemProcessSupervisor,
+};
 use kelinode_rs::runner::{
     run_runtime_loop_async_with_events, start_realtime_runtime_workers, PanelRuntimeLoop,
     RuntimeLoopExit, RuntimeLoopExitReason, RuntimeLoopOptions,
@@ -184,14 +187,29 @@ where
     P: ProcessSupervisor,
     F: kelinode_rs::port_forward::PortForwardExecutor,
 {
-    let Some(core_plan) = runner.plan.core_plan.as_ref() else {
-        return Ok(());
-    };
-    let spec = core_process_spec(core_plan, None).map_err(|err| err.message)?;
-    runner
-        .process_supervisor
-        .stop(&spec.name)
-        .map_err(|err| err.message)?;
+    if let Some(core_plan) = runner.plan.core_plan.as_ref() {
+        let spec = core_process_spec(core_plan, None).map_err(|err| err.message)?;
+        runner
+            .process_supervisor
+            .stop(&spec.name)
+            .map_err(|err| err.message)?;
+    }
+
+    for sidecar_plan in &runner.plan.sidecar_core_plans {
+        let CoreKind::Sidecar(name) = &sidecar_plan.kind else {
+            continue;
+        };
+        let Some(config) = runner.plan.resolved.kernel.sidecars.get(name) else {
+            continue;
+        };
+        let spec = sidecar_process_spec(sidecar_plan, &config.command, &config.args)
+            .map_err(|err| err.message)?;
+        runner
+            .process_supervisor
+            .stop(&spec.name)
+            .map_err(|err| err.message)?;
+    }
+
     Ok(())
 }
 
@@ -305,6 +323,7 @@ fn runtime_loop_options(
                 })
                 .unwrap_or_default(),
             start_core: true,
+            sidecar_processes: plan.resolved.kernel.sidecars.clone(),
             repair_port_forward: true,
             ..RuntimeControlOptions::default()
         },

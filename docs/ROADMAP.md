@@ -55,6 +55,7 @@
 - Runtime bootstrap preservation of sidecar plans without fake Xray rendering.
 - Mieru sidecar `mita` server config rendering from panel port and user fields.
 - Runtime apply writes sidecar config files while process launch remains explicitly configured.
+- Configurable sidecar process launch using per-protocol command and argument templates.
 - User sync state advancement for delta and full-list responses with empty-list no-change semantics.
 - Runtime user refresh backed by persisted user sync state with delta-first and full-list fallback.
 - Realtime protocol models for websocket messages, receipts, URL derivation, and invalidate actions.
