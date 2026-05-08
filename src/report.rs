@@ -539,6 +539,7 @@ mod tests {
                 port_range: String::new(),
                 security: "none".to_string(),
                 network: "tcp".to_string(),
+                multiplexing: String::new(),
                 network_settings: serde_json::Value::Null,
                 flow: String::new(),
                 cipher: String::new(),
