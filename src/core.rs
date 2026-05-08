@@ -469,8 +469,9 @@ fn validate_keli_core_rs_inbound(inbound: &InboundPlan) -> Result<(), CoreError>
             validate_keli_core_rs_tcp_or_ws_inbound(inbound)?;
             Ok(())
         }
+        "tuic" => validate_keli_core_rs_tuic_inbound(inbound),
         value => Err(CoreError::new(format!(
-            "keli-core-rs native renderer only supports socks/http/shadowsocks/vmess/vless/trojan/anytls tcp and vmess/vless/trojan ws today; inbound {} uses {}",
+            "keli-core-rs native renderer only supports socks/http/shadowsocks/vmess/vless/trojan/anytls tcp, vmess/vless/trojan ws, and tuic tcp relay today; inbound {} uses {}",
             inbound.tag, value
         ))),
     }
@@ -567,6 +568,58 @@ fn validate_keli_core_rs_tls_inbound(inbound: &InboundPlan) -> Result<(), CoreEr
     Ok(())
 }
 
+fn validate_keli_core_rs_tuic_inbound(inbound: &InboundPlan) -> Result<(), CoreError> {
+    if keli_core_rs_transport_network(inbound) != "tuic" {
+        return Err(CoreError::new(format!(
+            "keli-core-rs tuic currently requires tuic transport; inbound {} uses {}",
+            inbound.tag, inbound.network
+        )));
+    }
+    if inbound.security != "tls" {
+        return Err(CoreError::new(format!(
+            "keli-core-rs tuic currently requires tls security; inbound {} uses {}",
+            inbound.tag, inbound.security
+        )));
+    }
+    if inbound.cert_file.trim().is_empty() || inbound.key_file.trim().is_empty() {
+        return Err(CoreError::new(format!(
+            "keli-core-rs tuic tls requires cert_file and key_file on inbound {}",
+            inbound.tag
+        )));
+    }
+    if inbound.reject_unknown_sni {
+        return Err(CoreError::new(format!(
+            "keli-core-rs tuic reject_unknown_sni is not supported yet on inbound {}",
+            inbound.tag
+        )));
+    }
+    if !inbound.flow.trim().is_empty() {
+        return Err(CoreError::new(format!(
+            "keli-core-rs tuic currently does not support flow {}; inbound {}",
+            inbound.flow, inbound.tag
+        )));
+    }
+    if !json_value_is_empty(&inbound.network_settings) {
+        return Err(CoreError::new(format!(
+            "keli-core-rs tuic currently does not support transport settings on inbound {}",
+            inbound.tag
+        )));
+    }
+    if !inbound.congestion_control.trim().is_empty() || inbound.zero_rtt_handshake {
+        return Err(CoreError::new(format!(
+            "keli-core-rs tuic currently does not support custom congestion or zero-rtt on inbound {}",
+            inbound.tag
+        )));
+    }
+    if inbound.users.iter().any(|user| !is_uuid_like(&user.uuid)) {
+        return Err(CoreError::new(format!(
+            "keli-core-rs tuic currently requires UUID users on inbound {}",
+            inbound.tag
+        )));
+    }
+    Ok(())
+}
+
 fn validate_keli_core_rs_websocket_settings(inbound: &InboundPlan) -> Result<(), CoreError> {
     if json_value_is_empty(&inbound.network_settings) {
         return Ok(());
@@ -632,6 +685,15 @@ fn json_value_is_empty(value: &Value) -> bool {
             .as_object()
             .map(|object| object.is_empty())
             .unwrap_or(false)
+}
+
+fn is_uuid_like(value: &str) -> bool {
+    let compact = value
+        .trim()
+        .chars()
+        .filter(|value| *value != '-')
+        .collect::<String>();
+    compact.len() == 32 && compact.chars().all(|value| value.is_ascii_hexdigit())
 }
 
 fn is_keli_core_rs_shadowsocks_cipher(cipher: &str) -> bool {
@@ -2296,6 +2358,46 @@ mod tests {
         assert_eq!(config["inbounds"][0]["tls"]["cert_file"], "/srv/v2node/vmess.cer");
         assert_eq!(config["inbounds"][0]["tls"]["key_file"], "/srv/v2node/vmess.key");
         assert_eq!(config["inbounds"][0]["transport"]["network"], "tcp");
+    }
+
+    #[test]
+    fn renders_keli_core_rs_tuic_tls_settings() {
+        let mut node = test_node("tuic", 65, "");
+        node.security = Security::Tls;
+        node.common.cert_info.as_mut().unwrap().cert_file = "/srv/v2node/tuic.cer".to_string();
+        node.common.cert_info.as_mut().unwrap().key_file = "/srv/v2node/tuic.key".to_string();
+        node.common.cert_info.as_mut().unwrap().cert_domain = "tuic.example.test".to_string();
+        let tag = node.tag.clone();
+        let mut users = std::collections::BTreeMap::new();
+        users.insert(
+            tag,
+            vec![UserInfo {
+                id: 65,
+                uuid: "11111111-1111-1111-1111-111111111111".to_string(),
+                speed_limit: 0,
+                device_limit: 0,
+            }],
+        );
+        let plan = CorePlan::from_nodes_with_users(
+            CoreKind::KeliCoreRs,
+            PathBuf::from("/srv/v2node/keli-core-rs.json"),
+            &[node],
+            &users,
+        )
+        .unwrap();
+
+        let config = render_core_config(&plan).unwrap();
+
+        assert_eq!(config["inbounds"][0]["protocol"], "tuic");
+        assert_eq!(config["inbounds"][0]["transport"]["network"], "tuic");
+        assert_eq!(config["inbounds"][0]["tls"]["server_name"], "tuic.example.test");
+        assert_eq!(config["inbounds"][0]["tls"]["cert_file"], "/srv/v2node/tuic.cer");
+        assert_eq!(config["inbounds"][0]["tls"]["key_file"], "/srv/v2node/tuic.key");
+        assert_eq!(config["inbounds"][0]["tls"]["alpn"][0], "h3");
+        assert_eq!(
+            config["inbounds"][0]["users"][0]["uuid"],
+            "11111111-1111-1111-1111-111111111111"
+        );
     }
 
     #[test]
