@@ -49,6 +49,7 @@
 - HY2 bandwidth/obfs stream rendering and TUIC congestion/0-RTT rendering.
 - Unified node traffic/online activity reporting with legacy endpoint fallback.
 - Per-node activity batch reporting keyed by runtime tag for multi-node machines.
+- Naive and Mieru protocol parsing with explicit Xray rejection until sidecar runtimes are wired.
 - User sync state advancement for delta and full-list responses with empty-list no-change semantics.
 - Runtime user refresh backed by persisted user sync state with delta-first and full-list fallback.
 - Realtime protocol models for websocket messages, receipts, URL derivation, and invalidate actions.

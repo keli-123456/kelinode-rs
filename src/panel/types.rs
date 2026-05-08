@@ -188,6 +188,8 @@ pub enum Protocol {
     Anytls,
     Socks,
     Http,
+    Naive,
+    Mieru,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -296,6 +298,8 @@ impl Protocol {
             "anytls" => Some(Self::Anytls),
             "socks" => Some(Self::Socks),
             "http" => Some(Self::Http),
+            "naive" => Some(Self::Naive),
+            "mieru" => Some(Self::Mieru),
             _ => None,
         }
     }
@@ -311,6 +315,8 @@ impl Protocol {
             Self::Anytls => "anytls",
             Self::Socks => "socks",
             Self::Http => "http",
+            Self::Naive => "naive",
+            Self::Mieru => "mieru",
         }
     }
 }
@@ -462,10 +468,12 @@ mod tests {
             "anytls",
             "socks",
             "http",
+            "naive",
+            "mieru",
         ] {
             assert!(Protocol::parse(protocol).is_some(), "{protocol}");
         }
-        assert!(Protocol::parse("naive").is_none());
+        assert!(Protocol::parse("unknown").is_none());
     }
 
     #[test]

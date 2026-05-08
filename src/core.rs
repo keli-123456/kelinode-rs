@@ -129,6 +129,7 @@ impl CorePlan {
         nodes: &[NodeInfo],
         users_by_node_tag: &BTreeMap<String, Vec<UserInfo>>,
     ) -> Result<Self, CoreError> {
+        reject_sidecar_protocols_for_core(&kind, nodes)?;
         let inbounds = nodes
             .iter()
             .map(|node| {
@@ -152,6 +153,33 @@ impl CorePlan {
     pub fn file_layout(&self) -> CoreFileLayout {
         core_file_layout(&self.config_path)
     }
+}
+
+pub fn sidecar_protocol_name(protocol: Protocol) -> Option<&'static str> {
+    match protocol {
+        Protocol::Naive => Some("naive"),
+        Protocol::Mieru => Some("mieru"),
+        _ => None,
+    }
+}
+
+fn reject_sidecar_protocols_for_core(
+    kind: &CoreKind,
+    nodes: &[NodeInfo],
+) -> Result<(), CoreError> {
+    if !matches!(kind, CoreKind::Xray) {
+        return Ok(());
+    }
+    let Some((node, protocol)) = nodes
+        .iter()
+        .find_map(|node| sidecar_protocol_name(node.protocol).map(|protocol| (node, protocol)))
+    else {
+        return Ok(());
+    };
+    Err(CoreError::new(format!(
+        "protocol {protocol} for node {} requires a sidecar runtime and cannot be rendered into Xray",
+        node.tag
+    )))
 }
 
 pub fn core_file_layout(config_path: impl AsRef<Path>) -> CoreFileLayout {
@@ -1199,6 +1227,21 @@ mod tests {
         assert_eq!(plan.listen_tags.len(), 1);
         assert_eq!(plan.inbounds[0].listen, "::");
         assert!(plan.inbounds[0].fallback_to_ipv4);
+    }
+
+    #[test]
+    fn xray_plan_rejects_sidecar_only_protocols() {
+        let node = test_node("naive", 33, "");
+
+        let err = CorePlan::from_nodes(
+            CoreKind::Xray,
+            PathBuf::from("/srv/v2node/config.json"),
+            &[node],
+        )
+        .unwrap_err();
+
+        assert!(err.message.contains("protocol naive"));
+        assert!(err.message.contains("requires a sidecar runtime"));
     }
 
     #[test]
