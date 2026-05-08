@@ -412,6 +412,18 @@ fn validate_keli_core_rs_inbound(inbound: &InboundPlan) -> Result<(), CoreError>
                     inbound.tag, inbound.security
                 )));
             }
+            if !inbound.flow.trim().is_empty() {
+                return Err(CoreError::new(format!(
+                    "keli-core-rs vless currently does not support flow {}; inbound {}",
+                    inbound.flow, inbound.tag
+                )));
+            }
+            if !json_value_is_empty(&inbound.network_settings) {
+                return Err(CoreError::new(format!(
+                    "keli-core-rs vless currently does not support transport settings on inbound {}",
+                    inbound.tag
+                )));
+            }
             Ok(())
         }
         value => Err(CoreError::new(format!(
@@ -419,6 +431,14 @@ fn validate_keli_core_rs_inbound(inbound: &InboundPlan) -> Result<(), CoreError>
             inbound.tag, value
         ))),
     }
+}
+
+fn json_value_is_empty(value: &Value) -> bool {
+    value.is_null()
+        || value
+            .as_object()
+            .map(|object| object.is_empty())
+            .unwrap_or(false)
 }
 
 fn keli_core_rs_instance_id(plan: &CorePlan) -> String {
@@ -1772,6 +1792,42 @@ mod tests {
         let err = render_core_config(&plan).unwrap_err();
 
         assert!(err.message.contains("tcp transport"));
+    }
+
+    #[test]
+    fn keli_core_rs_rejects_vless_flow_until_core_supports_it() {
+        let mut node = test_node("vless", 48, "");
+        node.common.flow = "xtls-rprx-vision".to_string();
+        let plan = CorePlan::from_nodes(
+            CoreKind::KeliCoreRs,
+            PathBuf::from("/srv/v2node/keli-core-rs.json"),
+            &[node],
+        )
+        .unwrap();
+
+        let err = render_core_config(&plan).unwrap_err();
+
+        assert!(err.message.contains("does not support flow"));
+    }
+
+    #[test]
+    fn keli_core_rs_rejects_vless_transport_settings_until_core_supports_it() {
+        let mut node = test_node("vless", 49, "");
+        node.common.network_settings = json!({
+            "header": {
+                "type": "http"
+            }
+        });
+        let plan = CorePlan::from_nodes(
+            CoreKind::KeliCoreRs,
+            PathBuf::from("/srv/v2node/keli-core-rs.json"),
+            &[node],
+        )
+        .unwrap();
+
+        let err = render_core_config(&plan).unwrap_err();
+
+        assert!(err.message.contains("transport settings"));
     }
 
     #[test]
