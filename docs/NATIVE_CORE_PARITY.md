@@ -40,7 +40,7 @@ The matching core-side gate is `keli-core-rs/docs/PARITY.md`.
 | --- | --- | --- |
 | Domain block | Code path | Renders exact/wildcard/suffix plus `domain:`/`full:`/`keyword:`/`geosite:`/`regexp:` rules. |
 | Direct/default direct | Code path | Native core uses the built-in `direct` outbound. |
-| DNS route | Rejected | Xray renderer still supports DNS route rendering. |
+| DNS route | Partial | Renders default UDP DNS servers and panel DNS routes into native core DNS config. Native core executes domain-scoped UDP DNS resolution; DoH/DoT/TCP DNS remain Xray-only. |
 | Custom outbound route | Partial | Freedom, SOCKS5, and HTTP outbound tags render into native core. Freedom supports direct address/port redirects; SOCKS5/HTTP support TCP proxy tunnels with username/password. SOCKS5 also supports UDP route outbounds through native UDP ASSOCIATE; HTTP UDP remains Xray-only. |
 | IP/port block | Partial | Numeric IP/CIDR, `geoip:`, and port/port-range block rules render into native core; domain targets are resolved lazily for IP matching, and arbitrary geo databases require native core rule files. |
 | Protocol block | Partial | Renders into native core and matches network labels, HTTP proxy plaintext, and UDP payload sniffing for common HTTP/TLS/QUIC/BitTorrent signatures. |

@@ -471,6 +471,7 @@ fn render_keli_core_rs_config(plan: &CorePlan) -> Result<Value, CoreError> {
                     "targets": prefixed_keli_core_rs_protocol_route_targets(inbound, route)?,
                     "action": "block"
                 })),
+                "dns" => {}
                 value => {
                     return Err(CoreError::new(format!(
                         "keli-core-rs route action {value} on inbound {} is not supported yet",
@@ -484,6 +485,7 @@ fn render_keli_core_rs_config(plan: &CorePlan) -> Result<Value, CoreError> {
     Ok(json!({
         "instance_id": keli_core_rs_instance_id(plan),
         "log_level": "info",
+        "dns": render_keli_core_rs_dns(plan)?,
         "inbounds": plan
             .inbounds
             .iter()
@@ -495,6 +497,44 @@ fn render_keli_core_rs_config(plan: &CorePlan) -> Result<Value, CoreError> {
             "enabled": true,
             "per_user": true
         }
+    }))
+}
+
+fn render_keli_core_rs_dns(plan: &CorePlan) -> Result<Value, CoreError> {
+    let mut servers = vec![
+        json!({
+            "address": "1.1.1.1"
+        }),
+        json!({
+            "address": "8.8.8.8"
+        }),
+    ];
+    for inbound in &plan.inbounds {
+        for route in &inbound.routes {
+            if route.action != "dns" {
+                continue;
+            }
+            let Some(address) = route.action_value.as_deref().map(str::trim) else {
+                continue;
+            };
+            if address.is_empty() {
+                continue;
+            }
+            let mut server = Map::new();
+            server.insert("address".to_string(), json!(address));
+            if !route.match_rules.is_empty() {
+                server.insert(
+                    "domains".to_string(),
+                    json!(keli_core_rs_route_targets(inbound, route)?),
+                );
+            }
+            servers.push(Value::Object(server));
+        }
+    }
+
+    Ok(json!({
+        "servers": servers,
+        "query_strategy": "UseIPv4"
     }))
 }
 
@@ -3047,6 +3087,38 @@ mod tests {
         assert_eq!(config["routes"][1]["targets"][0], "ip:10.0.0.0/8");
         assert_eq!(config["routes"][1]["targets"][1], "ip:2001:db8::/32");
         assert_eq!(config["routes"][2]["targets"][0], "port:6881-6889,6969");
+    }
+
+    #[test]
+    fn renders_keli_core_rs_dns_routes() {
+        let mut node = test_node("vless", 43, "");
+        node.common.routes = vec![Route {
+            id: 1,
+            action: "dns".to_string(),
+            match_rules: vec![
+                "geosite:openai".to_string(),
+                "domain:example.com".to_string(),
+            ],
+            action_value: Some("1.1.1.1".to_string()),
+        }];
+        let plan = CorePlan::from_nodes(
+            CoreKind::KeliCoreRs,
+            PathBuf::from("/srv/v2node/keli-core-rs.json"),
+            &[node],
+        )
+        .unwrap();
+
+        let config = render_core_config(&plan).unwrap();
+
+        assert_eq!(config["dns"]["query_strategy"], "UseIPv4");
+        assert_eq!(config["dns"]["servers"][0]["address"], "1.1.1.1");
+        assert_eq!(config["dns"]["servers"][1]["address"], "8.8.8.8");
+        assert_eq!(config["dns"]["servers"][2]["address"], "1.1.1.1");
+        assert_eq!(config["dns"]["servers"][2]["domains"][0], "geosite:openai");
+        assert_eq!(
+            config["dns"]["servers"][2]["domains"][1],
+            "domain:example.com"
+        );
     }
 
     #[test]
