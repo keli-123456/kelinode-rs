@@ -268,7 +268,10 @@ pub fn subscription_proxy_error_response(
     error: &SubscriptionProxyRouteError,
 ) -> SubscriptionProxyClientResponse {
     let mut headers = BTreeMap::new();
-    headers.insert("Content-Type".to_string(), "text/plain; charset=utf-8".to_string());
+    headers.insert(
+        "Content-Type".to_string(),
+        "text/plain; charset=utf-8".to_string(),
+    );
     let message = match error {
         SubscriptionProxyRouteError::NotFound => "not found",
         SubscriptionProxyRouteError::MethodNotAllowed => "method not allowed",
@@ -283,7 +286,10 @@ pub fn subscription_proxy_error_response(
 
 fn subscription_proxy_bad_request_response(error: &str) -> SubscriptionProxyClientResponse {
     let mut headers = BTreeMap::new();
-    headers.insert("Content-Type".to_string(), "text/plain; charset=utf-8".to_string());
+    headers.insert(
+        "Content-Type".to_string(),
+        "text/plain; charset=utf-8".to_string(),
+    );
     SubscriptionProxyClientResponse {
         status: 400,
         headers,
@@ -408,11 +414,10 @@ impl SubscriptionProxyRuntimeManager {
                 };
                 match mode {
                     SubscriptionProxyServeMode::HttpFallback => {
-                        self.main_server = Some(
-                            spawn_subscription_proxy_main_http_fallback_server(
+                        self.main_server =
+                            Some(spawn_subscription_proxy_main_http_fallback_server(
                                 plan_subscription_proxy_main_server(config, mode),
-                            )?,
-                        );
+                            )?);
                         Ok(())
                     }
                     SubscriptionProxyServeMode::Https => {
@@ -476,7 +481,9 @@ pub fn normalize_subscription_proxy_config(
             continue;
         }
         if !is_valid_upstream_base_url(&upstream_base_url) {
-            return Err(format!("invalid subscription proxy upstream for site {site_id}"));
+            return Err(format!(
+                "invalid subscription proxy upstream for site {site_id}"
+            ));
         }
         let dedupe_key = site_id.to_ascii_lowercase();
         if !seen.insert(dedupe_key) {
@@ -570,8 +577,8 @@ pub fn plan_subscription_proxy_request(
     else {
         return Err(SubscriptionProxyRouteError::NotFound);
     };
-    let token = percent_decode_path_segment(token_part)
-        .map_err(SubscriptionProxyRouteError::BadGateway)?;
+    let token =
+        percent_decode_path_segment(token_part).map_err(SubscriptionProxyRouteError::BadGateway)?;
     if token.trim().is_empty() {
         return Err(SubscriptionProxyRouteError::NotFound);
     }
@@ -580,7 +587,10 @@ pub fn plan_subscription_proxy_request(
         .map_err(SubscriptionProxyRouteError::BadGateway)?;
     let mut headers = forwarded_headers(&request.headers);
     if !request.host.trim().is_empty() {
-        headers.insert("X-Forwarded-Host".to_string(), request.host.trim().to_string());
+        headers.insert(
+            "X-Forwarded-Host".to_string(),
+            request.host.trim().to_string(),
+        );
     }
     if let Some(ip) = client_ip(&request.remote_addr) {
         headers.insert("X-Forwarded-For".to_string(), ip);
@@ -666,12 +676,9 @@ pub fn spawn_subscription_proxy_main_http_fallback_server(
     let profiles = plan.profiles.clone();
     let max_response_bytes = plan.max_response_bytes;
     spawn_subscription_proxy_blocking_server(listen, move |request| {
-        handle_subscription_proxy_request(
-            &profiles,
-            &request,
-            max_response_bytes,
-            |upstream| fetch_subscription_proxy_upstream_blocking(upstream, max_response_bytes),
-        )
+        handle_subscription_proxy_request(&profiles, &request, max_response_bytes, |upstream| {
+            fetch_subscription_proxy_upstream_blocking(upstream, max_response_bytes)
+        })
         .unwrap_or_else(|err| subscription_proxy_error_response(&err))
     })
 }
@@ -857,7 +864,10 @@ where
                 return Err(SubscriptionProxyRouteError::NotFound);
             };
             let mut headers = BTreeMap::new();
-            headers.insert("Content-Type".to_string(), "text/plain; charset=utf-8".to_string());
+            headers.insert(
+                "Content-Type".to_string(),
+                "text/plain; charset=utf-8".to_string(),
+            );
             Ok(SubscriptionProxyClientResponse {
                 status: 200,
                 headers,
@@ -1195,8 +1205,7 @@ where
         };
     }
 
-    let certificate_owner_site_id =
-        subscription_proxy_certificate_owner_site_id(&config.profiles);
+    let certificate_owner_site_id = subscription_proxy_certificate_owner_site_id(&config.profiles);
     match plan_subscription_proxy_serve_mode(config, &mut file_readable) {
         Ok(serve_mode) => {
             let mode = match serve_mode {
@@ -1316,7 +1325,9 @@ fn normalize_certificate_name(value: &str) -> Result<String, String> {
         .chars()
         .any(|character| character.is_control() || matches!(character, '/' | ',' | '\\'))
     {
-        return Err(format!("invalid subscription proxy certificate domain: {name}"));
+        return Err(format!(
+            "invalid subscription proxy certificate domain: {name}"
+        ));
     }
     Ok(name.to_string())
 }
@@ -1326,7 +1337,9 @@ fn certificate_subject_alt_name(name: &str) -> Result<String, String> {
         return Ok(format!("IP:{ip}"));
     }
     if !is_valid_dns_certificate_name(name) {
-        return Err(format!("invalid subscription proxy certificate domain: {name}"));
+        return Err(format!(
+            "invalid subscription proxy certificate domain: {name}"
+        ));
     }
     Ok(format!("DNS:{name}"))
 }
@@ -1354,8 +1367,12 @@ fn create_subscription_proxy_key_parent(key_file: &str) -> Result<(), String> {
     if parent.as_os_str().is_empty() {
         return Ok(());
     }
-    fs::create_dir_all(parent)
-        .map_err(|err| format!("create subscription proxy key dir {}: {err}", parent.display()))
+    fs::create_dir_all(parent).map_err(|err| {
+        format!(
+            "create subscription proxy key dir {}: {err}",
+            parent.display()
+        )
+    })
 }
 
 fn run_openssl(args: &[String]) -> Result<Vec<u8>, String> {
@@ -1430,10 +1447,7 @@ fn serve_subscription_proxy_listener<F>(
     }
 }
 
-fn serve_subscription_proxy_stream<F>(
-    mut stream: TcpStream,
-    handler: Arc<F>,
-) -> Result<(), String>
+fn serve_subscription_proxy_stream<F>(mut stream: TcpStream, handler: Arc<F>) -> Result<(), String>
 where
     F: Fn(SubscriptionProxyInboundRequest) -> SubscriptionProxyClientResponse,
 {
@@ -1650,13 +1664,9 @@ fn percent_encode_path_segment(value: &str) -> String {
     let mut output = String::new();
     for byte in value.as_bytes() {
         match *byte {
-            b'A'..=b'Z'
-            | b'a'..=b'z'
-            | b'0'..=b'9'
-            | b'-'
-            | b'_'
-            | b'.'
-            | b'~' => output.push(*byte as char),
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                output.push(*byte as char)
+            }
             _ => output.push_str(&format!("%{byte:02X}")),
         }
     }
@@ -1672,10 +1682,10 @@ fn percent_decode_path_segment(value: &str) -> Result<String, String> {
             if index + 2 >= bytes.len() {
                 return Err("invalid escaped token".to_string());
             }
-            let hi = hex_value(bytes[index + 1])
-                .ok_or_else(|| "invalid escaped token".to_string())?;
-            let lo = hex_value(bytes[index + 2])
-                .ok_or_else(|| "invalid escaped token".to_string())?;
+            let hi =
+                hex_value(bytes[index + 1]).ok_or_else(|| "invalid escaped token".to_string())?;
+            let lo =
+                hex_value(bytes[index + 2]).ok_or_else(|| "invalid escaped token".to_string())?;
             output.push((hi << 4) | lo);
             index += 3;
         } else {
@@ -1745,31 +1755,28 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::{
-        build_subscription_upstream_url, normalize_subscription_proxy_config,
-        handle_subscription_proxy_http_request, handle_subscription_proxy_request,
+        build_subscription_upstream_url, handle_subscription_proxy_http_request,
+        handle_subscription_proxy_request, normalize_subscription_proxy_config,
         normalize_subscription_proxy_config_with_public_ipv4,
-        parse_subscription_proxy_http_request,
+        parse_subscription_proxy_http_request, plan_subscription_proxy_apply,
+        plan_subscription_proxy_certificate_file, plan_subscription_proxy_csr,
         plan_subscription_proxy_health_response, plan_subscription_proxy_http_request,
         plan_subscription_proxy_http_server, plan_subscription_proxy_main_server,
         plan_subscription_proxy_request, plan_subscription_proxy_response,
-        plan_subscription_proxy_apply, plan_subscription_proxy_certificate_file,
-        plan_subscription_proxy_csr,
         plan_subscription_proxy_serve_mode, plan_subscription_proxy_validation_file,
         prepare_subscription_proxy_certificate_status,
-        prepare_subscription_proxy_certificate_status_with_file_writes,
-        read_limited_upstream_body, read_subscription_proxy_http_request_head,
-        render_subscription_proxy_http_response,
-        resolve_subscription_certificate_domain, subscription_proxy_certificate_owner_site_id,
-        subscription_proxy_error_response,
-        spawn_subscription_proxy_http_challenge_server,
+        prepare_subscription_proxy_certificate_status_with_file_writes, read_limited_upstream_body,
+        read_subscription_proxy_http_request_head, render_subscription_proxy_http_response,
+        resolve_subscription_certificate_domain, spawn_subscription_proxy_http_challenge_server,
         spawn_subscription_proxy_main_http_fallback_server,
+        subscription_proxy_certificate_owner_site_id, subscription_proxy_error_response,
         subscription_proxy_file_readable, subscription_proxy_fingerprint,
-        write_subscription_proxy_file, SubscriptionProxyApplyAction, SubscriptionProxyFileWrite,
-        SubscriptionProxyClientResponse, SubscriptionProxyMainServerPlan,
-        SubscriptionProxyInboundRequest, SubscriptionProxyRoute, SubscriptionProxyRouteError,
-        SubscriptionProxyRuntimeManager, SubscriptionProxyServeMode, SubscriptionProxyStatus,
-        SubscriptionProxyUpstreamResponse,
-        DEFAULT_CHALLENGE_DIR, DEFAULT_HTTPS_LISTEN, DEFAULT_MAX_RESPONSE_BYTES,
+        write_subscription_proxy_file, SubscriptionProxyApplyAction,
+        SubscriptionProxyClientResponse, SubscriptionProxyFileWrite,
+        SubscriptionProxyInboundRequest, SubscriptionProxyMainServerPlan, SubscriptionProxyRoute,
+        SubscriptionProxyRouteError, SubscriptionProxyRuntimeManager, SubscriptionProxyServeMode,
+        SubscriptionProxyStatus, SubscriptionProxyUpstreamResponse, DEFAULT_CHALLENGE_DIR,
+        DEFAULT_HTTPS_LISTEN, DEFAULT_MAX_RESPONSE_BYTES,
     };
     use crate::config::{
         SubscriptionProxyConfig, SubscriptionProxyProfile, SubscriptionProxyZeroSslConfig,
@@ -1792,7 +1799,10 @@ mod tests {
         assert_eq!(config.max_response_bytes, DEFAULT_MAX_RESPONSE_BYTES);
         assert_eq!(config.profiles.len(), 1);
         assert_eq!(config.profiles[0].site_id, "site-a");
-        assert_eq!(config.profiles[0].upstream_base_url, "https://panel.example.test");
+        assert_eq!(
+            config.profiles[0].upstream_base_url,
+            "https://panel.example.test"
+        );
         assert_eq!(config.profiles[0].subscribe_path, "answer/land");
     }
 
@@ -2068,8 +2078,8 @@ mod tests {
 
     #[test]
     fn certificate_file_plan_requires_cert_path_only_when_payload_exists() {
-        let none = plan_subscription_proxy_certificate_file(&SubscriptionProxyConfig::default())
-            .unwrap();
+        let none =
+            plan_subscription_proxy_certificate_file(&SubscriptionProxyConfig::default()).unwrap();
         assert!(none.is_none());
 
         let err = plan_subscription_proxy_certificate_file(&SubscriptionProxyConfig {
@@ -2111,16 +2121,11 @@ mod tests {
         assert!(err.contains("key file is empty"));
 
         let err =
-            plan_subscription_proxy_csr("/etc/v2node/private.key", "bad/name", true)
-                .unwrap_err();
+            plan_subscription_proxy_csr("/etc/v2node/private.key", "bad/name", true).unwrap_err();
         assert!(err.contains("invalid subscription proxy certificate domain"));
 
-        let err = plan_subscription_proxy_csr(
-            "/etc/v2node/private.key",
-            "-bad.example.test",
-            true,
-        )
-        .unwrap_err();
+        let err = plan_subscription_proxy_csr("/etc/v2node/private.key", "-bad.example.test", true)
+            .unwrap_err();
         assert!(err.contains("invalid subscription proxy certificate domain"));
     }
 
@@ -2311,7 +2316,10 @@ mod tests {
         );
 
         assert_eq!(plan.action, SubscriptionProxyApplyAction::Start);
-        assert_eq!(plan.serve_mode, Some(SubscriptionProxyServeMode::HttpFallback));
+        assert_eq!(
+            plan.serve_mode,
+            Some(SubscriptionProxyServeMode::HttpFallback)
+        );
         assert_eq!(plan.status.status, "running");
         assert_eq!(plan.status.mode, "http");
         assert_eq!(plan.status.certificate_owner_site_id, "site-a");
@@ -2624,10 +2632,8 @@ mod tests {
         })
         .unwrap();
 
-        let plan = plan_subscription_proxy_main_server(
-            &config,
-            SubscriptionProxyServeMode::HttpFallback,
-        );
+        let plan =
+            plan_subscription_proxy_main_server(&config, SubscriptionProxyServeMode::HttpFallback);
 
         assert_eq!(plan.listen, "0.0.0.0:8443");
         assert_eq!(plan.mode, SubscriptionProxyServeMode::HttpFallback);
@@ -2753,7 +2759,10 @@ mod tests {
         .unwrap();
 
         assert_eq!(response.status, 200);
-        assert_eq!(response.headers["Content-Type"], "text/plain; charset=utf-8");
+        assert_eq!(
+            response.headers["Content-Type"],
+            "text/plain; charset=utf-8"
+        );
         assert!(response.body.is_empty());
 
         let err = handle_subscription_proxy_http_request(
@@ -2788,8 +2797,8 @@ mod tests {
     #[test]
     fn reads_http_request_head_with_size_limit() {
         let raw = b"GET /health HTTP/1.1\r\nHost: proxy.example.test\r\n\r\n";
-        let head = read_subscription_proxy_http_request_head(Cursor::new(raw.to_vec()), 1024)
-            .unwrap();
+        let head =
+            read_subscription_proxy_http_request_head(Cursor::new(raw.to_vec()), 1024).unwrap();
         assert_eq!(head, raw);
 
         let err = read_subscription_proxy_http_request_head(
@@ -2825,23 +2834,21 @@ mod tests {
 
     #[test]
     fn server_spawn_boundaries_do_not_fake_https_support() {
-        let err = spawn_subscription_proxy_main_http_fallback_server(
-            SubscriptionProxyMainServerPlan {
+        let err =
+            spawn_subscription_proxy_main_http_fallback_server(SubscriptionProxyMainServerPlan {
                 listen: "127.0.0.1:0".to_string(),
                 mode: SubscriptionProxyServeMode::Https,
                 cert_file: "/etc/v2node/fullchain.pem".to_string(),
                 key_file: "/etc/v2node/private.key".to_string(),
                 max_response_bytes: 1024,
                 profiles: Vec::new(),
-            },
-        )
-        .unwrap_err();
+            })
+            .unwrap_err();
         assert!(err.contains("only supports HTTP fallback"));
 
-        let handle = spawn_subscription_proxy_http_challenge_server(
-            SubscriptionProxyConfig::default(),
-        )
-        .unwrap();
+        let handle =
+            spawn_subscription_proxy_http_challenge_server(SubscriptionProxyConfig::default())
+                .unwrap();
         assert!(handle.is_none());
     }
 
@@ -2941,8 +2948,7 @@ mod tests {
         let body = read_limited_upstream_body(Cursor::new(b"hello".to_vec()), 5).unwrap();
         assert_eq!(body, b"hello");
 
-        let err =
-            read_limited_upstream_body(Cursor::new(b"too-large".to_vec()), 3).unwrap_err();
+        let err = read_limited_upstream_body(Cursor::new(b"too-large".to_vec()), 3).unwrap_err();
         assert_eq!(err, "upstream response too large");
     }
 

@@ -46,7 +46,7 @@
 - Xray stats and user traffic policy defaults needed for traffic reporting.
 - Runtime tick core-plan rebuild path for refreshed panel user sets.
 - SOCKS/HTTP account rendering and AnyTLS client/padding rendering from panel users.
-- HY2 bandwidth/obfs stream rendering and TUIC congestion/0-RTT rendering.
+- HY2 bandwidth/obfs stream rendering, Xray TUIC congestion/0-RTT rendering, and native TUIC congestion rendering.
 - Unified node traffic/online activity reporting with legacy endpoint fallback.
 - Per-node activity batch reporting keyed by runtime tag for multi-node machines.
 - Naive and Mieru protocol parsing with explicit Xray rejection until sidecar runtimes are wired.
@@ -109,7 +109,7 @@
 - Optional subscription proxy HTTP challenge server planning from `http_listen`.
 - Main subscription proxy server planning from `https_listen` for HTTPS and HTTP fallback modes.
 - Machine-profile panel reporting for subscription-proxy-only deployments.
-- Experimental `keli-core-rs` native config rendering for SOCKS/HTTP inbounds, users, direct outbound, stats, and domain block routes.
+- Experimental `keli-core-rs` native config rendering for SOCKS/HTTP, Shadowsocks, VMess, VLESS, Trojan, AnyTLS, Hysteria2, TUIC, common TCP/WS/HTTPUpgrade/gRPC transports, VLESS REALITY config, users, direct outbound, stats, and domain block routes.
 - `keli-core-rs` process spec using `run-config <config>` while keeping Xray as the stable default core path.
 - `kernel.type` runtime selection for `xray` and the opt-in `keli-core-rs` plan.
 - Deterministic local control address wiring for `keli-core-rs run-config --control`.

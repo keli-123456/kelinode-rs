@@ -1,0 +1,59 @@
+# Native Core Renderer Parity
+
+This document tracks what `kelinode-rs` is allowed to render into the experimental `keli-core-rs` schema.
+
+Default production rendering remains `xray`. The native Rust core path is selected only with:
+
+```yaml
+kernel:
+  type: keli-core-rs
+```
+
+The matching core-side gate is `keli-core-rs/docs/PARITY.md`.
+
+## Renderer Rules
+
+- Render only options that `keli-core-rs` validates and has a runtime path for.
+- Reject panel options that are only supported by Xray or sidecars.
+- Keep Naive and Mieru outside the native core renderer.
+- Preserve production `xray` rendering compatibility even when native rendering rejects a feature.
+
+## Protocol Renderer Matrix
+
+| Protocol | Native renderer status | Rendered into `keli-core-rs` | Intentionally rejected for native path |
+| --- | --- | --- | --- |
+| SOCKS | Code path | TCP listener, account users | None known |
+| HTTP proxy | Code path | TCP listener, account users | None known |
+| Shadowsocks | Partial | AEAD TCP+UDP ciphers supported by `keli-core-rs`; empty panel network renders as `tcp,udp` | Unsupported ciphers, WS/HTTP obfs transport settings, non-TCP/non-UDP transport |
+| VLESS | Partial | TCP, UDP command, WS, HTTPUpgrade, gRPC, TLS, Vision, REALITY | XUDP/Mux, KCP/QUIC/XHTTP/H2, unsupported flow, REALITY on non-TCP |
+| VMess | Partial | TCP, UDP command, WS, HTTPUpgrade, gRPC, TLS | Legacy alterId, KCP/QUIC/XHTTP/H2 |
+| Trojan | Partial | TCP, UDP ASSOCIATE over stream, WS, HTTPUpgrade, gRPC, TLS | KCP/QUIC/XHTTP/H2 |
+| AnyTLS | Partial | TCP users, UDP-over-TCP, padding scheme | Real-client matrix |
+| Hysteria2 | Partial | TLS, bandwidth options, salamander obfs | Transport settings, non-salamander obfs |
+| TUIC | Partial | TLS, UUID users, cubic/bbr/new_reno congestion | zero-RTT, non-UUID users |
+| Naive | Sidecar | Caddyfile sidecar plan | Native core rendering |
+| Mieru | Sidecar | `mita` JSON sidecar plan | Native core rendering |
+
+## Route Renderer Matrix
+
+| Route type | Native renderer status | Notes |
+| --- | --- | --- |
+| Domain block | Code path | Renders exact/wildcard/suffix and `domain:`/`full:`/`keyword:` rules; `geosite:`/`regexp:` stay on Xray. |
+| Direct/default direct | Code path | Native core uses the built-in `direct` outbound. |
+| DNS route | Rejected | Xray renderer still supports DNS route rendering. |
+| Custom outbound route | Rejected | Native core does not yet have custom outbound data paths. |
+| IP/port block | Partial | Numeric IP/CIDR and port/port-range block rules render into native core; `geoip:` remains on Xray. |
+| Protocol block | Rejected | Native core does not yet expose application protocol sniffing results. |
+
+## Code-Complete Checklist Before Interop
+
+For every protocol that is moved from partial to production candidate:
+
+- `kelinode-rs` has renderer tests for the exact panel fields.
+- `keli-core-rs` has validator tests for accepted and rejected options.
+- `keli-core-rs` has listener/data-path tests for auth, forwarding, and traffic drain.
+- `keli-core-rs` enforces device limits by user and client IP, so multiple sessions from the same IP count as one device.
+- `kelinode-rs` rejects every panel option that the native core cannot execute.
+- The same panel config still renders through the production `xray` path where supported.
+
+The native renderer must fail loudly rather than silently dropping panel fields.

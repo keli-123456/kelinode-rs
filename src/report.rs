@@ -54,17 +54,11 @@ pub trait NodeActivitySender {
 }
 
 pub trait KeliCoreTrafficDrainer {
-    fn drain_traffic(
-        &mut self,
-        minimum_bytes: u64,
-    ) -> Result<Vec<KeliCoreTrafficRecord>, String>;
+    fn drain_traffic(&mut self, minimum_bytes: u64) -> Result<Vec<KeliCoreTrafficRecord>, String>;
 }
 
 impl KeliCoreTrafficDrainer for KeliCoreControlClient {
-    fn drain_traffic(
-        &mut self,
-        minimum_bytes: u64,
-    ) -> Result<Vec<KeliCoreTrafficRecord>, String> {
+    fn drain_traffic(&mut self, minimum_bytes: u64) -> Result<Vec<KeliCoreTrafficRecord>, String> {
         KeliCoreControlClient::drain_traffic(self, minimum_bytes).map_err(|err| err.message)
     }
 }
@@ -105,15 +99,16 @@ pub fn keli_core_traffic_snapshots(
             continue;
         };
 
-        let snapshot = snapshots.entry(record.node_tag.clone()).or_insert_with(
-            NodeActivitySnapshot::default,
-        );
+        let snapshot = snapshots
+            .entry(record.node_tag.clone())
+            .or_insert_with(NodeActivitySnapshot::default);
         merge_user_traffic(
             &mut snapshot.traffic,
             uid,
             u64_to_i64(record.upload),
             u64_to_i64(record.download),
         );
+        merge_online_ips(&mut snapshot.online, uid, &record.online_ips);
     }
     snapshots
 }
@@ -129,6 +124,19 @@ fn merge_user_traffic(traffic: &mut Vec<UserTraffic>, uid: u32, upload: i64, dow
         upload,
         download,
     });
+}
+
+fn merge_online_ips(online: &mut BTreeMap<u32, Vec<String>>, uid: u32, ips: &[String]) {
+    if ips.is_empty() {
+        return;
+    }
+    let entry = online.entry(uid).or_default();
+    for ip in ips {
+        if !entry.iter().any(|value| value == ip) {
+            entry.push(ip.clone());
+        }
+    }
+    entry.sort();
 }
 
 fn u64_to_i64(value: u64) -> i64 {
@@ -309,13 +317,13 @@ mod tests {
 
     use super::{
         drain_keli_core_activity_snapshots, keli_core_traffic_snapshots,
-        report_activity_batch_with, report_activity_with_fallback, KeliCoreTrafficDrainer,
-        NodeActivityReport, NodeActivitySender, NodeActivitySnapshot, NodeActivityTarget,
-        runtime_activity_targets,
+        report_activity_batch_with, report_activity_with_fallback, runtime_activity_targets,
+        KeliCoreTrafficDrainer, NodeActivityReport, NodeActivitySender, NodeActivitySnapshot,
+        NodeActivityTarget,
     };
+    use crate::config::{AgentConfig, NodeConfig, ResolvedConfig, ResolvedMachineConfig};
     use crate::core::{CoreKind, CorePlan, InboundPlan, InboundUserPlan};
     use crate::core_control::KeliCoreTrafficRecord;
-    use crate::config::{AgentConfig, NodeConfig, ResolvedConfig, ResolvedMachineConfig};
     use crate::panel::types::{CommonNode, NodeInfo, UserTraffic};
     use crate::runtime::build_runtime_bootstrap_plan;
 
@@ -408,6 +416,20 @@ mod tests {
         assert_eq!(snapshots["node-a"].traffic[0].uid, 7);
         assert_eq!(snapshots["node-a"].traffic[0].upload, 11);
         assert_eq!(snapshots["node-a"].traffic[0].download, 22);
+
+        let records = vec![traffic_record_with_ips(
+            "node-a",
+            "uuid-a",
+            1,
+            1,
+            vec!["198.51.100.7".to_string()],
+        )];
+        let snapshots = keli_core_traffic_snapshots(&core_plan(), &records);
+
+        assert_eq!(
+            snapshots["node-a"].online[&7],
+            vec!["198.51.100.7".to_string()]
+        );
     }
 
     #[test]
@@ -417,8 +439,7 @@ mod tests {
             minimums: Vec::new(),
         };
 
-        let snapshots = drain_keli_core_activity_snapshots(&core_plan(), &mut drainer, 64)
-            .unwrap();
+        let snapshots = drain_keli_core_activity_snapshots(&core_plan(), &mut drainer, 64).unwrap();
 
         assert_eq!(drainer.minimums, vec![64]);
         assert_eq!(snapshots["node-a"].traffic[0].uid, 8);
@@ -542,6 +563,23 @@ mod tests {
             user_uuid: user_uuid.to_string(),
             upload,
             download,
+            online_ips: Vec::new(),
+        }
+    }
+
+    fn traffic_record_with_ips(
+        node_tag: &str,
+        user_uuid: &str,
+        upload: u64,
+        download: u64,
+        online_ips: Vec<String>,
+    ) -> KeliCoreTrafficRecord {
+        KeliCoreTrafficRecord {
+            node_tag: node_tag.to_string(),
+            user_uuid: user_uuid.to_string(),
+            upload,
+            download,
+            online_ips,
         }
     }
 

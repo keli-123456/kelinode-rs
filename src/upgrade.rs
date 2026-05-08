@@ -122,7 +122,10 @@ impl UpgradeExecutor for SystemUpgradeExecutor {
             let stderr = String::from_utf8_lossy(&output.stderr);
             let stdout = String::from_utf8_lossy(&output.stdout);
             let detail = first_non_empty(stderr.trim(), stdout.trim());
-            Err(format!("update launcher exited with {}: {detail}", output.status))
+            Err(format!(
+                "update launcher exited with {}: {detail}",
+                output.status
+            ))
         }
     }
 }
@@ -148,7 +151,10 @@ pub fn upgrade_launch_plan(target_version: &str) -> UpgradeLaunchPlan {
             command: "systemd-run".to_string(),
             args: vec![
                 "--unit".to_string(),
-                format!("v2node-self-update-{}", sanitize_systemd_unit_part(&target_version)),
+                format!(
+                    "v2node-self-update-{}",
+                    sanitize_systemd_unit_part(&target_version)
+                ),
                 "--description=v2node self update".to_string(),
                 "/bin/sh".to_string(),
                 "-c".to_string(),
@@ -177,7 +183,10 @@ fn upgrade_shell_script(target_version: &str) -> String {
     let mut lines = Vec::new();
     lines.push("set -eu".to_string());
     lines.push(format!("target_version={}", shell_quote(target_version)));
-    lines.push(format!("install_script_url={}", shell_quote(INSTALL_SCRIPT_URL)));
+    lines.push(format!(
+        "install_script_url={}",
+        shell_quote(INSTALL_SCRIPT_URL)
+    ));
     lines.push("install_dir=/usr/local/v2node".to_string());
     lines.push(
         "backup_dir=\"/usr/local/v2node.backup.${target_version}.$(date +%Y%m%d%H%M%S)\""
@@ -197,7 +206,9 @@ fn upgrade_shell_script(target_version: &str) -> String {
     lines.push("if [ -d \"$install_dir\" ]; then".to_string());
     lines.push("  cp -a \"$install_dir\" \"$backup_dir\"".to_string());
     lines.push("fi".to_string());
-    lines.push("if ! curl -fsSL \"$install_script_url\" -o /tmp/v2node-install.sh; then".to_string());
+    lines.push(
+        "if ! curl -fsSL \"$install_script_url\" -o /tmp/v2node-install.sh; then".to_string(),
+    );
     lines.push("  restore_backup".to_string());
     lines.push("  exit 1".to_string());
     lines.push("fi".to_string());
@@ -207,7 +218,8 @@ fn upgrade_shell_script(target_version: &str) -> String {
     lines.push("fi".to_string());
     lines.push("installed_version=\"\"".to_string());
     lines.push("if [ -f \"$install_dir/.installed_version\" ]; then".to_string());
-    lines.push("  installed_version=$(cat \"$install_dir/.installed_version\" || true)".to_string());
+    lines
+        .push("  installed_version=$(cat \"$install_dir/.installed_version\" || true)".to_string());
     lines.push("elif [ -x \"$install_dir/v2node\" ]; then".to_string());
     lines.push("  installed_version=$(\"$install_dir/v2node\" version 2>/dev/null | awk '{print $2}' | head -n 1 || true)".to_string());
     lines.push("fi".to_string());
@@ -257,9 +269,7 @@ fn sanitize_systemd_unit_part(value: &str) -> String {
             output.push('-');
         }
     }
-    let output = output
-        .trim_matches(|ch| ch == '.' || ch == '-')
-        .to_string();
+    let output = output.trim_matches(|ch| ch == '.' || ch == '-').to_string();
     if output.is_empty() {
         "latest".to_string()
     } else {
@@ -284,11 +294,13 @@ fn tool_exists(tool: &str) -> bool {
     let Some(paths) = env::var_os("PATH") else {
         return false;
     };
-    env::split_paths(&paths).any(|path| candidate_tool_paths(&path, tool).iter().any(|candidate| {
-        std::fs::metadata(candidate)
-            .map(|metadata| metadata.is_file())
-            .unwrap_or(false)
-    }))
+    env::split_paths(&paths).any(|path| {
+        candidate_tool_paths(&path, tool).iter().any(|candidate| {
+            std::fs::metadata(candidate)
+                .map(|metadata| metadata.is_file())
+                .unwrap_or(false)
+        })
+    })
 }
 
 fn candidate_tool_paths(path: &PathBuf, tool: &str) -> Vec<PathBuf> {
@@ -386,8 +398,12 @@ mod tests {
             target_version: "v1.2.4".to_string(),
         };
 
-        manager.request(command.clone(), "v1.2.3", 200, &mut executor).unwrap();
-        manager.request(command, "v1.2.3", 201, &mut executor).unwrap();
+        manager
+            .request(command.clone(), "v1.2.3", 200, &mut executor)
+            .unwrap();
+        manager
+            .request(command, "v1.2.3", 201, &mut executor)
+            .unwrap();
 
         assert_eq!(executor.launches.len(), 1);
         assert_eq!(manager.current_status().unwrap().started_at, 200);

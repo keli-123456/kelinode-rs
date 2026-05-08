@@ -4,8 +4,8 @@ use crate::config::SidecarProcessConfig;
 use crate::core::{write_core_config, CoreConfigWriteResult, CoreKind, CorePlan};
 use crate::health::{build_machine_status_payload, HealthReportInput};
 use crate::machine::{MachineStatusPayload, MachineStatusResponse, MachineUpgradeCommand};
-use crate::panel::PanelClient;
 use crate::panel::types::UserInfo;
+use crate::panel::PanelClient;
 use crate::port_forward::{
     inspect_hysteria_port_forward, repair_hysteria_port_forward, HysteriaPortForwardStatus,
     PortForwardExecutor,
@@ -97,13 +97,9 @@ where
         let write_result = write_core_config(sidecar_plan).map_err(|err| err.message)?;
         if options.start_core {
             if let Some(config) = configured_sidecar_process(sidecar_plan, &options) {
-                let spec = sidecar_process_spec(
-                    sidecar_plan,
-                    &config.command,
-                    &config.args,
-                    &config.env,
-                )
-                .map_err(|err| err.message)?;
+                let spec =
+                    sidecar_process_spec(sidecar_plan, &config.command, &config.args, &config.env)
+                        .map_err(|err| err.message)?;
                 let status = if write_result.changed {
                     process_supervisor.reload(&spec)
                 } else {
@@ -131,8 +127,7 @@ where
     if health.sidecars.is_empty() {
         health.sidecars = sidecar_processes.clone();
     }
-    let machine_status =
-        build_machine_status_payload(options.machine_id, &report_plan, health);
+    let machine_status = build_machine_status_payload(options.machine_id, &report_plan, health);
 
     Ok(RuntimeApplyResult {
         core_config,
@@ -318,12 +313,9 @@ pub fn handle_runtime_signal<E: UpgradeExecutor>(
     upgrade_executor: &mut E,
 ) -> Result<Option<UpgradeStatus>, String> {
     match signal {
-        RuntimeLoopSignal::Upgrade(command) => upgrade_manager.request(
-            command.clone(),
-            current_version,
-            now,
-            upgrade_executor,
-        ),
+        RuntimeLoopSignal::Upgrade(command) => {
+            upgrade_manager.request(command.clone(), current_version, now, upgrade_executor)
+        }
         RuntimeLoopSignal::Continue | RuntimeLoopSignal::Reload => Ok(None),
     }
 }
@@ -336,9 +328,7 @@ mod tests {
 
     use serde_json::json;
 
-    use crate::config::{
-        NodeConfig, ResolvedConfig, ResolvedMachineConfig, SidecarProcessConfig,
-    };
+    use crate::config::{NodeConfig, ResolvedConfig, ResolvedMachineConfig, SidecarProcessConfig};
     use crate::panel::client::{PanelClient, PanelClientOptions};
     use crate::panel::types::{CommonNode, NodeInfo, UserInfo};
     use crate::port_forward::{PortForwardCommand, PortForwardExecutor};
@@ -375,9 +365,8 @@ mod tests {
             }],
         };
         resolved.kernel.config_dir = dir.join("v2node").display().to_string();
-        let plan =
-            build_runtime_bootstrap_plan(resolved, vec![test_node("vless", 7)], Vec::new())
-                .unwrap();
+        let plan = build_runtime_bootstrap_plan(resolved, vec![test_node("vless", 7)], Vec::new())
+            .unwrap();
         let mut process = MemoryProcessSupervisor::default();
         let mut port_forward = FakePortForwardExecutor::default();
 
@@ -401,10 +390,7 @@ mod tests {
             result.machine_status.status["core"]["status"]["state"],
             json!("running")
         );
-        assert_eq!(
-            result.machine_status.status["runtime"]["nodes"],
-            json!(1)
-        );
+        assert_eq!(result.machine_status.status["runtime"]["nodes"], json!(1));
 
         let _ = fs::remove_dir_all(dir);
     }
@@ -495,8 +481,7 @@ mod tests {
             },
         )
         .unwrap();
-        let saved = fs::read_to_string(dir.join("v2node").join("sidecar-mieru-22.json"))
-            .unwrap();
+        let saved = fs::read_to_string(dir.join("v2node").join("sidecar-mieru-22.json")).unwrap();
 
         assert!(result.core_config.is_none());
         assert_eq!(result.sidecar_configs.len(), 1);
@@ -692,7 +677,10 @@ mod tests {
         let filtered = machine_status_payload_for_client(&payload, &client);
 
         assert_eq!(filtered.machine_id, 2);
-        assert_eq!(filtered.status["node_failures"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            filtered.status["node_failures"].as_array().unwrap().len(),
+            1
+        );
         assert_eq!(filtered.status["node_failures"][0]["node_id"], json!(8));
     }
 
@@ -798,10 +786,9 @@ mod tests {
             target_version: "v0.4.1".to_string(),
         });
 
-        let status =
-            handle_runtime_signal(&signal, &mut manager, "v0.4.0", 300, &mut executor)
-                .unwrap()
-                .unwrap();
+        let status = handle_runtime_signal(&signal, &mut manager, "v0.4.0", 300, &mut executor)
+            .unwrap()
+            .unwrap();
 
         assert_eq!(status.status, "running");
         assert_eq!(status.target_version, "v0.4.1");

@@ -118,8 +118,7 @@ pub fn build_hysteria_port_forward_rules(
                     continue;
                 }
             };
-        if let Some(conflict_port) =
-            find_target_port_conflict(&ranges, target_port, &target_ports)
+        if let Some(conflict_port) = find_target_port_conflict(&ranges, target_port, &target_ports)
         {
             errors.push(format!(
                 "node {} port {:?} overlaps server_port {} from another HY2 node",
@@ -186,8 +185,7 @@ pub fn inspect_hysteria_port_forward<E: PortForwardExecutor>(
     executor: &mut E,
 ) -> HysteriaPortForwardStatus {
     let (rules, errors) = build_hysteria_port_forward_rules(infos);
-    let mut status =
-        new_hysteria_port_forward_status(&rules, &errors, executor.running_as_root());
+    let mut status = new_hysteria_port_forward_status(&rules, &errors, executor.running_as_root());
 
     for tool in HYSTERIA_PORT_FORWARD_TOOLS {
         status
@@ -203,8 +201,7 @@ pub fn repair_hysteria_port_forward<E: PortForwardExecutor>(
     executor: &mut E,
 ) -> HysteriaPortForwardStatus {
     let (rules, errors) = build_hysteria_port_forward_rules(infos);
-    let mut status =
-        new_hysteria_port_forward_status(&rules, &errors, executor.running_as_root());
+    let mut status = new_hysteria_port_forward_status(&rules, &errors, executor.running_as_root());
 
     if !status.running_as_root {
         for tool in HYSTERIA_PORT_FORWARD_TOOLS {
@@ -275,9 +272,7 @@ pub fn cleanup_hysteria_port_forward<E: PortForwardExecutor>(
     status
 }
 
-pub fn describe_port_forward_rules(
-    rules: &[PortForwardRule],
-) -> Vec<HysteriaPortForwardRuleSpec> {
+pub fn describe_port_forward_rules(rules: &[PortForwardRule]) -> Vec<HysteriaPortForwardRuleSpec> {
     rules
         .iter()
         .map(|rule| HysteriaPortForwardRuleSpec {
@@ -373,9 +368,7 @@ pub fn inspect_port_forward_specs(
     }
 }
 
-pub fn hysteria_port_forward_needs_repair(
-    status: &HysteriaPortForwardStatus,
-) -> bool {
+pub fn hysteria_port_forward_needs_repair(status: &HysteriaPortForwardStatus) -> bool {
     status.tools.iter().any(|tool| {
         tool.available
             && tool.error.is_empty()
@@ -389,8 +382,14 @@ pub fn reconcile_port_forward_commands(
     prerouting_output: &str,
 ) -> Vec<PortForwardCommand> {
     let mut commands = delete_port_forward_commands(tool, prerouting_output);
-    commands.push(command(tool, vec!["-t", "nat", "-F", HYSTERIA_PORT_FORWARD_CHAIN]));
-    commands.push(command(tool, vec!["-t", "nat", "-X", HYSTERIA_PORT_FORWARD_CHAIN]));
+    commands.push(command(
+        tool,
+        vec!["-t", "nat", "-F", HYSTERIA_PORT_FORWARD_CHAIN],
+    ));
+    commands.push(command(
+        tool,
+        vec!["-t", "nat", "-X", HYSTERIA_PORT_FORWARD_CHAIN],
+    ));
 
     for rule in rules {
         let mut args = vec!["-t", "nat", "-A", "PREROUTING", "-p", "udp"]
@@ -426,8 +425,14 @@ pub fn cleanup_port_forward_commands(
     prerouting_output: &str,
 ) -> Vec<PortForwardCommand> {
     let mut commands = delete_port_forward_commands(tool, prerouting_output);
-    commands.push(command(tool, vec!["-t", "nat", "-F", HYSTERIA_PORT_FORWARD_CHAIN]));
-    commands.push(command(tool, vec!["-t", "nat", "-X", HYSTERIA_PORT_FORWARD_CHAIN]));
+    commands.push(command(
+        tool,
+        vec!["-t", "nat", "-F", HYSTERIA_PORT_FORWARD_CHAIN],
+    ));
+    commands.push(command(
+        tool,
+        vec!["-t", "nat", "-X", HYSTERIA_PORT_FORWARD_CHAIN],
+    ));
     commands
 }
 
@@ -957,9 +962,9 @@ mod tests {
         build_hysteria_port_forward_rules, cleanup_hysteria_port_forward,
         expected_port_forward_specs, hysteria_port_forward_needs_repair,
         inspect_hysteria_port_forward, inspect_port_forward_specs,
-        list_port_forward_specs_from_output, new_hysteria_port_forward_status,
-        parse_iptables_spec, parse_port_forward_matchers, reconcile_port_forward_commands,
-        repair_hysteria_port_forward, PortForwardCommand, PortForwardExecutor,
+        list_port_forward_specs_from_output, new_hysteria_port_forward_status, parse_iptables_spec,
+        parse_port_forward_matchers, reconcile_port_forward_commands, repair_hysteria_port_forward,
+        PortForwardCommand, PortForwardExecutor,
     };
     use crate::panel::types::{CommonNode, NodeInfo};
 
@@ -987,7 +992,13 @@ mod tests {
             .collect::<Vec<_>>();
         let want = string_rows(vec![
             vec!["--dport", "30000:30002", "to=443"],
-            vec!["-m", "multiport", "--dports", "20000,20001,20002", "to=8443"],
+            vec![
+                "-m",
+                "multiport",
+                "--dports",
+                "20000,20001,20002",
+                "to=8443",
+            ],
             vec!["--dport", "21000:21010", "to=9443"],
             vec!["--dport", "440:442", "to=443"],
             vec!["--dport", "444:445", "to=443"],
@@ -1000,13 +1011,17 @@ mod tests {
     #[test]
     fn splits_large_multiport_matchers() {
         let matchers =
-            parse_port_forward_matchers("1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16")
-                .unwrap();
+            parse_port_forward_matchers("1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16").unwrap();
 
         assert_eq!(matchers.len(), 2);
         assert_eq!(
             matchers[0].args,
-            strings(vec!["-m", "multiport", "--dports", "1,2,3,4,5,6,7,8,9,10,11,12,13,14,15"])
+            strings(vec![
+                "-m",
+                "multiport",
+                "--dports",
+                "1,2,3,4,5,6,7,8,9,10,11,12,13,14,15"
+            ])
         );
         assert_eq!(matchers[1].args, strings(vec!["--dport", "16"]));
     }
@@ -1113,7 +1128,10 @@ mod tests {
 
     #[test]
     fn inspect_port_forward_specs_detects_drift() {
-        let infos = vec![node(1, 443, "30000-30002", ""), node(2, 8443, "20000-20002", "")];
+        let infos = vec![
+            node(1, 443, "30000-30002", ""),
+            node(2, 8443, "20000-20002", ""),
+        ];
         let (rules, errors) = build_hysteria_port_forward_rules(&infos);
         assert!(errors.is_empty());
         let output = [
@@ -1160,27 +1178,90 @@ mod tests {
             })
             .collect::<Vec<_>>();
         let want = string_rows(vec![
-            vec!["iptables", "-t", "nat", "-D", "PREROUTING", "-p", "udp", "-j", "V2NODE-HY2"],
             vec![
-                "iptables", "-t", "nat", "-D", "PREROUTING", "-p", "udp", "--dport",
-                "10000:10002", "-j", "V2NODE-HY2",
+                "iptables",
+                "-t",
+                "nat",
+                "-D",
+                "PREROUTING",
+                "-p",
+                "udp",
+                "-j",
+                "V2NODE-HY2",
             ],
             vec![
-                "iptables", "-t", "nat", "-D", "PREROUTING", "-p", "udp", "--dport",
-                "30000:30002", "-m", "comment", "--comment", "V2NODE-HY2", "-j",
-                "REDIRECT", "--to-ports", "443",
+                "iptables",
+                "-t",
+                "nat",
+                "-D",
+                "PREROUTING",
+                "-p",
+                "udp",
+                "--dport",
+                "10000:10002",
+                "-j",
+                "V2NODE-HY2",
+            ],
+            vec![
+                "iptables",
+                "-t",
+                "nat",
+                "-D",
+                "PREROUTING",
+                "-p",
+                "udp",
+                "--dport",
+                "30000:30002",
+                "-m",
+                "comment",
+                "--comment",
+                "V2NODE-HY2",
+                "-j",
+                "REDIRECT",
+                "--to-ports",
+                "443",
             ],
             vec!["iptables", "-t", "nat", "-F", "V2NODE-HY2"],
             vec!["iptables", "-t", "nat", "-X", "V2NODE-HY2"],
             vec![
-                "iptables", "-t", "nat", "-A", "PREROUTING", "-p", "udp", "--dport",
-                "30000:30002", "-m", "comment", "--comment", "V2NODE-HY2", "-j",
-                "REDIRECT", "--to-ports", "443",
+                "iptables",
+                "-t",
+                "nat",
+                "-A",
+                "PREROUTING",
+                "-p",
+                "udp",
+                "--dport",
+                "30000:30002",
+                "-m",
+                "comment",
+                "--comment",
+                "V2NODE-HY2",
+                "-j",
+                "REDIRECT",
+                "--to-ports",
+                "443",
             ],
             vec![
-                "iptables", "-t", "nat", "-A", "PREROUTING", "-p", "udp", "-m",
-                "multiport", "--dports", "20000,20001", "-m", "comment", "--comment",
-                "V2NODE-HY2", "-j", "REDIRECT", "--to-ports", "8443",
+                "iptables",
+                "-t",
+                "nat",
+                "-A",
+                "PREROUTING",
+                "-p",
+                "udp",
+                "-m",
+                "multiport",
+                "--dports",
+                "20000,20001",
+                "-m",
+                "comment",
+                "--comment",
+                "V2NODE-HY2",
+                "-j",
+                "REDIRECT",
+                "--to-ports",
+                "8443",
             ],
         ]);
 
@@ -1218,7 +1299,11 @@ mod tests {
         let infos = vec![node(1, 443, "30000-30002", "")];
         let mut executor = FakePortForwardExecutor::non_root();
         executor.available.insert("iptables".to_string());
-        executor.output("iptables", &["-t", "nat", "-S", "PREROUTING"], Ok(String::new()));
+        executor.output(
+            "iptables",
+            &["-t", "nat", "-S", "PREROUTING"],
+            Ok(String::new()),
+        );
 
         let status = repair_hysteria_port_forward(&infos, &mut executor);
 

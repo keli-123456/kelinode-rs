@@ -82,10 +82,7 @@ pub fn compare_user_list(old: &[UserInfo], new: &[UserInfo]) -> UserListDiff {
     diff
 }
 
-pub fn apply_user_delta_body(
-    state: &UserSyncState,
-    delta: &UserDeltaBody,
-) -> UserSyncStepResult {
+pub fn apply_user_delta_body(state: &UserSyncState, delta: &UserDeltaBody) -> UserSyncStepResult {
     let mut next_state = state.clone();
     next_state.revision = delta.revision;
 
@@ -115,10 +112,7 @@ pub fn apply_user_delta_body(
     }
 }
 
-pub fn apply_full_user_list(
-    state: &UserSyncState,
-    users: &[UserInfo],
-) -> UserSyncStepResult {
+pub fn apply_full_user_list(state: &UserSyncState, users: &[UserInfo]) -> UserSyncStepResult {
     if users.is_empty() {
         return UserSyncStepResult {
             state: state.clone(),
@@ -143,9 +137,7 @@ fn user_map_by_uuid(users: &[UserInfo]) -> BTreeMap<String, UserInfo> {
 }
 
 fn user_changed(old: &UserInfo, new: &UserInfo) -> bool {
-    old.id != new.id
-        || old.speed_limit != new.speed_limit
-        || old.device_limit != new.device_limit
+    old.id != new.id || old.speed_limit != new.speed_limit || old.device_limit != new.device_limit
 }
 
 pub fn user_sync_state_path(config_dir: &str, api_host: &str, node_id: u32) -> String {
@@ -169,10 +161,7 @@ pub fn load_user_sync_state(path: impl AsRef<Path>) -> Result<UserSyncState, Str
         .map_err(|err| format!("decode user sync state {}: {err}", path.display()))
 }
 
-pub fn save_user_sync_state(
-    path: impl AsRef<Path>,
-    state: &UserSyncState,
-) -> Result<(), String> {
+pub fn save_user_sync_state(path: impl AsRef<Path>, state: &UserSyncState) -> Result<(), String> {
     let path = path.as_ref();
     let data = serde_json::to_vec(state)
         .map_err(|err| format!("encode user sync state {}: {err}", path.display()))?;
@@ -216,11 +205,7 @@ mod tests {
 
     #[test]
     fn apply_user_delta_deletes_adds_and_updates_by_uuid() {
-        let old = vec![
-            user(1, "a", 0, 1),
-            user(2, "b", 0, 1),
-            user(3, "c", 0, 1),
-        ];
+        let old = vec![user(1, "a", 0, 1), user(2, "b", 0, 1), user(3, "c", 0, 1)];
         let deleted = vec![user(2, "b", 0, 1), user(99, "missing", 0, 1)];
         let upsert = vec![user(3, "c", 10, 1), user(4, "d", 0, 2)];
 

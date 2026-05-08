@@ -3,11 +3,7 @@ use std::pin::Pin;
 
 use futures_util::{SinkExt, StreamExt};
 use tokio::net::TcpStream;
-use tokio_tungstenite::{
-    connect_async,
-    tungstenite::Message,
-    MaybeTlsStream, WebSocketStream,
-};
+use tokio_tungstenite::{connect_async, tungstenite::Message, MaybeTlsStream, WebSocketStream};
 
 use crate::realtime::{
     build_realtime_dial_url, realtime_runtime_task, RealtimeMessage, RealtimeOptions,
@@ -62,18 +58,18 @@ impl RealtimeTransport for TokioTungsteniteTransport {
                 };
                 let frame = frame.map_err(|err| format!("read realtime message: {err}"))?;
                 match frame {
-                    Message::Text(text) => match serde_json::from_str::<RealtimeMessage>(
-                        text.as_str(),
-                    ) {
-                        Ok(message) => return Ok(Some(message)),
-                        Err(_) => continue,
-                    },
-                    Message::Binary(bytes) => match serde_json::from_slice::<RealtimeMessage>(
-                        bytes.as_ref(),
-                    ) {
-                        Ok(message) => return Ok(Some(message)),
-                        Err(_) => continue,
-                    },
+                    Message::Text(text) => {
+                        match serde_json::from_str::<RealtimeMessage>(text.as_str()) {
+                            Ok(message) => return Ok(Some(message)),
+                            Err(_) => continue,
+                        }
+                    }
+                    Message::Binary(bytes) => {
+                        match serde_json::from_slice::<RealtimeMessage>(bytes.as_ref()) {
+                            Ok(message) => return Ok(Some(message)),
+                            Err(_) => continue,
+                        }
+                    }
                     Message::Ping(bytes) => {
                         self.stream
                             .send(Message::Pong(bytes))
@@ -184,13 +180,7 @@ mod tests {
             || 200,
             |task, source| {
                 tasks.push(task);
-                vec![build_realtime_receipt(
-                    "users",
-                    source,
-                    "received",
-                    "",
-                    201,
-                )]
+                vec![build_realtime_receipt("users", source, "received", "", 201)]
             },
         )
         .await

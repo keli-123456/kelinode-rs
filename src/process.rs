@@ -111,9 +111,9 @@ impl ProcessSupervisor for SystemProcessSupervisor {
             command.current_dir(working_dir);
         }
 
-        let child = command.spawn().map_err(|err| {
-            ProcessError::new(format!("start process {}: {err}", spec.name))
-        })?;
+        let child = command
+            .spawn()
+            .map_err(|err| ProcessError::new(format!("start process {}: {err}", spec.name)))?;
         let status = ProcessStatus::running(&spec.name, child.id());
         self.children.insert(spec.name.clone(), child);
         self.statuses.insert(spec.name.clone(), status.clone());
@@ -141,12 +141,12 @@ impl ProcessSupervisor for SystemProcessSupervisor {
                 Ok(status)
             }
             None => {
-                child.kill().map_err(|err| {
-                    ProcessError::new(format!("stop process {name}: {err}"))
-                })?;
-                let exit = child.wait().map_err(|err| {
-                    ProcessError::new(format!("wait process {name}: {err}"))
-                })?;
+                child
+                    .kill()
+                    .map_err(|err| ProcessError::new(format!("stop process {name}: {err}")))?;
+                let exit = child
+                    .wait()
+                    .map_err(|err| ProcessError::new(format!("wait process {name}: {err}")))?;
                 let status = ProcessStatus {
                     name: name.to_string(),
                     pid: None,
@@ -161,9 +161,10 @@ impl ProcessSupervisor for SystemProcessSupervisor {
 
     fn status(&mut self, name: &str) -> Result<ProcessStatus, ProcessError> {
         let exit_code = if let Some(child) = self.children.get_mut(name) {
-            match child.try_wait().map_err(|err| {
-                ProcessError::new(format!("inspect process {name}: {err}"))
-            })? {
+            match child
+                .try_wait()
+                .map_err(|err| ProcessError::new(format!("inspect process {name}: {err}")))?
+            {
                 Some(exit) => Some(exit.code()),
                 None => return Ok(ProcessStatus::running(name, child.id())),
             }
@@ -242,7 +243,9 @@ pub fn sidecar_process_spec(
     env: &BTreeMap<String, String>,
 ) -> Result<ProcessSpec, ProcessError> {
     let CoreKind::Sidecar(_) = &plan.kind else {
-        return Err(ProcessError::new("sidecar process spec requires a sidecar core plan"));
+        return Err(ProcessError::new(
+            "sidecar process spec requires a sidecar core plan",
+        ));
     };
     let command = command.trim();
     if command.is_empty() {
@@ -281,10 +284,7 @@ fn default_core_command(kind: &CoreKind) -> Option<&'static str> {
     }
 }
 
-fn core_process_args(
-    kind: &CoreKind,
-    config_path: &PathBuf,
-) -> Result<Vec<String>, ProcessError> {
+fn core_process_args(kind: &CoreKind, config_path: &PathBuf) -> Result<Vec<String>, ProcessError> {
     let config = config_path.display().to_string();
     match kind {
         CoreKind::Xray => Ok(vec!["run".to_string(), "-config".to_string(), config]),
@@ -423,10 +423,7 @@ mod tests {
             &plan,
             "/usr/local/bin/mieru",
             &["run".to_string(), "-c".to_string(), "{config}".to_string()],
-            &BTreeMap::from([(
-                "MITA_CONFIG_JSON_FILE".to_string(),
-                "{config}".to_string(),
-            )]),
+            &BTreeMap::from([("MITA_CONFIG_JSON_FILE".to_string(), "{config}".to_string())]),
         )
         .unwrap();
 
@@ -452,13 +449,8 @@ mod tests {
             inbounds: Vec::new(),
         };
 
-        let err = sidecar_process_spec(
-            &plan,
-            "/usr/local/bin/naive",
-            &[],
-            &BTreeMap::new(),
-        )
-        .unwrap_err();
+        let err =
+            sidecar_process_spec(&plan, "/usr/local/bin/naive", &[], &BTreeMap::new()).unwrap_err();
 
         assert!(err.message.contains("requires a sidecar core plan"));
     }
@@ -472,13 +464,8 @@ mod tests {
             inbounds: Vec::new(),
         };
 
-        let err = sidecar_process_spec(
-            &plan,
-            "  ",
-            &["{config}".to_string()],
-            &BTreeMap::new(),
-        )
-        .unwrap_err();
+        let err = sidecar_process_spec(&plan, "  ", &["{config}".to_string()], &BTreeMap::new())
+            .unwrap_err();
 
         assert!(err.message.contains("sidecar command is not configured"));
     }

@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::fs;
+use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 
 use serde_json::{json, Map, Value};
@@ -179,12 +180,7 @@ pub fn split_core_plans_for_nodes(
     nodes: &[NodeInfo],
     users_by_node_tag: &BTreeMap<String, Vec<UserInfo>>,
 ) -> Result<CorePlanBundle, CoreError> {
-    split_core_plans_for_nodes_with_kind(
-        CoreKind::Xray,
-        config_path,
-        nodes,
-        users_by_node_tag,
-    )
+    split_core_plans_for_nodes_with_kind(CoreKind::Xray, config_path, nodes, users_by_node_tag)
 }
 
 pub fn split_core_plans_for_nodes_with_kind(
@@ -240,14 +236,15 @@ pub fn sidecar_config_path(
 ) -> PathBuf {
     let base = base_config_path.as_ref();
     let dir = base.parent().unwrap_or_else(|| Path::new("."));
-    let extension = if protocol == "naive" { "Caddyfile" } else { "json" };
+    let extension = if protocol == "naive" {
+        "Caddyfile"
+    } else {
+        "json"
+    };
     dir.join(format!("sidecar-{protocol}-{node_id}.{extension}"))
 }
 
-fn reject_sidecar_protocols_for_core(
-    kind: &CoreKind,
-    nodes: &[NodeInfo],
-) -> Result<(), CoreError> {
+fn reject_sidecar_protocols_for_core(kind: &CoreKind, nodes: &[NodeInfo]) -> Result<(), CoreError> {
     if !matches!(kind, CoreKind::Xray) {
         return Ok(());
     }
@@ -405,7 +402,15 @@ fn render_keli_core_rs_config(plan: &CorePlan) -> Result<Value, CoreError> {
             }
             match route.action.as_str() {
                 "block" => routes.push(json!({
-                    "targets": &route.match_rules,
+                    "targets": keli_core_rs_block_route_targets(inbound, route)?,
+                    "action": "block"
+                })),
+                "block_ip" => routes.push(json!({
+                    "targets": prefixed_keli_core_rs_ip_route_targets(inbound, route)?,
+                    "action": "block"
+                })),
+                "block_port" => routes.push(json!({
+                    "targets": prefixed_keli_core_rs_port_route_targets(inbound, route)?,
                     "action": "block"
                 })),
                 value => {
@@ -442,9 +447,162 @@ fn render_keli_core_rs_config(plan: &CorePlan) -> Result<Value, CoreError> {
     }))
 }
 
+fn keli_core_rs_block_route_targets(
+    inbound: &InboundPlan,
+    route: &RoutePlan,
+) -> Result<Vec<String>, CoreError> {
+    route
+        .match_rules
+        .iter()
+        .map(|rule| {
+            let rule = rule.trim();
+            if rule.is_empty() {
+                return Err(CoreError::new(format!(
+                    "keli-core-rs empty block rule on inbound {} is not supported",
+                    inbound.tag
+                )));
+            }
+            let normalized = rule.to_ascii_lowercase();
+            if let Some(value) = normalized.strip_prefix("ip:") {
+                if !is_keli_core_rs_ip_route_rule(value) {
+                    return Err(CoreError::new(format!(
+                        "keli-core-rs block rule {rule} on inbound {} is not supported yet",
+                        inbound.tag
+                    )));
+                }
+            } else if let Some(value) = normalized.strip_prefix("port:") {
+                if !is_keli_core_rs_port_route_rule(value) {
+                    return Err(CoreError::new(format!(
+                        "keli-core-rs block rule {rule} on inbound {} is not supported yet",
+                        inbound.tag
+                    )));
+                }
+            } else if let Some(value) = normalized.strip_prefix("network:") {
+                if !matches!(value.trim(), "tcp" | "udp") {
+                    return Err(CoreError::new(format!(
+                        "keli-core-rs block rule {rule} on inbound {} is not supported yet",
+                        inbound.tag
+                    )));
+                }
+            } else if let Some(value) = normalized.strip_prefix("domain:") {
+                if value.trim().trim_start_matches('.').is_empty() {
+                    return Err(CoreError::new(format!(
+                        "keli-core-rs block rule {rule} on inbound {} is not supported yet",
+                        inbound.tag
+                    )));
+                }
+            } else if let Some(value) = normalized.strip_prefix("full:") {
+                if value.trim().trim_matches(['[', ']']).is_empty() {
+                    return Err(CoreError::new(format!(
+                        "keli-core-rs block rule {rule} on inbound {} is not supported yet",
+                        inbound.tag
+                    )));
+                }
+            } else if let Some(value) = normalized.strip_prefix("keyword:") {
+                if value.trim().is_empty() {
+                    return Err(CoreError::new(format!(
+                        "keli-core-rs block rule {rule} on inbound {} is not supported yet",
+                        inbound.tag
+                    )));
+                }
+            } else if normalized.starts_with("geoip:")
+                || normalized.starts_with("geosite:")
+                || normalized.starts_with("regexp:")
+                || normalized.starts_with("protocol:")
+            {
+                return Err(CoreError::new(format!(
+                    "keli-core-rs block rule {rule} on inbound {} is not supported yet",
+                    inbound.tag
+                )));
+            }
+            Ok(rule.to_string())
+        })
+        .collect()
+}
+
+fn prefixed_keli_core_rs_ip_route_targets(
+    inbound: &InboundPlan,
+    route: &RoutePlan,
+) -> Result<Vec<String>, CoreError> {
+    route
+        .match_rules
+        .iter()
+        .map(|rule| {
+            let rule = rule.trim();
+            if !is_keli_core_rs_ip_route_rule(rule) {
+                return Err(CoreError::new(format!(
+                    "keli-core-rs block_ip rule {rule} on inbound {} is not supported yet",
+                    inbound.tag
+                )));
+            }
+            Ok(format!("ip:{rule}"))
+        })
+        .collect()
+}
+
+fn prefixed_keli_core_rs_port_route_targets(
+    inbound: &InboundPlan,
+    route: &RoutePlan,
+) -> Result<Vec<String>, CoreError> {
+    route
+        .match_rules
+        .iter()
+        .map(|rule| {
+            let rule = rule.trim();
+            if !is_keli_core_rs_port_route_rule(rule) {
+                return Err(CoreError::new(format!(
+                    "keli-core-rs block_port rule {rule} on inbound {} is not supported yet",
+                    inbound.tag
+                )));
+            }
+            Ok(format!("port:{rule}"))
+        })
+        .collect()
+}
+
+fn is_keli_core_rs_ip_route_rule(rule: &str) -> bool {
+    let rule = rule.trim().trim_matches(['[', ']']);
+    if rule.parse::<IpAddr>().is_ok() {
+        return true;
+    }
+    let Some((ip, prefix)) = rule.split_once('/') else {
+        return false;
+    };
+    let Ok(ip) = ip.trim().parse::<IpAddr>() else {
+        return false;
+    };
+    let Ok(prefix) = prefix.trim().parse::<u8>() else {
+        return false;
+    };
+    match ip {
+        IpAddr::V4(_) => prefix <= 32,
+        IpAddr::V6(_) => prefix <= 128,
+    }
+}
+
+fn is_keli_core_rs_port_route_rule(rule: &str) -> bool {
+    rule.split(',').all(|item| {
+        let item = item.trim();
+        if item.is_empty() {
+            return false;
+        }
+        if let Some((start, end)) = item.split_once('-') {
+            let Ok(start) = start.trim().parse::<u16>() else {
+                return false;
+            };
+            let Ok(end) = end.trim().parse::<u16>() else {
+                return false;
+            };
+            return start <= end;
+        }
+        item.parse::<u16>().is_ok()
+    })
+}
+
 fn validate_keli_core_rs_inbound(inbound: &InboundPlan) -> Result<(), CoreError> {
+    validate_keli_core_rs_protocol_scoped_fields(inbound)?;
     match inbound.protocol.as_str() {
-        "socks" | "http" => Ok(()),
+        "socks" | "http" => validate_keli_core_rs_plain_tcp_inbound(inbound),
         "shadowsocks" => {
             validate_keli_core_rs_plain_tcp_inbound(inbound)?;
             if !is_keli_core_rs_shadowsocks_cipher(&inbound.cipher) {
@@ -457,12 +615,6 @@ fn validate_keli_core_rs_inbound(inbound: &InboundPlan) -> Result<(), CoreError>
         }
         "anytls" => {
             validate_keli_core_rs_plain_tcp_inbound(inbound)?;
-            if !inbound.padding_scheme.is_empty() {
-                return Err(CoreError::new(format!(
-                    "keli-core-rs anytls currently does not support padding scheme on inbound {}",
-                    inbound.tag
-                )));
-            }
             Ok(())
         }
         "vless" | "trojan" | "vmess" => {
@@ -478,12 +630,61 @@ fn validate_keli_core_rs_inbound(inbound: &InboundPlan) -> Result<(), CoreError>
     }
 }
 
+fn validate_keli_core_rs_protocol_scoped_fields(inbound: &InboundPlan) -> Result<(), CoreError> {
+    let protocol = inbound.protocol.as_str();
+    if protocol != "shadowsocks" && !inbound.cipher.trim().is_empty() {
+        return Err(CoreError::new(format!(
+            "keli-core-rs {protocol} does not support cipher on inbound {}",
+            inbound.tag
+        )));
+    }
+    if protocol != "anytls" && !inbound.padding_scheme.is_empty() {
+        return Err(CoreError::new(format!(
+            "keli-core-rs {protocol} does not support paddingScheme on inbound {}",
+            inbound.tag
+        )));
+    }
+
+    let has_hysteria2_options = inbound.up_mbps > 0
+        || inbound.down_mbps > 0
+        || inbound.ignore_client_bandwidth
+        || !inbound.obfs.trim().is_empty()
+        || !inbound.obfs_password.trim().is_empty();
+    if protocol != "hysteria" && has_hysteria2_options {
+        return Err(CoreError::new(format!(
+            "keli-core-rs {protocol} does not support hysteria2 bandwidth/obfs options on inbound {}",
+            inbound.tag
+        )));
+    }
+
+    let has_tuic_options =
+        !inbound.congestion_control.trim().is_empty() || inbound.zero_rtt_handshake;
+    if protocol != "tuic" && has_tuic_options {
+        return Err(CoreError::new(format!(
+            "keli-core-rs {protocol} does not support tuic options on inbound {}",
+            inbound.tag
+        )));
+    }
+
+    Ok(())
+}
+
 fn validate_keli_core_rs_plain_tcp_inbound(inbound: &InboundPlan) -> Result<(), CoreError> {
     let protocol = inbound.protocol.as_str();
-    let network = first_non_empty(inbound.network.trim(), "tcp");
-    if network != "tcp" {
+    let network = first_non_empty(inbound.network.trim(), "tcp").to_ascii_lowercase();
+    let network_supported = if protocol == "shadowsocks" {
+        matches!(network.as_str(), "tcp" | "tcp,udp")
+    } else {
+        network == "tcp"
+    };
+    if !network_supported {
+        let expected = if protocol == "shadowsocks" {
+            "tcp or tcp,udp"
+        } else {
+            "tcp"
+        };
         return Err(CoreError::new(format!(
-            "keli-core-rs {protocol} currently supports only tcp transport; inbound {} uses {}",
+            "keli-core-rs {protocol} currently supports only {expected} transport; inbound {} uses {}",
             inbound.tag, network
         )));
     }
@@ -512,13 +713,15 @@ fn validate_keli_core_rs_tcp_or_ws_inbound(inbound: &InboundPlan) -> Result<(), 
             inbound.tag, network
         )));
     }
-    if !matches!(inbound.security.as_str(), "none" | "tls") {
+    if !matches!(inbound.security.as_str(), "none" | "tls" | "reality") {
         return Err(CoreError::new(format!(
-            "keli-core-rs {protocol} currently supports only security none/tls; inbound {} uses {}",
+            "keli-core-rs {protocol} currently supports only security none/tls/reality; inbound {} uses {}",
             inbound.tag, inbound.security
         )));
     }
-    if inbound.security == "tls" {
+    if inbound.security == "reality" {
+        validate_keli_core_rs_reality_inbound(inbound)?;
+    } else if inbound.security == "tls" {
         validate_keli_core_rs_tls_inbound(inbound)?;
     }
     validate_keli_core_rs_flow(inbound, &network)?;
@@ -562,10 +765,57 @@ fn validate_keli_core_rs_flow(inbound: &InboundPlan, network: &str) -> Result<()
             inbound.tag, network
         )));
     }
-    if inbound.security != "tls" {
+    if !matches!(inbound.security.as_str(), "tls" | "reality") {
         return Err(CoreError::new(format!(
-            "keli-core-rs vless vision currently requires tls security; inbound {} uses {}",
+            "keli-core-rs vless vision currently requires tls or reality security; inbound {} uses {}",
             inbound.tag, inbound.security
+        )));
+    }
+    Ok(())
+}
+
+fn validate_keli_core_rs_reality_inbound(inbound: &InboundPlan) -> Result<(), CoreError> {
+    let network = keli_core_rs_transport_network(inbound);
+    if inbound.protocol != "vless" {
+        return Err(CoreError::new(format!(
+            "keli-core-rs reality currently supports only vless; inbound {} uses {}",
+            inbound.tag, inbound.protocol
+        )));
+    }
+    if network != "tcp" {
+        return Err(CoreError::new(format!(
+            "keli-core-rs vless reality currently requires tcp transport; inbound {} uses {}",
+            inbound.tag, network
+        )));
+    }
+    if inbound.server_name.trim().is_empty() {
+        return Err(CoreError::new(format!(
+            "keli-core-rs vless reality requires server_name on inbound {}",
+            inbound.tag
+        )));
+    }
+    if inbound.reality_dest.trim().is_empty() {
+        return Err(CoreError::new(format!(
+            "keli-core-rs vless reality requires dest on inbound {}",
+            inbound.tag
+        )));
+    }
+    if inbound.reality_private_key.trim().is_empty() {
+        return Err(CoreError::new(format!(
+            "keli-core-rs vless reality requires private_key on inbound {}",
+            inbound.tag
+        )));
+    }
+    if inbound.reality_short_id.trim().is_empty() {
+        return Err(CoreError::new(format!(
+            "keli-core-rs vless reality requires short_id on inbound {}",
+            inbound.tag
+        )));
+    }
+    if !inbound.reality_mldsa65_seed.trim().is_empty() {
+        return Err(CoreError::new(format!(
+            "keli-core-rs vless reality mldsa65Seed is not supported yet on inbound {}",
+            inbound.tag
         )));
     }
     Ok(())
@@ -632,9 +882,16 @@ fn validate_keli_core_rs_tuic_inbound(inbound: &InboundPlan) -> Result<(), CoreE
             inbound.tag
         )));
     }
-    if !inbound.congestion_control.trim().is_empty() || inbound.zero_rtt_handshake {
+    let congestion = inbound.congestion_control.trim();
+    if !congestion.is_empty() && !is_keli_core_rs_tuic_congestion_supported(congestion) {
         return Err(CoreError::new(format!(
-            "keli-core-rs tuic currently does not support custom congestion or zero-rtt on inbound {}",
+            "keli-core-rs tuic congestion_control {} is not supported on inbound {}",
+            inbound.congestion_control, inbound.tag
+        )));
+    }
+    if inbound.zero_rtt_handshake {
+        return Err(CoreError::new(format!(
+            "keli-core-rs tuic currently does not support zero-rtt on inbound {}",
             inbound.tag
         )));
     }
@@ -645,6 +902,17 @@ fn validate_keli_core_rs_tuic_inbound(inbound: &InboundPlan) -> Result<(), CoreE
         )));
     }
     Ok(())
+}
+
+fn is_keli_core_rs_tuic_congestion_supported(value: &str) -> bool {
+    matches!(
+        value
+            .trim()
+            .to_ascii_lowercase()
+            .replace(['-', ' '], "_")
+            .as_str(),
+        "" | "cubic" | "bbr" | "new_reno" | "newreno" | "reno"
+    )
 }
 
 fn validate_keli_core_rs_hysteria2_inbound(inbound: &InboundPlan) -> Result<(), CoreError> {
@@ -825,7 +1093,11 @@ fn is_uuid_like(value: &str) -> bool {
 
 fn is_keli_core_rs_shadowsocks_cipher(cipher: &str) -> bool {
     matches!(
-        cipher.trim().to_ascii_lowercase().replace('_', "-").as_str(),
+        cipher
+            .trim()
+            .to_ascii_lowercase()
+            .replace('_', "-")
+            .as_str(),
         "aes-128-gcm" | "aes-256-gcm" | "chacha20-ietf-poly1305"
     )
 }
@@ -852,6 +1124,7 @@ fn render_keli_core_rs_inbound(inbound: &InboundPlan) -> Value {
             Value::Null
         },
         "flow": &inbound.flow,
+        "padding_scheme": &inbound.padding_scheme,
         "users": inbound
             .users
             .iter()
@@ -875,16 +1148,40 @@ fn keli_core_rs_protocol_name(inbound: &InboundPlan) -> &str {
 }
 
 fn render_keli_core_rs_tls(inbound: &InboundPlan) -> Value {
-    if inbound.security != "tls" {
+    if !matches!(inbound.security.as_str(), "tls" | "reality") {
         return Value::Null;
     }
+    let reality = if inbound.security == "reality" {
+        json!({
+            "dest": &inbound.reality_dest,
+            "server_port": null,
+            "private_key": &inbound.reality_private_key,
+            "short_id": &inbound.reality_short_id,
+            "xver": inbound.reality_xver,
+            "mldsa65_seed": if inbound.reality_mldsa65_seed.trim().is_empty() {
+                Value::Null
+            } else {
+                Value::String(inbound.reality_mldsa65_seed.clone())
+            }
+        })
+    } else {
+        Value::Null
+    };
     json!({
         "server_name": &inbound.server_name,
-        "cert_file": &inbound.cert_file,
-        "key_file": &inbound.key_file,
+        "cert_file": if inbound.security == "tls" {
+            Value::String(inbound.cert_file.clone())
+        } else {
+            Value::Null
+        },
+        "key_file": if inbound.security == "tls" {
+            Value::String(inbound.key_file.clone())
+        } else {
+            Value::Null
+        },
         "alpn": &inbound.alpn,
         "reject_unknown_sni": inbound.reject_unknown_sni,
-        "reality": null
+        "reality": reality
     })
 }
 
@@ -949,10 +1246,20 @@ fn render_keli_core_rs_transport(inbound: &InboundPlan) -> Value {
         }
     }
 
+    if inbound.protocol == "tuic" && !inbound.congestion_control.trim().is_empty() {
+        transport.insert(
+            "congestion_control".to_string(),
+            Value::String(inbound.congestion_control.trim().to_string()),
+        );
+    }
+
     Value::Object(transport)
 }
 
 fn keli_core_rs_transport_network(inbound: &InboundPlan) -> String {
+    if inbound.protocol == "shadowsocks" && inbound.network.trim().is_empty() {
+        return "tcp,udp".to_string();
+    }
     match first_non_empty(inbound.network.trim(), "tcp")
         .to_ascii_lowercase()
         .as_str()
@@ -994,7 +1301,11 @@ fn render_keli_core_rs_user(user: &InboundUserPlan) -> Value {
 pub fn write_core_config(plan: &CorePlan) -> Result<CoreConfigWriteResult, CoreError> {
     if matches!(&plan.kind, CoreKind::Sidecar(name) if name == "naive") {
         let content = render_naive_sidecar_config(plan)?;
-        return write_core_config_bytes(&plan.config_path, content.into_bytes(), plan.inbounds.len());
+        return write_core_config_bytes(
+            &plan.config_path,
+            content.into_bytes(),
+            plan.inbounds.len(),
+        );
     }
     let value = render_core_config(plan)?;
     write_core_config_value(&plan.config_path, &value, plan.inbounds.len())
@@ -1006,9 +1317,8 @@ pub fn write_core_config_value(
     inbound_count: usize,
 ) -> Result<CoreConfigWriteResult, CoreError> {
     let path = path.as_ref();
-    let mut content = serde_json::to_vec_pretty(value).map_err(|err| {
-        CoreError::new(format!("encode core config {}: {err}", path.display()))
-    })?;
+    let mut content = serde_json::to_vec_pretty(value)
+        .map_err(|err| CoreError::new(format!("encode core config {}: {err}", path.display())))?;
     content.push(b'\n');
 
     write_core_config_bytes(path, content, inbound_count)
@@ -1043,9 +1353,8 @@ fn write_core_config_bytes(
             layout.temp_config_path.display()
         ))
     })?;
-    replace_file(&layout.temp_config_path, path).map_err(|err| {
-        CoreError::new(format!("replace core config {}: {err}", path.display()))
-    })?;
+    replace_file(&layout.temp_config_path, path)
+        .map_err(|err| CoreError::new(format!("replace core config {}: {err}", path.display())))?;
 
     Ok(CoreConfigWriteResult {
         path: path.to_path_buf(),
@@ -1266,6 +1575,8 @@ fn resolve_reality_dest(settings: &TlsSettings) -> String {
     let port = settings.server_port.trim();
     if host.is_empty() || port.is_empty() {
         host
+    } else if host.contains(':') && !host.starts_with('[') {
+        format!("[{host}]:{port}")
     } else {
         format!("{host}:{port}")
     }
@@ -1344,10 +1655,7 @@ fn render_xray_outbounds(plan: &CorePlan) -> Vec<Value> {
 
     for inbound in &plan.inbounds {
         for route in &inbound.routes {
-            if !matches!(
-                route.action.as_str(),
-                "route" | "route_ip" | "default_out"
-            ) {
+            if !matches!(route.action.as_str(), "route" | "route_ip" | "default_out") {
                 continue;
             }
             let Some((tag, outbound)) = parse_route_outbound(route) else {
@@ -1806,11 +2114,13 @@ fn render_xray_hysteria_stream_settings(inbound: &InboundPlan) -> Value {
     Value::Object(settings)
 }
 
-fn render_xray_network_settings(
-    network: &str,
-    settings: &Value,
-) -> Option<(&'static str, Value)> {
-    if settings.is_null() || settings.as_object().map(|value| value.is_empty()).unwrap_or(false) {
+fn render_xray_network_settings(network: &str, settings: &Value) -> Option<(&'static str, Value)> {
+    if settings.is_null()
+        || settings
+            .as_object()
+            .map(|value| value.is_empty())
+            .unwrap_or(false)
+    {
         return None;
     }
 
@@ -2114,7 +2424,10 @@ mod tests {
         assert_eq!(xray.inbounds.len(), 1);
         assert_eq!(xray.inbounds[0].protocol, "vless");
         assert_eq!(bundle.sidecars.len(), 1);
-        assert_eq!(bundle.sidecars[0].kind, CoreKind::Sidecar("mieru".to_string()));
+        assert_eq!(
+            bundle.sidecars[0].kind,
+            CoreKind::Sidecar("mieru".to_string())
+        );
         assert_eq!(bundle.sidecars[0].inbounds[0].protocol, "mieru");
         assert_eq!(
             bundle.sidecars[0].config_path,
@@ -2221,7 +2534,8 @@ mod tests {
     }
 
     #[test]
-    fn renders_keli_core_rs_native_socks_http_shadowsocks_vmess_vless_trojan_anytls_config_from_panel_users() {
+    fn renders_keli_core_rs_native_socks_http_shadowsocks_vmess_vless_trojan_anytls_config_from_panel_users(
+    ) {
         let socks = test_node("socks", 40, "");
         let http = test_node("http", 41, "127.0.0.1");
         let mut shadowsocks = test_node("shadowsocks", 54, "127.0.0.1");
@@ -2326,6 +2640,7 @@ mod tests {
         assert_eq!(config["inbounds"][1]["listen"], "127.0.0.1");
         assert_eq!(config["inbounds"][2]["protocol"], "shadowsocks");
         assert_eq!(config["inbounds"][2]["cipher"], "aes-128-gcm");
+        assert_eq!(config["inbounds"][2]["transport"]["network"], "tcp,udp");
         assert_eq!(config["inbounds"][2]["users"][0]["uuid"], "ss-password");
         assert_eq!(config["inbounds"][2]["users"][0]["speed_limit"], 3072);
         assert_eq!(config["inbounds"][2]["users"][0]["device_limit"], 4);
@@ -2343,17 +2658,11 @@ mod tests {
         );
         assert_eq!(config["inbounds"][5]["protocol"], "trojan");
         assert_eq!(config["inbounds"][5]["listen"], "127.0.0.1");
-        assert_eq!(
-            config["inbounds"][5]["users"][0]["uuid"],
-            "trojan-password"
-        );
+        assert_eq!(config["inbounds"][5]["users"][0]["uuid"], "trojan-password");
         assert_eq!(config["inbounds"][5]["users"][0]["speed_limit"], 2048);
         assert_eq!(config["inbounds"][5]["users"][0]["device_limit"], 3);
         assert_eq!(config["inbounds"][6]["protocol"], "anytls");
-        assert_eq!(
-            config["inbounds"][6]["users"][0]["uuid"],
-            "anytls-password"
-        );
+        assert_eq!(config["inbounds"][6]["users"][0]["uuid"], "anytls-password");
         assert_eq!(config["inbounds"][6]["users"][0]["speed_limit"], 4096);
         assert_eq!(config["inbounds"][6]["users"][0]["device_limit"], 5);
         assert_eq!(config["outbounds"][0]["tag"], "direct");
@@ -2363,12 +2672,31 @@ mod tests {
     #[test]
     fn renders_keli_core_rs_block_routes() {
         let mut node = test_node("http", 42, "");
-        node.common.routes = vec![Route {
-            id: 1,
-            match_rules: vec!["*.blocked.example".to_string()],
-            action: "block".to_string(),
-            action_value: None,
-        }];
+        node.common.routes = vec![
+            Route {
+                id: 1,
+                match_rules: vec![
+                    "*.blocked.example".to_string(),
+                    "domain:example.com".to_string(),
+                    "keyword:tracker".to_string(),
+                    "network:udp".to_string(),
+                ],
+                action: "block".to_string(),
+                action_value: None,
+            },
+            Route {
+                id: 2,
+                match_rules: vec!["10.0.0.0/8".to_string(), "2001:db8::/32".to_string()],
+                action: "block_ip".to_string(),
+                action_value: None,
+            },
+            Route {
+                id: 3,
+                match_rules: vec!["6881-6889,6969".to_string()],
+                action: "block_port".to_string(),
+                action_value: None,
+            },
+        ];
         let plan = CorePlan::from_nodes(
             CoreKind::KeliCoreRs,
             PathBuf::from("/srv/v2node/keli-core-rs.json"),
@@ -2379,7 +2707,13 @@ mod tests {
         let config = render_core_config(&plan).unwrap();
 
         assert_eq!(config["routes"][0]["targets"][0], "*.blocked.example");
+        assert_eq!(config["routes"][0]["targets"][1], "domain:example.com");
+        assert_eq!(config["routes"][0]["targets"][2], "keyword:tracker");
+        assert_eq!(config["routes"][0]["targets"][3], "network:udp");
         assert_eq!(config["routes"][0]["action"], "block");
+        assert_eq!(config["routes"][1]["targets"][0], "ip:10.0.0.0/8");
+        assert_eq!(config["routes"][1]["targets"][1], "ip:2001:db8::/32");
+        assert_eq!(config["routes"][2]["targets"][0], "port:6881-6889,6969");
     }
 
     #[test]
@@ -2400,9 +2734,9 @@ mod tests {
     }
 
     #[test]
-    fn keli_core_rs_rejects_vless_reality_until_core_supports_it() {
-        let mut node = test_node("vless", 46, "");
-        node.security = Security::Reality;
+    fn keli_core_rs_rejects_plain_proxy_non_tcp_and_tls() {
+        let mut node = test_node("socks", 72, "");
+        node.common.network = "ws".to_string();
         let plan = CorePlan::from_nodes(
             CoreKind::KeliCoreRs,
             PathBuf::from("/srv/v2node/keli-core-rs.json"),
@@ -2412,7 +2746,115 @@ mod tests {
 
         let err = render_core_config(&plan).unwrap_err();
 
-        assert!(err.message.contains("security none/tls"));
+        assert!(err.message.contains("supports only tcp transport"));
+
+        let mut node = test_node("http", 73, "");
+        node.security = Security::Tls;
+        let plan = CorePlan::from_nodes(
+            CoreKind::KeliCoreRs,
+            PathBuf::from("/srv/v2node/keli-core-rs.json"),
+            &[node],
+        )
+        .unwrap();
+
+        let err = render_core_config(&plan).unwrap_err();
+
+        assert!(err.message.contains("supports only security none"));
+    }
+
+    #[test]
+    fn keli_core_rs_rejects_protocol_scoped_options_that_core_would_ignore() {
+        let mut node = test_node("vless", 74, "");
+        node.common.cipher = "aes-128-gcm".to_string();
+        let plan = CorePlan::from_nodes(
+            CoreKind::KeliCoreRs,
+            PathBuf::from("/srv/v2node/keli-core-rs.json"),
+            &[node],
+        )
+        .unwrap();
+
+        let err = render_core_config(&plan).unwrap_err();
+
+        assert!(err.message.contains("does not support cipher"));
+
+        let mut node = test_node("trojan", 75, "");
+        node.common.padding_scheme = vec!["stop=8".to_string()];
+        let plan = CorePlan::from_nodes(
+            CoreKind::KeliCoreRs,
+            PathBuf::from("/srv/v2node/keli-core-rs.json"),
+            &[node],
+        )
+        .unwrap();
+
+        let err = render_core_config(&plan).unwrap_err();
+
+        assert!(err.message.contains("paddingScheme"));
+
+        let mut node = test_node("vmess", 76, "");
+        node.common.up_mbps = 100;
+        let plan = CorePlan::from_nodes(
+            CoreKind::KeliCoreRs,
+            PathBuf::from("/srv/v2node/keli-core-rs.json"),
+            &[node],
+        )
+        .unwrap();
+
+        let err = render_core_config(&plan).unwrap_err();
+
+        assert!(err.message.contains("bandwidth/obfs"));
+
+        let mut node = test_node("hysteria2", 77, "");
+        node.security = Security::Tls;
+        node.common.congestion_control = "bbr".to_string();
+        let plan = CorePlan::from_nodes(
+            CoreKind::KeliCoreRs,
+            PathBuf::from("/srv/v2node/keli-core-rs.json"),
+            &[node],
+        )
+        .unwrap();
+
+        let err = render_core_config(&plan).unwrap_err();
+
+        assert!(err.message.contains("tuic options"));
+    }
+
+    #[test]
+    fn renders_keli_core_rs_vless_reality_settings() {
+        let mut node = test_node("vless", 46, "");
+        node.security = Security::Reality;
+        let private_key = "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc";
+        node.common.tls_settings.server_name = "reality.example.test".to_string();
+        node.common.cert_info.as_mut().unwrap().cert_domain = "reality.example.test".to_string();
+        node.common.tls_settings.server_port = "443".to_string();
+        node.common.tls_settings.private_key = private_key.to_string();
+        node.common.tls_settings.short_id = "6ba85179e30d4fc2".to_string();
+        node.common.flow = "xtls-rprx-vision".to_string();
+        let plan = CorePlan::from_nodes(
+            CoreKind::KeliCoreRs,
+            PathBuf::from("/srv/v2node/keli-core-rs.json"),
+            &[node],
+        )
+        .unwrap();
+
+        let config = render_core_config(&plan).unwrap();
+
+        assert_eq!(config["inbounds"][0]["protocol"], "vless");
+        assert_eq!(
+            config["inbounds"][0]["tls"]["server_name"],
+            "reality.example.test"
+        );
+        assert_eq!(
+            config["inbounds"][0]["tls"]["reality"]["dest"],
+            "reality.example.test:443"
+        );
+        assert_eq!(
+            config["inbounds"][0]["tls"]["reality"]["private_key"],
+            private_key
+        );
+        assert_eq!(
+            config["inbounds"][0]["tls"]["reality"]["short_id"],
+            "6ba85179e30d4fc2"
+        );
     }
 
     #[test]
@@ -2468,7 +2910,7 @@ mod tests {
 
         let err = render_core_config(&plan).unwrap_err();
 
-        assert!(err.message.contains("requires tls security"));
+        assert!(err.message.contains("requires tls or reality security"));
     }
 
     #[test]
@@ -2612,9 +3054,18 @@ mod tests {
         let config = render_core_config(&plan).unwrap();
 
         assert_eq!(config["inbounds"][0]["protocol"], "vmess");
-        assert_eq!(config["inbounds"][0]["tls"]["server_name"], "vmess.example.test");
-        assert_eq!(config["inbounds"][0]["tls"]["cert_file"], "/srv/v2node/vmess.cer");
-        assert_eq!(config["inbounds"][0]["tls"]["key_file"], "/srv/v2node/vmess.key");
+        assert_eq!(
+            config["inbounds"][0]["tls"]["server_name"],
+            "vmess.example.test"
+        );
+        assert_eq!(
+            config["inbounds"][0]["tls"]["cert_file"],
+            "/srv/v2node/vmess.cer"
+        );
+        assert_eq!(
+            config["inbounds"][0]["tls"]["key_file"],
+            "/srv/v2node/vmess.key"
+        );
         assert_eq!(config["inbounds"][0]["transport"]["network"], "tcp");
     }
 
@@ -2648,14 +3099,90 @@ mod tests {
 
         assert_eq!(config["inbounds"][0]["protocol"], "tuic");
         assert_eq!(config["inbounds"][0]["transport"]["network"], "tuic");
-        assert_eq!(config["inbounds"][0]["tls"]["server_name"], "tuic.example.test");
-        assert_eq!(config["inbounds"][0]["tls"]["cert_file"], "/srv/v2node/tuic.cer");
-        assert_eq!(config["inbounds"][0]["tls"]["key_file"], "/srv/v2node/tuic.key");
+        assert_eq!(
+            config["inbounds"][0]["tls"]["server_name"],
+            "tuic.example.test"
+        );
+        assert_eq!(
+            config["inbounds"][0]["tls"]["cert_file"],
+            "/srv/v2node/tuic.cer"
+        );
+        assert_eq!(
+            config["inbounds"][0]["tls"]["key_file"],
+            "/srv/v2node/tuic.key"
+        );
         assert_eq!(config["inbounds"][0]["tls"]["alpn"][0], "h3");
         assert_eq!(
             config["inbounds"][0]["users"][0]["uuid"],
             "11111111-1111-1111-1111-111111111111"
         );
+    }
+
+    #[test]
+    fn renders_keli_core_rs_tuic_congestion_control() {
+        let mut node = test_node("tuic", 68, "");
+        node.security = Security::Tls;
+        node.common.cert_info.as_mut().unwrap().cert_file = "/srv/v2node/tuic.cer".to_string();
+        node.common.cert_info.as_mut().unwrap().key_file = "/srv/v2node/tuic.key".to_string();
+        node.common.cert_info.as_mut().unwrap().cert_domain = "tuic.example.test".to_string();
+        node.common.congestion_control = "bbr".to_string();
+        let tag = node.tag.clone();
+        let mut users = std::collections::BTreeMap::new();
+        users.insert(
+            tag,
+            vec![UserInfo {
+                id: 68,
+                uuid: "11111111-1111-1111-1111-111111111111".to_string(),
+                speed_limit: 0,
+                device_limit: 0,
+            }],
+        );
+        let plan = CorePlan::from_nodes_with_users(
+            CoreKind::KeliCoreRs,
+            PathBuf::from("/srv/v2node/keli-core-rs.json"),
+            &[node],
+            &users,
+        )
+        .unwrap();
+
+        let config = render_core_config(&plan).unwrap();
+
+        assert_eq!(
+            config["inbounds"][0]["transport"]["congestion_control"],
+            "bbr"
+        );
+    }
+
+    #[test]
+    fn rejects_keli_core_rs_tuic_zero_rtt_until_core_supports_it() {
+        let mut node = test_node("tuic", 69, "");
+        node.security = Security::Tls;
+        node.common.cert_info.as_mut().unwrap().cert_file = "/srv/v2node/tuic.cer".to_string();
+        node.common.cert_info.as_mut().unwrap().key_file = "/srv/v2node/tuic.key".to_string();
+        node.common.cert_info.as_mut().unwrap().cert_domain = "tuic.example.test".to_string();
+        node.common.zero_rtt_handshake = true;
+        let tag = node.tag.clone();
+        let mut users = std::collections::BTreeMap::new();
+        users.insert(
+            tag,
+            vec![UserInfo {
+                id: 69,
+                uuid: "11111111-1111-1111-1111-111111111111".to_string(),
+                speed_limit: 0,
+                device_limit: 0,
+            }],
+        );
+        let plan = CorePlan::from_nodes_with_users(
+            CoreKind::KeliCoreRs,
+            PathBuf::from("/srv/v2node/keli-core-rs.json"),
+            &[node],
+            &users,
+        )
+        .unwrap();
+
+        let error = render_core_config(&plan).unwrap_err();
+
+        assert!(error.message.contains("does not support zero-rtt"));
     }
 
     #[test]
@@ -2688,9 +3215,18 @@ mod tests {
 
         assert_eq!(config["inbounds"][0]["protocol"], "hysteria2");
         assert_eq!(config["inbounds"][0]["transport"]["network"], "hysteria");
-        assert_eq!(config["inbounds"][0]["tls"]["server_name"], "hy2.example.test");
-        assert_eq!(config["inbounds"][0]["tls"]["cert_file"], "/srv/v2node/hy2.cer");
-        assert_eq!(config["inbounds"][0]["tls"]["key_file"], "/srv/v2node/hy2.key");
+        assert_eq!(
+            config["inbounds"][0]["tls"]["server_name"],
+            "hy2.example.test"
+        );
+        assert_eq!(
+            config["inbounds"][0]["tls"]["cert_file"],
+            "/srv/v2node/hy2.cer"
+        );
+        assert_eq!(
+            config["inbounds"][0]["tls"]["key_file"],
+            "/srv/v2node/hy2.key"
+        );
         assert_eq!(config["inbounds"][0]["tls"]["alpn"][0], "h3");
         assert_eq!(config["inbounds"][0]["users"][0]["uuid"], "hy2-password");
     }
@@ -2829,7 +3365,24 @@ mod tests {
 
         let err = render_core_config(&plan).unwrap_err();
 
-        assert!(err.message.contains("tcp transport"));
+        assert!(err.message.contains("tcp or tcp,udp"));
+    }
+
+    #[test]
+    fn renders_keli_core_rs_shadowsocks_explicit_tcp_transport() {
+        let mut node = test_node("shadowsocks", 71, "");
+        node.common.cipher = "aes-128-gcm".to_string();
+        node.common.network = "tcp".to_string();
+        let plan = CorePlan::from_nodes(
+            CoreKind::KeliCoreRs,
+            PathBuf::from("/srv/v2node/keli-core-rs.json"),
+            &[node],
+        )
+        .unwrap();
+
+        let config = render_core_config(&plan).unwrap();
+
+        assert_eq!(config["inbounds"][0]["transport"]["network"], "tcp");
     }
 
     #[test]
@@ -2878,9 +3431,18 @@ mod tests {
 
         let config = render_core_config(&plan).unwrap();
 
-        assert_eq!(config["inbounds"][0]["tls"]["server_name"], "vless.example.test");
-        assert_eq!(config["inbounds"][0]["tls"]["cert_file"], "/srv/v2node/vless.cer");
-        assert_eq!(config["inbounds"][0]["tls"]["key_file"], "/srv/v2node/vless.key");
+        assert_eq!(
+            config["inbounds"][0]["tls"]["server_name"],
+            "vless.example.test"
+        );
+        assert_eq!(
+            config["inbounds"][0]["tls"]["cert_file"],
+            "/srv/v2node/vless.cer"
+        );
+        assert_eq!(
+            config["inbounds"][0]["tls"]["key_file"],
+            "/srv/v2node/vless.key"
+        );
         assert_eq!(config["inbounds"][0]["tls"]["reject_unknown_sni"], true);
         assert_eq!(config["inbounds"][0]["transport"]["network"], "ws");
         assert_eq!(config["inbounds"][0]["transport"]["path"], "/vless-tls");
@@ -2888,8 +3450,14 @@ mod tests {
             config["inbounds"][1]["tls"]["server_name"],
             "trojan.example.test"
         );
-        assert_eq!(config["inbounds"][1]["tls"]["cert_file"], "/srv/v2node/trojan.cer");
-        assert_eq!(config["inbounds"][1]["tls"]["key_file"], "/srv/v2node/trojan.key");
+        assert_eq!(
+            config["inbounds"][1]["tls"]["cert_file"],
+            "/srv/v2node/trojan.cer"
+        );
+        assert_eq!(
+            config["inbounds"][1]["tls"]["key_file"],
+            "/srv/v2node/trojan.key"
+        );
         assert_eq!(config["inbounds"][1]["tls"]["alpn"][0], "h2");
         assert_eq!(config["inbounds"][1]["tls"]["alpn"][1], "http/1.1");
     }
@@ -2929,9 +3497,32 @@ mod tests {
     }
 
     #[test]
-    fn keli_core_rs_rejects_anytls_padding_until_core_supports_it() {
+    fn renders_keli_core_rs_anytls_padding_scheme() {
         let mut node = test_node("anytls", 59, "");
-        node.common.padding_scheme = vec!["stop=8".to_string()];
+        node.common.padding_scheme = vec!["stop=8".to_string(), "0=30-30".to_string()];
+        let plan = CorePlan::from_nodes(
+            CoreKind::KeliCoreRs,
+            PathBuf::from("/srv/v2node/keli-core-rs.json"),
+            &[node],
+        )
+        .unwrap();
+
+        let config = render_core_config(&plan).unwrap();
+
+        assert_eq!(config["inbounds"][0]["protocol"], "anytls");
+        assert_eq!(config["inbounds"][0]["padding_scheme"][0], "stop=8");
+        assert_eq!(config["inbounds"][0]["padding_scheme"][1], "0=30-30");
+    }
+
+    #[test]
+    fn keli_core_rs_rejects_unsupported_route_actions() {
+        let mut node = test_node("socks", 44, "");
+        node.common.routes = vec![Route {
+            id: 1,
+            match_rules: vec!["bittorrent".to_string()],
+            action: "protocol".to_string(),
+            action_value: None,
+        }];
         let plan = CorePlan::from_nodes(
             CoreKind::KeliCoreRs,
             PathBuf::from("/srv/v2node/keli-core-rs.json"),
@@ -2941,15 +3532,15 @@ mod tests {
 
         let err = render_core_config(&plan).unwrap_err();
 
-        assert!(err.message.contains("padding scheme"));
+        assert!(err.message.contains("route action protocol"));
     }
 
     #[test]
-    fn keli_core_rs_rejects_unsupported_route_actions() {
-        let mut node = test_node("socks", 44, "");
+    fn keli_core_rs_rejects_unsupported_ip_and_port_route_rules() {
+        let mut node = test_node("socks", 78, "");
         node.common.routes = vec![Route {
             id: 1,
-            match_rules: vec!["10.0.0.0/8".to_string()],
+            match_rules: vec!["geoip:private".to_string()],
             action: "block_ip".to_string(),
             action_value: None,
         }];
@@ -2962,7 +3553,61 @@ mod tests {
 
         let err = render_core_config(&plan).unwrap_err();
 
-        assert!(err.message.contains("route action block_ip"));
+        assert!(err.message.contains("block_ip rule geoip:private"));
+
+        let mut node = test_node("socks", 79, "");
+        node.common.routes = vec![Route {
+            id: 1,
+            match_rules: vec!["70000".to_string()],
+            action: "block_port".to_string(),
+            action_value: None,
+        }];
+        let plan = CorePlan::from_nodes(
+            CoreKind::KeliCoreRs,
+            PathBuf::from("/srv/v2node/keli-core-rs.json"),
+            &[node],
+        )
+        .unwrap();
+
+        let err = render_core_config(&plan).unwrap_err();
+
+        assert!(err.message.contains("block_port rule 70000"));
+
+        let mut node = test_node("socks", 80, "");
+        node.common.routes = vec![Route {
+            id: 1,
+            match_rules: vec!["geosite:private".to_string()],
+            action: "block".to_string(),
+            action_value: None,
+        }];
+        let plan = CorePlan::from_nodes(
+            CoreKind::KeliCoreRs,
+            PathBuf::from("/srv/v2node/keli-core-rs.json"),
+            &[node],
+        )
+        .unwrap();
+
+        let err = render_core_config(&plan).unwrap_err();
+
+        assert!(err.message.contains("block rule geosite:private"));
+
+        let mut node = test_node("socks", 81, "");
+        node.common.routes = vec![Route {
+            id: 1,
+            match_rules: vec!["keyword:".to_string()],
+            action: "block".to_string(),
+            action_value: None,
+        }];
+        let plan = CorePlan::from_nodes(
+            CoreKind::KeliCoreRs,
+            PathBuf::from("/srv/v2node/keli-core-rs.json"),
+            &[node],
+        )
+        .unwrap();
+
+        let err = render_core_config(&plan).unwrap_err();
+
+        assert!(err.message.contains("block rule keyword:"));
     }
 
     #[test]
@@ -3053,11 +3698,8 @@ mod tests {
     #[test]
     fn inbound_plan_deduplicates_custom_alpn() {
         let mut node = test_node("tuic", 8, "");
-        node.common.tls_settings.alpn = vec![
-            " h3 ".to_string(),
-            "h3".to_string(),
-            "h2".to_string(),
-        ];
+        node.common.tls_settings.alpn =
+            vec![" h3 ".to_string(), "h3".to_string(), "h2".to_string()];
         let inbound = build_inbound_plan(&node).unwrap();
 
         assert_eq!(inbound.alpn, vec!["h3".to_string(), "h2".to_string()]);
@@ -3068,7 +3710,10 @@ mod tests {
         let layout = core_file_layout("/srv/v2node/config.json");
 
         assert_eq!(layout.config_dir, PathBuf::from("/srv/v2node"));
-        assert_eq!(layout.temp_config_path, PathBuf::from("/srv/v2node/config.json.tmp"));
+        assert_eq!(
+            layout.temp_config_path,
+            PathBuf::from("/srv/v2node/config.json.tmp")
+        );
     }
 
     #[test]
@@ -3136,6 +3781,29 @@ mod tests {
         assert_eq!(
             config["inbounds"][0]["streamSettings"]["realitySettings"]["mldsa65Seed"],
             "seed-value"
+        );
+    }
+
+    #[test]
+    fn renders_reality_ipv6_dest_with_brackets() {
+        let mut node = test_node("vless", 30, "");
+        node.common.tls = 2;
+        node.security = Security::Reality;
+        node.common.tls_settings.dest = "2607:f358:1a:e::d4d9:5831".to_string();
+        node.common.tls_settings.server_name = "ipv6.example.test".to_string();
+        node.common.tls_settings.server_port = "443".to_string();
+        let plan = CorePlan::from_nodes(
+            CoreKind::Xray,
+            PathBuf::from("/srv/v2node/config.json"),
+            &[node],
+        )
+        .unwrap();
+
+        let config = render_core_config(&plan).unwrap();
+
+        assert_eq!(
+            config["inbounds"][0]["streamSettings"]["realitySettings"]["dest"],
+            "[2607:f358:1a:e::d4d9:5831]:443"
         );
     }
 
@@ -3295,10 +3963,7 @@ mod tests {
 
         let config = render_core_config(&plan).unwrap();
 
-        assert_eq!(
-            config["inbounds"][0]["settings"]["method"],
-            "aes-128-gcm"
-        );
+        assert_eq!(config["inbounds"][0]["settings"]["method"], "aes-128-gcm");
         assert_eq!(
             config["inbounds"][0]["settings"]["clients"][0]["method"],
             "aes-128-gcm"
@@ -3373,8 +4038,8 @@ mod tests {
             "/ss"
         );
         assert_eq!(
-            config["inbounds"][0]["streamSettings"]["tcpSettings"]["header"]["request"]
-                ["headers"]["Host"][0],
+            config["inbounds"][0]["streamSettings"]["tcpSettings"]["header"]["request"]["headers"]
+                ["Host"][0],
             "edge.example.test"
         );
     }
@@ -3518,13 +4183,13 @@ mod tests {
             "hy2-password"
         );
         assert_eq!(
-            config["inbounds"][0]["streamSettings"]["hysteriaSettings"]["finalMask"]
-                ["quicParams"]["brutalUp"],
+            config["inbounds"][0]["streamSettings"]["hysteriaSettings"]["finalMask"]["quicParams"]
+                ["brutalUp"],
             "100mbps"
         );
         assert_eq!(
-            config["inbounds"][0]["streamSettings"]["hysteriaSettings"]["finalMask"]["udp"]
-                [0]["settings"]["password"],
+            config["inbounds"][0]["streamSettings"]["hysteriaSettings"]["finalMask"]["udp"][0]
+                ["settings"]["password"],
             "obfs-secret"
         );
     }
@@ -3559,10 +4224,7 @@ mod tests {
             config["inbounds"][0]["settings"]["congestionControl"],
             "bbr"
         );
-        assert_eq!(
-            config["inbounds"][0]["settings"]["zeroRttHandshake"],
-            true
-        );
+        assert_eq!(config["inbounds"][0]["settings"]["zeroRttHandshake"], true);
         assert_eq!(
             config["inbounds"][0]["settings"]["clients"][0]["password"],
             "tuic-password"
@@ -3702,10 +4364,7 @@ mod tests {
         let config = render_core_config(&plan).unwrap();
 
         assert_eq!(config["dns"]["servers"][2]["address"], "1.1.1.1");
-        assert_eq!(
-            config["dns"]["servers"][2]["domains"][0],
-            "geosite:openai"
-        );
+        assert_eq!(config["dns"]["servers"][2]["domains"][0], "geosite:openai");
     }
 
     #[test]

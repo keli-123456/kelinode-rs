@@ -127,16 +127,11 @@ async fn run_agent_once(
     let options = runtime_loop_options(&plan, !panel_clients.is_empty());
     let realtime_options = plan.realtime_options.clone();
     let subscription_proxy_manager = start_subscription_proxy_manager(&plan);
-    let mut runner = PanelRuntimeLoop::new(
-        plan,
-        process_supervisor,
-        port_forward_executor,
-        None,
-    )
-    .with_panel_clients(panel_clients)
-    .with_health_refresh(agent_version())
-    .with_public_ip_probe(true)
-    .with_upgrade_status(upgrade_status);
+    let mut runner = PanelRuntimeLoop::new(plan, process_supervisor, port_forward_executor, None)
+        .with_panel_clients(panel_clients)
+        .with_health_refresh(agent_version())
+        .with_public_ip_probe(true)
+        .with_upgrade_status(upgrade_status);
     if let Some(manager) = subscription_proxy_manager {
         runner = runner.with_subscription_proxy_manager(manager);
     }
@@ -173,10 +168,9 @@ fn start_subscription_proxy_manager(
         return None;
     }
     let mut manager = SubscriptionProxyRuntimeManager::new();
-    if let Err(err) = manager.apply_and_start_with_file_system(
-        config,
-        ensure_subscription_proxy_csr_with_openssl,
-    ) {
+    if let Err(err) =
+        manager.apply_and_start_with_file_system(config, ensure_subscription_proxy_csr_with_openssl)
+    {
         eprintln!("subscription proxy start failed: {err}");
     }
     Some(manager)
@@ -202,13 +196,8 @@ where
         let Some(config) = runner.plan.resolved.kernel.sidecars.get(name) else {
             continue;
         };
-        let spec = sidecar_process_spec(
-            sidecar_plan,
-            &config.command,
-            &config.args,
-            &config.env,
-        )
-        .map_err(|err| err.message)?;
+        let spec = sidecar_process_spec(sidecar_plan, &config.command, &config.args, &config.env)
+            .map_err(|err| err.message)?;
         runner
             .process_supervisor
             .stop(&spec.name)
@@ -244,7 +233,12 @@ fn machine_panel_clients(plan: &RuntimeBootstrapPlan) -> Result<Vec<PanelClient>
     let mut seen = BTreeSet::new();
     let mut clients = Vec::new();
 
-    for config in plan.resolved.nodes.iter().filter(|config| config.machine_id > 0) {
+    for config in plan
+        .resolved
+        .nodes
+        .iter()
+        .filter(|config| config.machine_id > 0)
+    {
         let key = format!(
             "{}#{}#{}",
             config.url.trim_end_matches('/'),
@@ -255,8 +249,7 @@ fn machine_panel_clients(plan: &RuntimeBootstrapPlan) -> Result<Vec<PanelClient>
             continue;
         }
         clients.push(
-            PanelClient::new(PanelClientOptions::from(config))
-                .map_err(|err| err.to_string())?,
+            PanelClient::new(PanelClientOptions::from(config)).map_err(|err| err.to_string())?,
         );
     }
     for profile in plan
@@ -300,10 +293,7 @@ fn panel_options_from_machine_profile(profile: &MachineProfileConfig) -> PanelCl
     }
 }
 
-fn runtime_loop_options(
-    plan: &RuntimeBootstrapPlan,
-    report_to_panel: bool,
-) -> RuntimeLoopOptions {
+fn runtime_loop_options(plan: &RuntimeBootstrapPlan, report_to_panel: bool) -> RuntimeLoopOptions {
     let mut options = RuntimeLoopOptions {
         control: RuntimeControlOptions {
             machine_id: plan
@@ -391,8 +381,8 @@ mod tests {
         start_subscription_proxy_manager,
     };
     use kelinode_rs::config::{
-        AgentConfig, MachineProfileConfig, NodeConfig, ResolvedConfig,
-        ResolvedMachineConfig, SubscriptionProxyConfig,
+        AgentConfig, MachineProfileConfig, NodeConfig, ResolvedConfig, ResolvedMachineConfig,
+        SubscriptionProxyConfig,
     };
     use kelinode_rs::panel::types::{CommonNode, NodeInfo};
     use kelinode_rs::runtime::{build_runtime_bootstrap_plan, RuntimeBootstrapPlan};

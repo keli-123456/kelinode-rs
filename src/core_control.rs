@@ -68,6 +68,8 @@ pub struct KeliCoreTrafficRecord {
     pub user_uuid: String,
     pub upload: u64,
     pub download: u64,
+    #[serde(default)]
+    pub online_ips: Vec<String>,
 }
 
 impl KeliCoreControlClient {
@@ -121,9 +123,11 @@ impl KeliCoreControlClient {
         stream.set_read_timeout(Some(self.timeout)).map_err(|err| {
             KeliCoreControlError::new(format!("set keli-core-rs read timeout: {err}"))
         })?;
-        stream.set_write_timeout(Some(self.timeout)).map_err(|err| {
-            KeliCoreControlError::new(format!("set keli-core-rs write timeout: {err}"))
-        })?;
+        stream
+            .set_write_timeout(Some(self.timeout))
+            .map_err(|err| {
+                KeliCoreControlError::new(format!("set keli-core-rs write timeout: {err}"))
+            })?;
 
         let body = serde_json::to_string(command)
             .map_err(|err| KeliCoreControlError::new(format!("encode control command: {err}")))?;

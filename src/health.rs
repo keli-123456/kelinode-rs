@@ -55,7 +55,10 @@ pub fn build_machine_status_payload(
     payload.insert_status("system", resources.system.unwrap_or(Value::Null));
     payload.insert_status(
         "uptime",
-        resources.uptime.map(|uptime| json!(uptime)).unwrap_or(Value::Null),
+        resources
+            .uptime
+            .map(|uptime| json!(uptime))
+            .unwrap_or(Value::Null),
     );
     payload.insert_status("version", version_value(input.version));
     payload.insert_status("runtime", runtime_value(plan));
@@ -273,10 +276,7 @@ fn hy2_tool_value(status: &HysteriaPortForwardToolStatus) -> Value {
     })
 }
 
-fn agent_value(
-    agent: &AgentConfig,
-    subscription_proxy: Option<&SubscriptionProxyStatus>,
-) -> Value {
+fn agent_value(agent: &AgentConfig, subscription_proxy: Option<&SubscriptionProxyStatus>) -> Value {
     if let Some(status) = subscription_proxy {
         return json!({
             "subscription_proxy": subscription_proxy_status_value(status)
@@ -361,14 +361,12 @@ mod tests {
     use crate::node::NodeFailure;
     use crate::panel::types::{CommonNode, NodeInfo, UserInfo};
     use crate::process::ProcessStatus;
-    use crate::runtime::{
-        build_runtime_bootstrap_plan, build_runtime_bootstrap_plan_with_users,
-    };
+    use crate::runtime::{build_runtime_bootstrap_plan, build_runtime_bootstrap_plan_with_users};
     use crate::subscription_proxy::SubscriptionProxyStatus;
 
     use super::{
-        build_machine_status_payload, node_failure_payloads, HealthReportInput,
-        ResourceSnapshot, UsageSnapshot,
+        build_machine_status_payload, node_failure_payloads, HealthReportInput, ResourceSnapshot,
+        UsageSnapshot,
     };
 
     #[test]

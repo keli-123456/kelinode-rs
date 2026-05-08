@@ -358,10 +358,7 @@ pub fn users_by_node_tag(sets: &[NodeUserSet]) -> BTreeMap<String, Vec<UserInfo>
 async fn load_panel_node_info(config: &NodeConfig) -> Result<Option<NodeInfo>, String> {
     let options = PanelClientOptions::from(config);
     let mut client = PanelClient::new(options).map_err(|err| err.to_string())?;
-    client
-        .get_node_info()
-        .await
-        .map_err(|err| err.to_string())
+    client.get_node_info().await.map_err(|err| err.to_string())
 }
 
 fn format_node_error(action: &str, config: &NodeConfig, error: &str) -> String {

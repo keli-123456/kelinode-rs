@@ -275,7 +275,12 @@ impl NodeInfo {
             .as_ref()
             .and_then(|config| interval_to_duration(&config.pull_interval))
             .unwrap_or_else(|| Duration::from_secs(60));
-        let tag = format!("[{}]-{}:{}", api_host.trim_end_matches('/'), protocol.as_str(), node_id);
+        let tag = format!(
+            "[{}]-{}:{}",
+            api_host.trim_end_matches('/'),
+            protocol.as_str(),
+            node_id
+        );
         common.cert_info = Some(build_cert_info(&common, protocol, node_id, config_dir));
 
         Ok(Self {

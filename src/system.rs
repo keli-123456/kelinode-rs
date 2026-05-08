@@ -112,11 +112,7 @@ impl ResourceSampler {
         percent
     }
 
-    fn sample_network_value(
-        &mut self,
-        now_seconds: f64,
-        snapshot: NetworkSnapshot,
-    ) -> Value {
+    fn sample_network_value(&mut self, now_seconds: f64, snapshot: NetworkSnapshot) -> Value {
         let mut rx_rate = 0.0;
         let mut tx_rate = 0.0;
 
@@ -124,12 +120,12 @@ impl ResourceSampler {
             let elapsed = now_seconds - previous.at_seconds;
             if elapsed > 0.0 {
                 if snapshot.counters.rx_bytes >= previous.counters.rx_bytes {
-                    rx_rate = (snapshot.counters.rx_bytes - previous.counters.rx_bytes) as f64
-                        / elapsed;
+                    rx_rate =
+                        (snapshot.counters.rx_bytes - previous.counters.rx_bytes) as f64 / elapsed;
                 }
                 if snapshot.counters.tx_bytes >= previous.counters.tx_bytes {
-                    tx_rate = (snapshot.counters.tx_bytes - previous.counters.tx_bytes) as f64
-                        / elapsed;
+                    tx_rate =
+                        (snapshot.counters.tx_bytes - previous.counters.tx_bytes) as f64 / elapsed;
                 }
             }
         }
@@ -229,7 +225,9 @@ pub fn parse_linux_loadavg_cpu_percent(input: &str, cpu_count: usize) -> Option<
 }
 
 pub fn parse_linux_proc_stat_cpu(input: &str) -> Option<CpuCounters> {
-    let line = input.lines().find(|line| line.trim_start().starts_with("cpu "))?;
+    let line = input
+        .lines()
+        .find(|line| line.trim_start().starts_with("cpu "))?;
     let fields = line.split_whitespace().collect::<Vec<_>>();
     if fields.len() < 5 || fields[0] != "cpu" {
         return None;
@@ -238,7 +236,9 @@ pub fn parse_linux_proc_stat_cpu(input: &str) -> Option<CpuCounters> {
         .iter()
         .map(|value| value.parse::<u64>().ok())
         .collect::<Option<Vec<_>>>()?;
-    let total = values.iter().fold(0u64, |total, value| total.saturating_add(*value));
+    let total = values
+        .iter()
+        .fold(0u64, |total, value| total.saturating_add(*value));
     let idle = values
         .get(3)
         .copied()
@@ -262,8 +262,7 @@ pub fn parse_df_portable_bytes(input: &str) -> Option<UsageSnapshot> {
 }
 
 pub fn parse_linux_net_dev(input: &str) -> Option<Value> {
-    parse_linux_net_dev_snapshot(input)
-        .map(|snapshot| network_status_value(snapshot, 0.0, 0.0))
+    parse_linux_net_dev_snapshot(input).map(|snapshot| network_status_value(snapshot, 0.0, 0.0))
 }
 
 pub fn parse_linux_net_dev_snapshot(input: &str) -> Option<NetworkSnapshot> {
@@ -444,10 +443,7 @@ fn read_linux_memory_snapshot() -> Option<(UsageSnapshot, UsageSnapshot)> {
 }
 
 fn read_linux_disk_snapshot() -> Option<UsageSnapshot> {
-    let output = Command::new("df")
-        .args(["-P", "-B1", "/"])
-        .output()
-        .ok()?;
+    let output = Command::new("df").args(["-P", "-B1", "/"]).output().ok()?;
     if !output.status.success() {
         return None;
     }
@@ -517,9 +513,8 @@ mod tests {
     use super::{
         enrich_public_ip_snapshot, parse_df_portable_bytes, parse_hostname_i_addresses,
         parse_linux_loadavg_cpu_percent, parse_linux_meminfo, parse_linux_net_dev,
-        parse_linux_proc_stat_cpu, parse_linux_uptime_seconds, system_info_value,
-        CpuCounters, NetworkCounters, NetworkSnapshot, PublicIpFamily, PublicIpProbe,
-        ResourceSampler,
+        parse_linux_proc_stat_cpu, parse_linux_uptime_seconds, system_info_value, CpuCounters,
+        NetworkCounters, NetworkSnapshot, PublicIpFamily, PublicIpProbe, ResourceSampler,
     };
 
     #[test]
@@ -654,9 +649,8 @@ Inter-|   Receive                                                |  Transmit
 
     #[test]
     fn parses_hostname_i_addresses_by_family() {
-        let value =
-            parse_hostname_i_addresses("192.168.1.10 2.56.116.39 fe80::1 2001:4860::8888 ")
-                .unwrap();
+        let value = parse_hostname_i_addresses("192.168.1.10 2.56.116.39 fe80::1 2001:4860::8888 ")
+            .unwrap();
 
         assert_eq!(value["local"][0], json!("192.168.1.10"));
         assert_eq!(value["local_ipv4"][0], json!("192.168.1.10"));
@@ -684,8 +678,7 @@ Inter-|   Receive                                                |  Transmit
 
     #[test]
     fn keeps_existing_public_ip_candidates_without_reprobing() {
-        let snapshot =
-            parse_hostname_i_addresses("2.56.116.39 2001:4860::8888 ").unwrap();
+        let snapshot = parse_hostname_i_addresses("2.56.116.39 2001:4860::8888 ").unwrap();
         let mut probe = FakePublicIpProbe::default();
 
         let value = enrich_public_ip_snapshot(Some(snapshot), &mut probe).unwrap();

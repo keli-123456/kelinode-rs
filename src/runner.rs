@@ -279,7 +279,8 @@ where
             if self.refresh_health {
                 let resources = if self.public_ip_probe {
                     let mut probe = SystemPublicIpProbe::default();
-                    self.resource_sampler.sample_with_public_ip_probe(&mut probe)
+                    self.resource_sampler
+                        .sample_with_public_ip_probe(&mut probe)
                 } else {
                     self.resource_sampler.sample()
                 };
@@ -348,9 +349,7 @@ impl Default for RuntimeLoopOptions {
     }
 }
 
-pub fn start_realtime_runtime_workers(
-    options: Vec<RealtimeOptions>,
-) -> RealtimeRuntimeWorkers {
+pub fn start_realtime_runtime_workers(options: Vec<RealtimeOptions>) -> RealtimeRuntimeWorkers {
     let (sender, events) = tokio::sync::mpsc::unbounded_channel();
     let handles = options
         .into_iter()
@@ -398,8 +397,7 @@ where
         match task {
             RealtimeRuntimeTask::Pong(pong) => transport.send(pong).await?,
             task => {
-                let Some((kind, topic, queued_message)) = runtime_loop_event_for_task(&task)
-                else {
+                let Some((kind, topic, queued_message)) = runtime_loop_event_for_task(&task) else {
                     continue;
                 };
                 send_realtime_runtime_event(
@@ -483,13 +481,11 @@ fn runtime_loop_event_for_task(
         RealtimeRuntimeTask::ConfigCheck | RealtimeRuntimeTask::ForceReload => {
             Some((RuntimeLoopEventKind::Reload, "config", "reload queued"))
         }
-        RealtimeRuntimeTask::UserSync => {
-            Some((
-                RuntimeLoopEventKind::RefreshUsers,
-                "users",
-                "user refresh queued",
-            ))
-        }
+        RealtimeRuntimeTask::UserSync => Some((
+            RuntimeLoopEventKind::RefreshUsers,
+            "users",
+            "user refresh queued",
+        )),
         RealtimeRuntimeTask::Ignore
         | RealtimeRuntimeTask::Pong(_)
         | RealtimeRuntimeTask::Error(_)
@@ -675,31 +671,27 @@ where
 {
     let reply = event.reply;
     let result = match event.kind {
-        RuntimeLoopEventKind::Reload => {
-            Ok((
-                RuntimeLoopSignal::Reload,
-                RuntimeLoopEventReply::queued("reload queued"),
-            ))
-        }
-        RuntimeLoopEventKind::RefreshUsers => {
-            match callbacks.refresh_users().await {
-                Ok(users_by_node_tag) => match callbacks
-                    .run_tick(RuntimeTickOptions {
-                        control: options.control.clone(),
-                        report_to_panel: false,
-                        users_by_node_tag,
-                    })
-                    .await
-                {
-                    Ok(signal) => Ok((
-                        signal,
-                        RuntimeLoopEventReply::applied("user refresh applied"),
-                    )),
-                    Err(error) => Err(error),
-                },
+        RuntimeLoopEventKind::Reload => Ok((
+            RuntimeLoopSignal::Reload,
+            RuntimeLoopEventReply::queued("reload queued"),
+        )),
+        RuntimeLoopEventKind::RefreshUsers => match callbacks.refresh_users().await {
+            Ok(users_by_node_tag) => match callbacks
+                .run_tick(RuntimeTickOptions {
+                    control: options.control.clone(),
+                    report_to_panel: false,
+                    users_by_node_tag,
+                })
+                .await
+            {
+                Ok(signal) => Ok((
+                    signal,
+                    RuntimeLoopEventReply::applied("user refresh applied"),
+                )),
                 Err(error) => Err(error),
-            }
-        }
+            },
+            Err(error) => Err(error),
+        },
     };
 
     if let Some(reply) = reply {
@@ -838,12 +830,11 @@ mod tests {
 
     use super::{
         handle_runtime_loop_event, node_config_for_info, refresh_runtime_health,
-        refresh_subscription_proxy_health, runtime_loop_event_for_task, run_runtime_loop,
-        run_runtime_loop_async, run_runtime_loop_async_with_events, should_run,
-        user_delta_not_supported,
-        AsyncRuntimeLoopCallbacks, PanelRuntimeLoop, RuntimeLoopCallbacks, RuntimeLoopExit,
-        RuntimeLoopEvent, RuntimeLoopEventKind, RuntimeLoopExitReason, RuntimeLoopFuture,
-        RuntimeLoopOptions,
+        refresh_subscription_proxy_health, run_runtime_loop, run_runtime_loop_async,
+        run_runtime_loop_async_with_events, runtime_loop_event_for_task, should_run,
+        user_delta_not_supported, AsyncRuntimeLoopCallbacks, PanelRuntimeLoop,
+        RuntimeLoopCallbacks, RuntimeLoopEvent, RuntimeLoopEventKind, RuntimeLoopExit,
+        RuntimeLoopExitReason, RuntimeLoopFuture, RuntimeLoopOptions,
     };
     use crate::config::{NodeConfig, ResolvedConfig, ResolvedMachineConfig};
     use crate::control::RuntimeControlOptions;
@@ -920,7 +911,9 @@ mod tests {
 
     #[test]
     fn user_delta_unsupported_matches_legacy_panel_errors() {
-        assert!(user_delta_not_supported("user delta request failed: 404 Not Found"));
+        assert!(user_delta_not_supported(
+            "user delta request failed: 404 Not Found"
+        ));
         assert!(user_delta_not_supported("405 Method Not Allowed"));
         assert!(!user_delta_not_supported("403 Forbidden"));
     }

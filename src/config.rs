@@ -215,11 +215,9 @@ fn deserialize_validation_content<'de, D>(deserializer: D) -> Result<String, D::
 where
     D: Deserializer<'de>,
 {
-    Ok(
-        Option::<ValidationContentInput>::deserialize(deserializer)?
-            .map(ValidationContentInput::into_normalized_string)
-            .unwrap_or_default(),
-    )
+    Ok(Option::<ValidationContentInput>::deserialize(deserializer)?
+        .map(ValidationContentInput::into_normalized_string)
+        .unwrap_or_default())
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -304,10 +302,7 @@ impl AppConfig {
         let machine_enabled = self.machine_mode_enabled();
         let mut machine = ResolvedMachineConfig {
             enabled: machine_enabled,
-            continue_on_error: self
-                .machine
-                .continue_on_error
-                .unwrap_or(machine_enabled),
+            continue_on_error: self.machine.continue_on_error.unwrap_or(machine_enabled),
             profiles: Vec::with_capacity(self.machine.profiles.len()),
         };
 
@@ -857,7 +852,10 @@ mod tests {
                     "{config}".to_string(),
                 ],
                 env: BTreeMap::from([
-                    (" MITA_CONFIG_JSON_FILE ".to_string(), " {config} ".to_string()),
+                    (
+                        " MITA_CONFIG_JSON_FILE ".to_string(),
+                        " {config} ".to_string(),
+                    ),
                     (" ".to_string(), "ignored".to_string()),
                 ]),
             },
@@ -868,17 +866,17 @@ mod tests {
 
         assert_eq!(sidecar.command, "/usr/local/bin/mita");
         assert_eq!(sidecar.args, vec!["run", "--config", "{config}"]);
-        assert_eq!(
-            sidecar.env["MITA_CONFIG_JSON_FILE"],
-            "{config}".to_string()
-        );
+        assert_eq!(sidecar.env["MITA_CONFIG_JSON_FILE"], "{config}".to_string());
         assert!(!sidecar.env.contains_key(""));
     }
 
     #[test]
     fn normalizes_config_dir_with_posix_semantics() {
         assert_eq!(normalize_config_dir(""), DEFAULT_CONFIG_DIR);
-        assert_eq!(normalize_config_dir("/var/lib/v2node/../v2node"), "/var/lib/v2node");
+        assert_eq!(
+            normalize_config_dir("/var/lib/v2node/../v2node"),
+            "/var/lib/v2node"
+        );
         assert_eq!(
             resolve_node_config_dir("/var/lib/v2node", "", 5, true),
             "/var/lib/v2node/node-5"

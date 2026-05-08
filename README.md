@@ -41,7 +41,7 @@ First cut:
 - Render Xray stats and user traffic policy defaults needed for traffic reporting.
 - Let runtime ticks rebuild the core plan from refreshed panel user sets before applying config.
 - Render SOCKS/HTTP account settings and AnyTLS client/padding settings from panel users.
-- Render HY2 bandwidth/obfs stream settings and TUIC congestion/0-RTT settings.
+- Render HY2 bandwidth/obfs stream settings, Xray TUIC congestion/0-RTT settings, and native TUIC congestion settings.
 - Render Shadowsocks 2022 server keys and Go-compatible per-user keys.
 - Parse Naive and Mieru node protocols while refusing to fake them inside the Xray renderer.
 - Split mixed node sets into Xray and per-node sidecar core plans for Naive/Mieru.
@@ -110,10 +110,12 @@ Not implemented yet:
 - Complete per-protocol user options for bandwidth limits, device-limit enforcement, and advanced protocol-specific credentials inside the runtime data path.
 - Naive sidecar runtime still needs a concrete Caddy forward_proxy integration before it can serve traffic.
 - Mieru sidecar traffic requires operators to configure the `mita` command, arguments, and optional environment for their deployment style.
-- Experimental `keli-core-rs` native rendering is limited to SOCKS/HTTP, direct outbound, per-user credentials, and basic domain block routes.
+- Experimental `keli-core-rs` native rendering covers SOCKS/HTTP, Shadowsocks, VMess, VLESS, Trojan, AnyTLS, Hysteria2, TUIC, common TCP/WS/HTTPUpgrade/gRPC transports, VLESS REALITY config, direct outbound, per-user credentials, and basic domain block routes.
 - Set `kernel.type: keli-core-rs` to select the experimental Rust-native core plan; `xray` remains the default.
-- Add a JSON-line control client for the `keli-core-rs` local status, stop, and traffic-drain socket.
+- Real-client interop and production soak testing are still required before making `keli-core-rs` the default.
 - Subscription reverse proxy.
+
+The native renderer parity gate is tracked in `docs/NATIVE_CORE_PARITY.md`.
 
 ## Sidecar Process Example
 

@@ -1,9 +1,7 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use crate::config::{
-    AgentConfig, AppConfig, NodeConfig, ResolvedConfig, SubscriptionProxyConfig,
-};
+use crate::config::{AgentConfig, AppConfig, NodeConfig, ResolvedConfig, SubscriptionProxyConfig};
 use crate::core::{
     core_kind_from_name, split_core_plans_for_nodes_with_kind, CorePlan, CorePlanBundle,
 };
@@ -11,8 +9,7 @@ use crate::machine::{resolve_machine_profiles_from_panel, MachineResolveSummary}
 use crate::node::{users_by_node_tag, NodeFailure, NodeManager, NodeManagerOptions};
 use crate::panel::types::{NodeInfo, UserInfo};
 use crate::port_forward::{
-    build_hysteria_port_forward_rules, new_hysteria_port_forward_status,
-    HysteriaPortForwardStatus,
+    build_hysteria_port_forward_rules, new_hysteria_port_forward_status, HysteriaPortForwardStatus,
 };
 use crate::realtime::{resolve_realtime_options, RealtimeOptions};
 
@@ -74,15 +71,9 @@ impl Bootstrap {
     }
 }
 
-pub async fn bootstrap_from_config(
-    config: &AppConfig,
-) -> Result<RuntimeBootstrapPlan, String> {
+pub async fn bootstrap_from_config(config: &AppConfig) -> Result<RuntimeBootstrapPlan, String> {
     let (resolved, manager) = build_node_manager_from_config(config).await?;
-    build_runtime_bootstrap_plan(
-        resolved,
-        manager.node_infos(),
-        manager.failures().to_vec(),
-    )
+    build_runtime_bootstrap_plan(resolved, manager.node_infos(), manager.failures().to_vec())
 }
 
 pub async fn bootstrap_from_config_with_users(
@@ -106,8 +97,8 @@ async fn build_node_manager_from_config(
     let options = NodeManagerOptions {
         continue_on_error: resolved.machine.continue_on_error,
     };
-    let manager = NodeManager::build_from_panel(&resolved.nodes, resolved.realtime.clone(), options)
-        .await?;
+    let manager =
+        NodeManager::build_from_panel(&resolved.nodes, resolved.realtime.clone(), options).await?;
     Ok((resolved, manager))
 }
 
@@ -133,12 +124,7 @@ pub fn build_runtime_bootstrap_plan(
     node_infos: Vec<NodeInfo>,
     node_failures: Vec<NodeFailure>,
 ) -> Result<RuntimeBootstrapPlan, String> {
-    build_runtime_bootstrap_plan_with_users(
-        resolved,
-        node_infos,
-        node_failures,
-        &BTreeMap::new(),
-    )
+    build_runtime_bootstrap_plan_with_users(resolved, node_infos, node_failures, &BTreeMap::new())
 }
 
 pub fn build_runtime_bootstrap_plan_with_users(
@@ -219,10 +205,7 @@ pub fn node_config_for_info<'a>(
     }
 }
 
-pub fn apply_machine_summary(
-    resolved: &mut ResolvedConfig,
-    summary: MachineResolveSummary,
-) {
+pub fn apply_machine_summary(resolved: &mut ResolvedConfig, summary: MachineResolveSummary) {
     resolved.nodes.extend(summary.nodes);
     merge_agent_config(&mut resolved.agent, summary.agent);
 }
@@ -231,10 +214,7 @@ fn merge_agent_config(target: &mut AgentConfig, source: AgentConfig) {
     merge_subscription_proxy(&mut target.subscription_proxy, source.subscription_proxy);
 }
 
-fn merge_subscription_proxy(
-    target: &mut SubscriptionProxyConfig,
-    source: SubscriptionProxyConfig,
-) {
+fn merge_subscription_proxy(target: &mut SubscriptionProxyConfig, source: SubscriptionProxyConfig) {
     if !source.enabled {
         return;
     }
@@ -298,9 +278,8 @@ fn resolve_realtime_options_for_nodes(
     node_infos
         .iter()
         .filter_map(|node| {
-            node_config_for_info(resolved, node.id, &node.tag).and_then(|config| {
-                resolve_realtime_options(&resolved.realtime, config, node)
-            })
+            node_config_for_info(resolved, node.id, &node.tag)
+                .and_then(|config| resolve_realtime_options(&resolved.realtime, config, node))
         })
         .collect()
 }
@@ -312,9 +291,9 @@ mod tests {
     use serde_json::json;
 
     use crate::config::{
-        AgentConfig, AppConfig, MachineProfileConfig, NodeConfig, ResolvedConfig,
-        ResolvedMachineConfig, RealtimeConfig, SubscriptionProxyConfig,
-        SubscriptionProxyProfile, SubscriptionProxyZeroSslConfig,
+        AgentConfig, AppConfig, MachineProfileConfig, NodeConfig, RealtimeConfig, ResolvedConfig,
+        ResolvedMachineConfig, SubscriptionProxyConfig, SubscriptionProxyProfile,
+        SubscriptionProxyZeroSslConfig,
     };
     use crate::core::CoreKind;
     use crate::machine::MachineResolveSummary;
@@ -401,7 +380,10 @@ mod tests {
         apply_machine_summary(&mut resolved, summary);
 
         assert_eq!(resolved.nodes.len(), 2);
-        assert_eq!(resolved.agent.subscription_proxy.https_listen, "0.0.0.0:443");
+        assert_eq!(
+            resolved.agent.subscription_proxy.https_listen,
+            "0.0.0.0:443"
+        );
         assert_eq!(resolved.agent.subscription_proxy.http_listen, "0.0.0.0:80");
         assert_eq!(
             resolved.agent.subscription_proxy.zerossl.certificate_id,
@@ -551,7 +533,10 @@ mod tests {
         let plan = build_runtime_bootstrap_plan(resolved, vec![node], Vec::new()).unwrap();
 
         assert_eq!(plan.core_plan.as_ref().unwrap().kind, CoreKind::KeliCoreRs);
-        assert_eq!(plan.core_plan.as_ref().unwrap().inbounds[0].protocol, "socks");
+        assert_eq!(
+            plan.core_plan.as_ref().unwrap().inbounds[0].protocol,
+            "socks"
+        );
     }
 
     #[test]

@@ -9,8 +9,8 @@ use crate::config::{
     SubscriptionProxyConfig as RuntimeSubscriptionProxyConfig, SubscriptionProxyProfile,
     SubscriptionProxyZeroSslConfig, DEFAULT_CONFIG_DIR, DEFAULT_TIMEOUT_SECS,
 };
-use crate::panel::{PanelClient, PanelClientOptions};
 use crate::panel::types::RealtimeBaseConfig;
+use crate::panel::{PanelClient, PanelClientOptions};
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 pub struct MachinePanelNode {
@@ -340,11 +340,11 @@ pub fn merge_subscription_proxy(
         }
     }
 
-    if target
-        .profiles
-        .iter()
-        .any(|existing| existing.site_id.eq_ignore_ascii_case(&proxy_profile.site_id))
-    {
+    if target.profiles.iter().any(|existing| {
+        existing
+            .site_id
+            .eq_ignore_ascii_case(&proxy_profile.site_id)
+    }) {
         return;
     }
     target.profiles.push(proxy_profile);
@@ -442,8 +442,14 @@ fn merge_runtime_agent(target: &mut AgentConfig, source: AgentConfig) {
         &mut target.subscription_proxy.http_listen,
         &source_proxy.http_listen,
     );
-    fill_if_empty(&mut target.subscription_proxy.cert_file, &source_proxy.cert_file);
-    fill_if_empty(&mut target.subscription_proxy.key_file, &source_proxy.key_file);
+    fill_if_empty(
+        &mut target.subscription_proxy.cert_file,
+        &source_proxy.cert_file,
+    );
+    fill_if_empty(
+        &mut target.subscription_proxy.key_file,
+        &source_proxy.key_file,
+    );
     fill_if_empty(
         &mut target.subscription_proxy.certificate_domain,
         &source_proxy.certificate_domain,
@@ -520,13 +526,9 @@ fn can_run_subscription_proxy_only(agent: &AgentConfig) -> bool {
     ) {
         return true;
     }
-    agent
-        .subscription_proxy
-        .profiles
-        .iter()
-        .any(|profile| {
-            valid_subscription_proxy_profile(&profile.site_id, &profile.upstream_base_url)
-        })
+    agent.subscription_proxy.profiles.iter().any(|profile| {
+        valid_subscription_proxy_profile(&profile.site_id, &profile.upstream_base_url)
+    })
 }
 
 fn valid_subscription_proxy_profile(site_id: &str, upstream_base_url: &str) -> bool {
@@ -590,10 +592,10 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        machine_profile_node_config_dir, resolve_machine_profile_result,
-        resolve_machine_profiles, sanitize_machine_profile_name, MachineNodesEnvelope,
-        MachineNodesResponse, MachinePanelNode, MachineProfileBaseConfig, MachineProfileInput,
-        MachineStatusPayload, NodeFailurePayload, SubscriptionProxyConfig,
+        machine_profile_node_config_dir, resolve_machine_profile_result, resolve_machine_profiles,
+        sanitize_machine_profile_name, MachineNodesEnvelope, MachineNodesResponse,
+        MachinePanelNode, MachineProfileBaseConfig, MachineProfileInput, MachineStatusPayload,
+        NodeFailurePayload, SubscriptionProxyConfig,
     };
     use crate::config::{MachineProfileConfig, SubscriptionProxyZeroSslConfig};
     use crate::panel::types::RealtimeBaseConfig;
@@ -699,7 +701,10 @@ mod tests {
         assert_eq!(result.nodes[0].machine_id, 3);
         assert_eq!(result.nodes[0].config_dir, "/etc/v2node/site-a/node-10");
         assert!(result.agent.subscription_proxy.enabled);
-        assert_eq!(result.agent.subscription_proxy.profiles[0].site_id, "site-one");
+        assert_eq!(
+            result.agent.subscription_proxy.profiles[0].site_id,
+            "site-one"
+        );
         assert_eq!(
             result.agent.subscription_proxy.profiles[0].subscribe_path,
             "answer/land"
@@ -725,7 +730,10 @@ mod tests {
 
     #[test]
     fn sanitizes_machine_profile_names() {
-        assert_eq!(sanitize_machine_profile_name("Site A / Prod"), "Site-A-Prod");
+        assert_eq!(
+            sanitize_machine_profile_name("Site A / Prod"),
+            "Site-A-Prod"
+        );
         assert_eq!(sanitize_machine_profile_name("///"), "machine");
     }
 

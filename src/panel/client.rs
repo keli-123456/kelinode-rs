@@ -334,10 +334,15 @@ impl PanelClient {
             ("token".to_string(), self.options.token.clone()),
         ];
         if self.options.machine_id > 0 {
-            query.push(("machine_id".to_string(), self.options.machine_id.to_string()));
+            query.push((
+                "machine_id".to_string(),
+                self.options.machine_id.to_string(),
+            ));
         }
 
-        self.client.request(method, self.endpoint(path)).query(&query)
+        self.client
+            .request(method, self.endpoint(path))
+            .query(&query)
     }
 
     fn ensure_machine_identity(&self) -> Result<()> {

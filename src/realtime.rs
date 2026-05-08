@@ -329,9 +329,9 @@ mod tests {
         build_realtime_dial_url, build_realtime_receipt, derive_realtime_url,
         format_realtime_user_summary, realtime_inbound_action, realtime_interval_to_duration,
         realtime_runtime_task, resolve_realtime_options, should_force_realtime_config_reload,
-        truncate_realtime_receipt_message, RealtimeInboundAction, RealtimeMessage,
-        RealtimeOptions, RealtimeRuntimeTask, RealtimeUserSummary,
-        REASON_SERVER_MACHINE_BOUND, REASON_SUBSCRIPTION_PROXY_CERT_STATE_CHANGED,
+        truncate_realtime_receipt_message, RealtimeInboundAction, RealtimeMessage, RealtimeOptions,
+        RealtimeRuntimeTask, RealtimeUserSummary, REASON_SERVER_MACHINE_BOUND,
+        REASON_SUBSCRIPTION_PROXY_CERT_STATE_CHANGED,
     };
 
     #[test]
@@ -378,13 +378,7 @@ mod tests {
             reason: "user.delta".to_string(),
             ..RealtimeMessage::default()
         };
-        let receipt = build_realtime_receipt(
-            "users",
-            &source,
-            "applied",
-            &"x".repeat(300),
-            123,
-        );
+        let receipt = build_realtime_receipt("users", &source, "applied", &"x".repeat(300), 123);
 
         assert_eq!(receipt.message_type, "receipt");
         assert_eq!(receipt.topic, "users");
@@ -442,8 +436,7 @@ mod tests {
         }));
 
         let options =
-            resolve_realtime_options(&RealtimeConfig::default(), &node_config, &node_info)
-                .unwrap();
+            resolve_realtime_options(&RealtimeConfig::default(), &node_config, &node_info).unwrap();
 
         assert_eq!(options.url, "wss://panel.example.test/custom/ws");
         assert_eq!(options.token, "token");
@@ -505,12 +498,10 @@ mod tests {
             "protocol": "vless"
         }));
 
-        assert!(resolve_realtime_options(
-            &RealtimeConfig::default(),
-            &node_config,
-            &node_info
-        )
-        .is_none());
+        assert!(
+            resolve_realtime_options(&RealtimeConfig::default(), &node_config, &node_info)
+                .is_none()
+        );
     }
 
     #[test]
@@ -560,10 +551,7 @@ mod tests {
             }),
             "deleted=1 added=2 updated=3"
         );
-        assert_eq!(
-            realtime_interval_to_duration(&json!("45")).as_secs(),
-            45
-        );
+        assert_eq!(realtime_interval_to_duration(&json!("45")).as_secs(), 45);
         assert_eq!(realtime_interval_to_duration(&json!(30)).as_secs(), 30);
         assert_eq!(truncate_realtime_receipt_message(" ok "), "ok");
     }
