@@ -80,6 +80,7 @@ First cut:
 - Generate stable subscription proxy fingerprints for reload decisions.
 - Plan subscription proxy HTTP health and ZeroSSL challenge-file routes.
 - Plan subscription proxy apply decisions for disabled, unchanged, start, and error states.
+- Add a subscription proxy runtime manager that tracks fingerprint and reportable status.
 
 Not implemented yet:
 

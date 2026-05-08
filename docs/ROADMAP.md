@@ -86,6 +86,7 @@
 - Stable subscription proxy fingerprint generation for reload decisions.
 - Subscription proxy HTTP health and ZeroSSL challenge-file route planning.
 - Subscription proxy apply decision planning for disabled, unchanged, start, and error states.
+- Subscription proxy runtime manager state tracking for fingerprint and machine-report status.
 - Compatibility tests around protocol parsing and endpoint construction.
 
 ## Phase 2: Runtime Control

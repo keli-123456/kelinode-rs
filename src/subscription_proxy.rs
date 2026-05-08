@@ -91,6 +91,12 @@ pub struct SubscriptionProxyApplyPlan {
     pub profiles: Vec<SubscriptionProxyProfile>,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SubscriptionProxyRuntimeManager {
+    fingerprint: String,
+    status: SubscriptionProxyStatus,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SubscriptionProxyRoute {
     Health,
@@ -112,6 +118,63 @@ impl SubscriptionProxyRouteError {
             Self::MethodNotAllowed => 405,
             Self::BadGateway(_) => 502,
         }
+    }
+}
+
+impl SubscriptionProxyRuntimeManager {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn fingerprint(&self) -> &str {
+        &self.fingerprint
+    }
+
+    pub fn status(&self) -> SubscriptionProxyStatus {
+        self.status.clone()
+    }
+
+    pub fn apply<F, G, H, I>(
+        &mut self,
+        config: &SubscriptionProxyConfig,
+        certificate_not_after: F,
+        ensure_csr: G,
+        mut file_readable: H,
+        write_file: I,
+    ) -> Result<SubscriptionProxyApplyPlan, String>
+    where
+        F: FnMut(&str) -> String,
+        G: FnMut(&str, &str) -> Result<String, String>,
+        H: FnMut(&str) -> bool,
+        I: FnMut(&SubscriptionProxyFileWrite) -> Result<(), String>,
+    {
+        let normalized = normalize_subscription_proxy_config(config)?;
+        let certificate_status = prepare_subscription_proxy_certificate_status_with_file_writes(
+            &normalized,
+            certificate_not_after,
+            ensure_csr,
+            &mut file_readable,
+            write_file,
+        );
+        let mut plan = plan_subscription_proxy_apply(
+            &normalized,
+            &self.fingerprint,
+            certificate_status,
+            &mut file_readable,
+        );
+        if plan.action == SubscriptionProxyApplyAction::Unchanged {
+            let mut status = self.status.clone();
+            merge_subscription_proxy_status(&mut status, &plan.status);
+            plan.status = status;
+        }
+        self.fingerprint = match plan.action {
+            SubscriptionProxyApplyAction::Disabled => String::new(),
+            SubscriptionProxyApplyAction::Unchanged
+            | SubscriptionProxyApplyAction::Start
+            | SubscriptionProxyApplyAction::Error => plan.fingerprint.clone(),
+        };
+        self.status = plan.status.clone();
+        Ok(plan)
     }
 }
 
@@ -906,8 +969,8 @@ mod tests {
         resolve_subscription_certificate_domain, subscription_proxy_certificate_owner_site_id,
         subscription_proxy_fingerprint, write_subscription_proxy_file,
         SubscriptionProxyApplyAction, SubscriptionProxyFileWrite, SubscriptionProxyInboundRequest,
-        SubscriptionProxyRoute, SubscriptionProxyRouteError, SubscriptionProxyServeMode,
-        SubscriptionProxyStatus, SubscriptionProxyUpstreamResponse,
+        SubscriptionProxyRoute, SubscriptionProxyRouteError, SubscriptionProxyRuntimeManager,
+        SubscriptionProxyServeMode, SubscriptionProxyStatus, SubscriptionProxyUpstreamResponse,
         DEFAULT_CHALLENGE_DIR, DEFAULT_HTTPS_LISTEN, DEFAULT_MAX_RESPONSE_BYTES,
     };
     use crate::config::{
@@ -1379,6 +1442,73 @@ mod tests {
         assert_eq!(plan.status.mode, "error");
         assert_eq!(plan.status.last_error, "csr failed");
         assert_eq!(plan.status.certificate_owner_site_id, "site-a");
+    }
+
+    #[test]
+    fn runtime_manager_tracks_start_and_unchanged_status() {
+        let mut manager = SubscriptionProxyRuntimeManager::new();
+        let mut config = normalized_proxy_for_apply();
+        config.allow_http_fallback = true;
+
+        let first = manager
+            .apply(
+                &config,
+                |_| String::new(),
+                |_, _| Ok("csr".to_string()),
+                |_| false,
+                |_| Ok(()),
+            )
+            .unwrap();
+        assert_eq!(first.action, SubscriptionProxyApplyAction::Start);
+        assert_eq!(first.status.mode, "http");
+        assert_eq!(manager.status().csr_pem, "csr");
+        assert!(!manager.fingerprint().is_empty());
+
+        let second = manager
+            .apply(
+                &config,
+                |_| String::new(),
+                |_, _| Ok("new csr".to_string()),
+                |_| false,
+                |_| Ok(()),
+            )
+            .unwrap();
+        assert_eq!(second.action, SubscriptionProxyApplyAction::Unchanged);
+        assert_eq!(manager.status().status, "running");
+        assert_eq!(manager.status().mode, "http");
+        assert_eq!(manager.status().csr_pem, "new csr");
+    }
+
+    #[test]
+    fn runtime_manager_disables_and_clears_fingerprint() {
+        let mut manager = SubscriptionProxyRuntimeManager::new();
+        let mut config = normalized_proxy_for_apply();
+        config.allow_http_fallback = true;
+
+        manager
+            .apply(
+                &config,
+                |_| String::new(),
+                |_, _| Ok("csr".to_string()),
+                |_| false,
+                |_| Ok(()),
+            )
+            .unwrap();
+        assert!(!manager.fingerprint().is_empty());
+
+        let plan = manager
+            .apply(
+                &SubscriptionProxyConfig::default(),
+                |_| String::new(),
+                |_, _| Ok("csr".to_string()),
+                |_| false,
+                |_| Ok(()),
+            )
+            .unwrap();
+
+        assert_eq!(plan.action, SubscriptionProxyApplyAction::Disabled);
+        assert!(manager.fingerprint().is_empty());
+        assert_eq!(manager.status().status, "disabled");
     }
 
     #[test]
