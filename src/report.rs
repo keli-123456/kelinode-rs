@@ -1,6 +1,8 @@
 use std::collections::BTreeMap;
 
 use crate::config::NodeConfig;
+use crate::core::CorePlan;
+use crate::core_control::{KeliCoreControlClient, KeliCoreTrafficRecord};
 use crate::panel::client::{PanelClient, PanelClientOptions};
 use crate::panel::types::UserTraffic;
 
@@ -49,10 +51,86 @@ pub trait NodeActivitySender {
     fn report_online_users(&mut self, online: &BTreeMap<u32, Vec<String>>) -> Result<(), String>;
 }
 
+pub trait KeliCoreTrafficDrainer {
+    fn drain_traffic(
+        &mut self,
+        minimum_bytes: u64,
+    ) -> Result<Vec<KeliCoreTrafficRecord>, String>;
+}
+
+impl KeliCoreTrafficDrainer for KeliCoreControlClient {
+    fn drain_traffic(
+        &mut self,
+        minimum_bytes: u64,
+    ) -> Result<Vec<KeliCoreTrafficRecord>, String> {
+        KeliCoreControlClient::drain_traffic(self, minimum_bytes).map_err(|err| err.message)
+    }
+}
+
 impl NodeActivitySnapshot {
     pub fn is_empty(&self) -> bool {
         self.traffic.is_empty() && self.online.is_empty()
     }
+}
+
+pub fn drain_keli_core_activity_snapshots<D>(
+    core_plan: &CorePlan,
+    drainer: &mut D,
+    minimum_bytes: u64,
+) -> Result<BTreeMap<String, NodeActivitySnapshot>, String>
+where
+    D: KeliCoreTrafficDrainer,
+{
+    let records = drainer.drain_traffic(minimum_bytes)?;
+    Ok(keli_core_traffic_snapshots(core_plan, &records))
+}
+
+pub fn keli_core_traffic_snapshots(
+    core_plan: &CorePlan,
+    records: &[KeliCoreTrafficRecord],
+) -> BTreeMap<String, NodeActivitySnapshot> {
+    let mut snapshots = BTreeMap::new();
+    for record in records {
+        let Some(uid) = core_plan.inbounds.iter().find_map(|inbound| {
+            (inbound.tag == record.node_tag).then(|| {
+                inbound
+                    .users
+                    .iter()
+                    .find(|user| user.uuid == record.user_uuid)
+                    .map(|user| user.id)
+            })?
+        }) else {
+            continue;
+        };
+
+        let snapshot = snapshots.entry(record.node_tag.clone()).or_insert_with(
+            NodeActivitySnapshot::default,
+        );
+        merge_user_traffic(
+            &mut snapshot.traffic,
+            uid,
+            u64_to_i64(record.upload),
+            u64_to_i64(record.download),
+        );
+    }
+    snapshots
+}
+
+fn merge_user_traffic(traffic: &mut Vec<UserTraffic>, uid: u32, upload: i64, download: i64) {
+    if let Some(existing) = traffic.iter_mut().find(|item| item.uid == uid) {
+        existing.upload = existing.upload.saturating_add(upload);
+        existing.download = existing.download.saturating_add(download);
+        return;
+    }
+    traffic.push(UserTraffic {
+        uid,
+        upload,
+        download,
+    });
+}
+
+fn u64_to_i64(value: u64) -> i64 {
+    i64::try_from(value).unwrap_or(i64::MAX)
 }
 
 pub fn report_activity_with_fallback<S>(
@@ -181,11 +259,15 @@ pub async fn report_activity_batch_to_panel(
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
+    use std::path::PathBuf;
 
     use super::{
-        report_activity_batch_with, report_activity_with_fallback, NodeActivityReport,
-        NodeActivitySender, NodeActivitySnapshot, NodeActivityTarget,
+        drain_keli_core_activity_snapshots, keli_core_traffic_snapshots,
+        report_activity_batch_with, report_activity_with_fallback, KeliCoreTrafficDrainer,
+        NodeActivityReport, NodeActivitySender, NodeActivitySnapshot, NodeActivityTarget,
     };
+    use crate::core::{CoreKind, CorePlan, InboundPlan, InboundUserPlan};
+    use crate::core_control::KeliCoreTrafficRecord;
     use crate::config::NodeConfig;
     use crate::panel::types::UserTraffic;
 
@@ -264,6 +346,37 @@ mod tests {
         assert_eq!(report.failures[0].tag, "node-fail");
     }
 
+    #[test]
+    fn maps_keli_core_traffic_records_to_activity_snapshots() {
+        let records = vec![
+            traffic_record("node-a", "uuid-a", 10, 20),
+            traffic_record("node-a", "uuid-a", 1, 2),
+            traffic_record("node-a", "missing", 100, 200),
+        ];
+
+        let snapshots = keli_core_traffic_snapshots(&core_plan(), &records);
+
+        assert_eq!(snapshots["node-a"].traffic.len(), 1);
+        assert_eq!(snapshots["node-a"].traffic[0].uid, 7);
+        assert_eq!(snapshots["node-a"].traffic[0].upload, 11);
+        assert_eq!(snapshots["node-a"].traffic[0].download, 22);
+    }
+
+    #[test]
+    fn drains_keli_core_traffic_through_injected_client() {
+        let mut drainer = FakeKeliCoreDrainer {
+            records: vec![traffic_record("node-a", "uuid-b", 30, 40)],
+            minimums: Vec::new(),
+        };
+
+        let snapshots = drain_keli_core_activity_snapshots(&core_plan(), &mut drainer, 64)
+            .unwrap();
+
+        assert_eq!(drainer.minimums, vec![64]);
+        assert_eq!(snapshots["node-a"].traffic[0].uid, 8);
+        assert_eq!(snapshots["node-a"].traffic[0].upload, 30);
+    }
+
     fn sample_snapshot() -> NodeActivitySnapshot {
         let mut online = BTreeMap::new();
         online.insert(7, vec!["198.51.100.7".to_string()]);
@@ -281,6 +394,73 @@ mod tests {
         NodeActivityTarget {
             tag: tag.to_string(),
             config: NodeConfig::default(),
+        }
+    }
+
+    fn core_plan() -> CorePlan {
+        CorePlan {
+            kind: CoreKind::KeliCoreRs,
+            config_path: PathBuf::from("/srv/v2node/config.json"),
+            listen_tags: vec!["node-a".to_string()],
+            inbounds: vec![InboundPlan {
+                tag: "node-a".to_string(),
+                protocol: "socks".to_string(),
+                listen: "127.0.0.1".to_string(),
+                port: 1080,
+                port_range: String::new(),
+                security: "none".to_string(),
+                network: "tcp".to_string(),
+                network_settings: serde_json::Value::Null,
+                flow: String::new(),
+                cipher: String::new(),
+                server_key: String::new(),
+                vless_decryption: String::new(),
+                padding_scheme: Vec::new(),
+                congestion_control: String::new(),
+                zero_rtt_handshake: false,
+                up_mbps: 0,
+                down_mbps: 0,
+                obfs: String::new(),
+                obfs_password: String::new(),
+                ignore_client_bandwidth: false,
+                alpn: Vec::new(),
+                fallback_to_ipv4: false,
+                cert_file: String::new(),
+                key_file: String::new(),
+                reject_unknown_sni: false,
+                server_name: String::new(),
+                reality_dest: String::new(),
+                reality_xver: 0,
+                reality_private_key: String::new(),
+                reality_short_id: String::new(),
+                reality_mldsa65_seed: String::new(),
+                users: vec![user(7, "uuid-a"), user(8, "uuid-b")],
+                routes: Vec::new(),
+            }],
+        }
+    }
+
+    fn user(id: u32, uuid: &str) -> InboundUserPlan {
+        InboundUserPlan {
+            id,
+            uuid: uuid.to_string(),
+            email: format!("node-a|{uuid}"),
+            speed_limit: 0,
+            device_limit: 0,
+        }
+    }
+
+    fn traffic_record(
+        node_tag: &str,
+        user_uuid: &str,
+        upload: u64,
+        download: u64,
+    ) -> KeliCoreTrafficRecord {
+        KeliCoreTrafficRecord {
+            node_tag: node_tag.to_string(),
+            user_uuid: user_uuid.to_string(),
+            upload,
+            download,
         }
     }
 
@@ -311,6 +491,21 @@ mod tests {
         ) -> Result<(), String> {
             self.calls.push("online");
             Ok(())
+        }
+    }
+
+    struct FakeKeliCoreDrainer {
+        records: Vec<KeliCoreTrafficRecord>,
+        minimums: Vec<u64>,
+    }
+
+    impl KeliCoreTrafficDrainer for FakeKeliCoreDrainer {
+        fn drain_traffic(
+            &mut self,
+            minimum_bytes: u64,
+        ) -> Result<Vec<KeliCoreTrafficRecord>, String> {
+            self.minimums.push(minimum_bytes);
+            Ok(self.records.clone())
         }
     }
 }
