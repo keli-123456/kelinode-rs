@@ -996,7 +996,6 @@ fn validate_keli_core_rs_inbound(inbound: &InboundPlan) -> Result<(), CoreError>
         }
         "mieru" => {
             validate_keli_core_rs_plain_tcp_inbound(inbound)?;
-            validate_keli_core_rs_mieru_options(inbound)?;
             Ok(())
         }
         "vless" | "trojan" | "vmess" => {
@@ -1049,25 +1048,6 @@ fn validate_keli_core_rs_protocol_scoped_fields(inbound: &InboundPlan) -> Result
     }
 
     Ok(())
-}
-
-fn validate_keli_core_rs_mieru_options(inbound: &InboundPlan) -> Result<(), CoreError> {
-    if !is_mieru_multiplexing_off(&inbound.multiplexing) {
-        return Err(CoreError::new(format!(
-            "keli-core-rs mieru multiplexing {} on inbound {} is not supported yet; use MULTIPLEXING_OFF",
-            inbound.multiplexing, inbound.tag
-        )));
-    }
-    Ok(())
-}
-
-fn is_mieru_multiplexing_off(value: &str) -> bool {
-    let value = value.trim();
-    value.is_empty()
-        || matches!(
-            value.to_ascii_uppercase().as_str(),
-            "0" | "OFF" | "NONE" | "MULTIPLEXING_OFF"
-        )
 }
 
 fn validate_keli_core_rs_plain_tcp_inbound(inbound: &InboundPlan) -> Result<(), CoreError> {
@@ -3084,7 +3064,7 @@ mod tests {
     }
 
     #[test]
-    fn keli_core_rs_rejects_mieru_multiplexing_until_core_supports_it() {
+    fn keli_core_rs_accepts_mieru_multiplexing_modes() {
         let mut node = test_node("mieru", 43, "");
         node.common.multiplexing = "MULTIPLEXING_HIGH".to_string();
         let plan = CorePlan::from_nodes(
@@ -3094,10 +3074,10 @@ mod tests {
         )
         .unwrap();
 
-        let err = render_core_config(&plan).unwrap_err();
+        let config = render_core_config(&plan).unwrap();
 
-        assert!(err.message.contains("multiplexing"));
-        assert!(err.message.contains("MULTIPLEXING_OFF"));
+        assert_eq!(config["inbounds"][0]["protocol"], "mieru");
+        assert_eq!(config["inbounds"][0]["transport"]["network"], "tcp");
     }
 
     #[test]
