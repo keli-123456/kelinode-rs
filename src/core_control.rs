@@ -101,8 +101,15 @@ impl KeliCoreControlClient {
         self.send(&KeliCoreCommand::Status)
     }
 
+    pub fn apply_config_response(
+        &self,
+        config: Value,
+    ) -> Result<KeliCoreResponse, KeliCoreControlError> {
+        self.send(&KeliCoreCommand::ApplyConfig { config })
+    }
+
     pub fn apply_config(&self, config: Value) -> Result<KeliCoreApplyResult, KeliCoreControlError> {
-        match self.send(&KeliCoreCommand::ApplyConfig { config })? {
+        match self.apply_config_response(config)? {
             KeliCoreResponse::Applied {
                 decision,
                 status,

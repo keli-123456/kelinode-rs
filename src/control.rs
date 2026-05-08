@@ -4,7 +4,7 @@ use crate::config::SidecarProcessConfig;
 use crate::core::{
     render_core_config, write_core_config, CoreConfigWriteResult, CoreKind, CorePlan,
 };
-use crate::core_control::KeliCoreControlClient;
+use crate::core_control::{KeliCoreControlClient, KeliCoreResponse};
 use crate::health::{build_machine_status_payload, HealthReportInput};
 use crate::machine::{MachineStatusPayload, MachineStatusResponse, MachineUpgradeCommand};
 use crate::panel::types::UserInfo;
@@ -60,6 +60,12 @@ pub struct RuntimeTickResult {
     pub apply: RuntimeApplyResult,
     pub panel_action: RuntimePanelAction,
     pub signal: RuntimeLoopSignal,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct HotApplyError {
+    message: String,
+    fallback_reload: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -156,14 +162,17 @@ where
             match try_hot_apply_keli_core_rs_config(core_plan, process_supervisor, &spec) {
                 Ok(Some(status)) => return Ok(status),
                 Ok(None) => {}
-                Err(error) => {
+                Err(error) if error.fallback_reload => {
                     let mut status = process_supervisor
                         .reload(&spec)
                         .map_err(|err| err.message)?;
-                    status.message =
-                        format!("reloaded after keli-core-rs hot apply failed: {error}");
+                    status.message = format!(
+                        "reloaded after keli-core-rs hot apply failed: {}",
+                        error.message
+                    );
                     return Ok(status);
                 }
+                Err(error) => return Err(error.message),
             }
         }
         return process_supervisor.reload(&spec).map_err(|err| err.message);
@@ -176,7 +185,7 @@ fn try_hot_apply_keli_core_rs_config<P>(
     core_plan: &CorePlan,
     process_supervisor: &mut P,
     spec: &ProcessSpec,
-) -> Result<Option<ProcessStatus>, String>
+) -> Result<Option<ProcessStatus>, HotApplyError>
 where
     P: ProcessSupervisor,
 {
@@ -186,17 +195,43 @@ where
 
     let current = process_supervisor
         .status(&spec.name)
-        .map_err(|err| err.message)?;
+        .map_err(|err| HotApplyError::fallback(err.message))?;
     if !current.is_running() {
         return Ok(None);
     }
 
-    let config = render_core_config(core_plan).map_err(|err| err.message)?;
+    let config = render_core_config(core_plan).map_err(|err| HotApplyError::fatal(err.message))?;
     let client = KeliCoreControlClient::new(keli_core_rs_control_addr(&core_plan.config_path));
-    let applied = client.apply_config(config).map_err(|err| err.message)?;
-    let mut status = current;
-    status.message = format!("hot applied keli-core-rs config ({})", applied.decision);
-    Ok(Some(status))
+    match client.apply_config_response(config) {
+        Ok(KeliCoreResponse::Applied { decision, .. }) => {
+            let mut status = current;
+            status.message = format!("hot applied keli-core-rs config ({decision})");
+            Ok(Some(status))
+        }
+        Ok(KeliCoreResponse::Error { message }) => Err(HotApplyError::fatal(format!(
+            "keli-core-rs rejected hot config: {message}"
+        ))),
+        Ok(response) => Err(HotApplyError::fallback(format!(
+            "unexpected keli-core-rs apply response: {response:?}"
+        ))),
+        Err(error) => Err(HotApplyError::fallback(error.message)),
+    }
+}
+
+impl HotApplyError {
+    fn fallback(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            fallback_reload: true,
+        }
+    }
+
+    fn fatal(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            fallback_reload: false,
+        }
+    }
 }
 
 fn configured_sidecar_process<'a>(
@@ -550,6 +585,87 @@ mod tests {
             .unwrap()
             .message
             .contains("updated"));
+        join.join().unwrap();
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn rejected_keli_core_rs_hot_config_does_not_reload_running_process() {
+        let (dir, initial_plan, listener) =
+            bindable_keli_core_rs_plan("33333333-3333-3333-3333-333333333333");
+        let mut process = MemoryProcessSupervisor::default();
+        let mut port_forward = FakePortForwardExecutor::default();
+
+        apply_runtime_plan(
+            &initial_plan,
+            &mut process,
+            &mut port_forward,
+            RuntimeControlOptions {
+                machine_id: 3,
+                start_core: true,
+                hot_apply_keli_core_rs: true,
+                ..RuntimeControlOptions::default()
+            },
+        )
+        .unwrap();
+
+        let updated_plan =
+            keli_core_rs_plan_with_user(&dir, "44444444-4444-4444-4444-444444444444");
+        let (seen_tx, seen_rx) = mpsc::channel();
+        let join = thread::spawn(move || {
+            listener.set_nonblocking(true).unwrap();
+            let deadline = Instant::now() + Duration::from_secs(2);
+            loop {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        let mut command = String::new();
+                        BufReader::new(stream.try_clone().unwrap())
+                            .read_line(&mut command)
+                            .unwrap();
+                        writeln!(
+                            stream,
+                            "{}",
+                            json!({
+                                "type": "error",
+                                "message": "invalid hot config"
+                            })
+                        )
+                        .unwrap();
+                        seen_tx.send(command).unwrap();
+                        return;
+                    }
+                    Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                        if Instant::now() >= deadline {
+                            seen_tx.send("no hot apply connection".to_string()).unwrap();
+                            return;
+                        }
+                        thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(err) => panic!("accept keli-core-rs control connection: {err}"),
+                }
+            }
+        });
+
+        let error = apply_runtime_plan(
+            &updated_plan,
+            &mut process,
+            &mut port_forward,
+            RuntimeControlOptions {
+                machine_id: 3,
+                start_core: true,
+                hot_apply_keli_core_rs: true,
+                ..RuntimeControlOptions::default()
+            },
+        )
+        .unwrap_err();
+        let command = seen_rx.recv_timeout(Duration::from_secs(3)).unwrap();
+
+        assert!(command.contains("\"apply_config\""));
+        assert!(error.contains("rejected hot config"));
+        assert!(error.contains("invalid hot config"));
+        assert_eq!(process.starts.len(), 1);
+        assert_eq!(process.stops.len(), 1);
         join.join().unwrap();
 
         let _ = fs::remove_dir_all(dir);
