@@ -18,6 +18,7 @@ use crate::realtime::{
     RealtimeRuntimeTask,
 };
 use crate::realtime_client::{connect_realtime_transport, RealtimeTransport};
+use crate::report::report_keli_core_activity_to_panel;
 use crate::runtime::{
     node_config_for_info as runtime_node_config_for_info, rebuild_runtime_plan_with_users,
     RuntimeBootstrapPlan,
@@ -309,6 +310,7 @@ where
                 let action =
                     report_runtime_apply_result_to_panels(&self.panel_clients, &result.apply)
                         .await?;
+                report_keli_core_activity_to_panel(&self.plan).await?;
                 return Ok(runtime_loop_signal(&action));
             }
             Ok(result.signal)

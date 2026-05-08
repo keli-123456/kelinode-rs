@@ -1,10 +1,12 @@
 use std::collections::BTreeMap;
 
 use crate::config::NodeConfig;
-use crate::core::CorePlan;
+use crate::core::{CoreKind, CorePlan};
 use crate::core_control::{KeliCoreControlClient, KeliCoreTrafficRecord};
 use crate::panel::client::{PanelClient, PanelClientOptions};
 use crate::panel::types::UserTraffic;
+use crate::process::keli_core_rs_control_addr;
+use crate::runtime::{node_config_for_info, RuntimeBootstrapPlan};
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct NodeActivitySnapshot {
@@ -256,6 +258,50 @@ pub async fn report_activity_batch_to_panel(
     batch
 }
 
+pub async fn report_keli_core_activity_to_panel(
+    plan: &RuntimeBootstrapPlan,
+) -> Result<NodeActivityBatchReport, String> {
+    let Some(core_plan) = &plan.core_plan else {
+        return Ok(NodeActivityBatchReport::default());
+    };
+    if core_plan.kind != CoreKind::KeliCoreRs {
+        return Ok(NodeActivityBatchReport::default());
+    }
+
+    let mut client = KeliCoreControlClient::new(keli_core_rs_control_addr(&core_plan.config_path));
+    let snapshots =
+        drain_keli_core_activity_snapshots(core_plan, &mut client, minimum_report_bytes(plan))?;
+    let targets = runtime_activity_targets(plan);
+    Ok(report_activity_batch_to_panel(&targets, &snapshots).await)
+}
+
+pub fn runtime_activity_targets(plan: &RuntimeBootstrapPlan) -> Vec<NodeActivityTarget> {
+    plan.node_infos
+        .iter()
+        .filter_map(|node| {
+            node_config_for_info(&plan.resolved, node.id, &node.tag).map(|config| {
+                NodeActivityTarget {
+                    tag: node.tag.clone(),
+                    config: config.clone(),
+                }
+            })
+        })
+        .collect()
+}
+
+fn minimum_report_bytes(plan: &RuntimeBootstrapPlan) -> u64 {
+    plan.node_infos
+        .iter()
+        .filter_map(|node| {
+            node.common
+                .base_config
+                .as_ref()
+                .map(|config| config.node_report_min_traffic)
+        })
+        .max()
+        .unwrap_or(0)
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
@@ -265,11 +311,13 @@ mod tests {
         drain_keli_core_activity_snapshots, keli_core_traffic_snapshots,
         report_activity_batch_with, report_activity_with_fallback, KeliCoreTrafficDrainer,
         NodeActivityReport, NodeActivitySender, NodeActivitySnapshot, NodeActivityTarget,
+        runtime_activity_targets,
     };
     use crate::core::{CoreKind, CorePlan, InboundPlan, InboundUserPlan};
     use crate::core_control::KeliCoreTrafficRecord;
-    use crate::config::NodeConfig;
-    use crate::panel::types::UserTraffic;
+    use crate::config::{AgentConfig, NodeConfig, ResolvedConfig, ResolvedMachineConfig};
+    use crate::panel::types::{CommonNode, NodeInfo, UserTraffic};
+    use crate::runtime::build_runtime_bootstrap_plan;
 
     #[test]
     fn skips_empty_activity_snapshot() {
@@ -375,6 +423,39 @@ mod tests {
         assert_eq!(drainer.minimums, vec![64]);
         assert_eq!(snapshots["node-a"].traffic[0].uid, 8);
         assert_eq!(snapshots["node-a"].traffic[0].upload, 30);
+    }
+
+    #[test]
+    fn builds_activity_targets_from_runtime_plan() {
+        let resolved = ResolvedConfig {
+            kernel: Default::default(),
+            realtime: Default::default(),
+            machine: ResolvedMachineConfig {
+                enabled: false,
+                continue_on_error: false,
+                profiles: Vec::new(),
+            },
+            agent: AgentConfig::default(),
+            nodes: vec![NodeConfig {
+                url: "https://panel.example.test".to_string(),
+                token: "token".to_string(),
+                node_id: 9,
+                ..NodeConfig::default()
+            }],
+        };
+        let common: CommonNode = serde_json::from_value(serde_json::json!({
+            "protocol": "socks",
+            "server_port": 1080
+        }))
+        .unwrap();
+        let node = NodeInfo::from_common("https://panel.example.test", 9, common).unwrap();
+        let plan = build_runtime_bootstrap_plan(resolved, vec![node.clone()], Vec::new()).unwrap();
+
+        let targets = runtime_activity_targets(&plan);
+
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].tag, node.tag);
+        assert_eq!(targets[0].config.token, "token");
     }
 
     fn sample_snapshot() -> NodeActivitySnapshot {
