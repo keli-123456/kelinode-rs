@@ -554,6 +554,57 @@ pub fn fetch_subscription_proxy_upstream_blocking(
     })
 }
 
+pub fn handle_subscription_proxy_request<F>(
+    profiles: &[SubscriptionProxyProfile],
+    request: &SubscriptionProxyInboundRequest,
+    max_response_bytes: u64,
+    mut fetch_upstream: F,
+) -> Result<SubscriptionProxyClientResponse, SubscriptionProxyRouteError>
+where
+    F: FnMut(
+        &SubscriptionProxyUpstreamRequest,
+    ) -> Result<SubscriptionProxyUpstreamResponse, SubscriptionProxyRouteError>,
+{
+    let head_only = request.method.trim().eq_ignore_ascii_case("HEAD");
+    match plan_subscription_proxy_request(profiles, request)? {
+        SubscriptionProxyRoute::Health => Ok(plan_subscription_proxy_health_response(head_only)),
+        SubscriptionProxyRoute::Upstream(upstream) => {
+            let head_only = upstream.head_only;
+            let response = fetch_upstream(&upstream)?;
+            plan_subscription_proxy_response(response, max_response_bytes, head_only)
+        }
+        SubscriptionProxyRoute::ChallengeFile(_) => Err(SubscriptionProxyRouteError::NotFound),
+    }
+}
+
+pub fn handle_subscription_proxy_http_request<F>(
+    config: &SubscriptionProxyConfig,
+    request: &SubscriptionProxyInboundRequest,
+    mut read_file: F,
+) -> Result<SubscriptionProxyClientResponse, SubscriptionProxyRouteError>
+where
+    F: FnMut(&str) -> Result<Option<Vec<u8>>, String>,
+{
+    let head_only = request.method.trim().eq_ignore_ascii_case("HEAD");
+    match plan_subscription_proxy_http_request(config, request)? {
+        SubscriptionProxyRoute::Health => Ok(plan_subscription_proxy_health_response(head_only)),
+        SubscriptionProxyRoute::ChallengeFile(path) => {
+            let Some(body) = read_file(&path).map_err(SubscriptionProxyRouteError::BadGateway)?
+            else {
+                return Err(SubscriptionProxyRouteError::NotFound);
+            };
+            let mut headers = BTreeMap::new();
+            headers.insert("Content-Type".to_string(), "text/plain; charset=utf-8".to_string());
+            Ok(SubscriptionProxyClientResponse {
+                status: 200,
+                headers,
+                body: if head_only { Vec::new() } else { body },
+            })
+        }
+        SubscriptionProxyRoute::Upstream(_) => Err(SubscriptionProxyRouteError::NotFound),
+    }
+}
+
 pub fn plan_subscription_proxy_health_response(head_only: bool) -> SubscriptionProxyClientResponse {
     let mut headers = BTreeMap::new();
     headers.insert("Content-Type".to_string(), "application/json".to_string());
@@ -1279,6 +1330,7 @@ mod tests {
 
     use super::{
         build_subscription_upstream_url, normalize_subscription_proxy_config,
+        handle_subscription_proxy_http_request, handle_subscription_proxy_request,
         normalize_subscription_proxy_config_with_public_ipv4,
         plan_subscription_proxy_health_response, plan_subscription_proxy_http_request,
         plan_subscription_proxy_http_server, plan_subscription_proxy_main_server,
@@ -2199,6 +2251,75 @@ mod tests {
         assert_eq!(upstream.headers["X-Forwarded-For"], "198.51.100.8");
         assert!(!upstream.headers.contains_key("Connection"));
         assert!(!upstream.headers.contains_key("Host"));
+    }
+
+    #[test]
+    fn handles_subscription_proxy_request_with_injected_upstream_fetcher() {
+        let response = handle_subscription_proxy_request(
+            &[SubscriptionProxyProfile {
+                site_id: "site-a".to_string(),
+                upstream_base_url: "https://panel.example.test".to_string(),
+                subscribe_path: "s".to_string(),
+            }],
+            &SubscriptionProxyInboundRequest {
+                method: "GET".to_string(),
+                path: "/sub/site-a/token".to_string(),
+                raw_query: "flag=sing-box".to_string(),
+                ..SubscriptionProxyInboundRequest::default()
+            },
+            1024,
+            |request| {
+                assert_eq!(
+                    request.url,
+                    "https://panel.example.test/s/token?flag=sing-box"
+                );
+                Ok(SubscriptionProxyUpstreamResponse {
+                    status: 200,
+                    body: b"subscription".to_vec(),
+                    ..SubscriptionProxyUpstreamResponse::default()
+                })
+            },
+        )
+        .unwrap();
+
+        assert_eq!(response.status, 200);
+        assert_eq!(response.body, b"subscription".to_vec());
+    }
+
+    #[test]
+    fn handles_subscription_proxy_http_challenge_with_injected_reader() {
+        let response = handle_subscription_proxy_http_request(
+            &SubscriptionProxyConfig {
+                challenge_dir: "/var/lib/v2node/challenges".to_string(),
+                ..SubscriptionProxyConfig::default()
+            },
+            &SubscriptionProxyInboundRequest {
+                method: "HEAD".to_string(),
+                path: "/.well-known/pki-validation/token.txt".to_string(),
+                ..SubscriptionProxyInboundRequest::default()
+            },
+            |path| {
+                assert_eq!(path, "/var/lib/v2node/challenges/token.txt");
+                Ok(Some(b"challenge-token\n".to_vec()))
+            },
+        )
+        .unwrap();
+
+        assert_eq!(response.status, 200);
+        assert_eq!(response.headers["Content-Type"], "text/plain; charset=utf-8");
+        assert!(response.body.is_empty());
+
+        let err = handle_subscription_proxy_http_request(
+            &SubscriptionProxyConfig::default(),
+            &SubscriptionProxyInboundRequest {
+                method: "GET".to_string(),
+                path: "/.well-known/pki-validation/missing.txt".to_string(),
+                ..SubscriptionProxyInboundRequest::default()
+            },
+            |_| Ok(None),
+        )
+        .unwrap_err();
+        assert_eq!(err, SubscriptionProxyRouteError::NotFound);
     }
 
     #[test]

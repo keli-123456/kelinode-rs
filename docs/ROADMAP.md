@@ -76,6 +76,7 @@
 - Subscription proxy profile normalization and upstream subscription URL construction.
 - Subscription proxy request routing for health checks and upstream subscription forwarding.
 - Subscription proxy bounded reqwest upstream fetch execution boundary.
+- Subscription proxy request handlers for main upstream and HTTP challenge traffic.
 - Subscription proxy response forwarding plan with size limits and HEAD handling.
 - Subscription proxy certificate domain normalization with IPv6-to-public-IPv4 fallback planning.
 - Subscription proxy certificate status, owner site selection, and serve-mode fallback planning.
