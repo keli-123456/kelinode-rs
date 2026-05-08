@@ -71,6 +71,7 @@ First cut:
 - Plan subscription proxy `/health` and `/sub/{site}/{token}` requests with Go-compatible header forwarding.
 - Fetch subscription proxy upstream responses through a bounded reqwest execution boundary.
 - Handle subscription proxy main and HTTP challenge requests through injectable execution boundaries.
+- Parse and render minimal HTTP/1.1 requests and responses for the subscription proxy server boundary.
 - Plan subscription proxy response forwarding with size limits, header filtering, and HEAD handling.
 - Resolve IPv6 subscription proxy certificate domains through an injectable public IPv4 detector.
 - Plan subscription proxy certificate status, owner site selection, and HTTP fallback mode.

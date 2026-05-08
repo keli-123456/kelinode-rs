@@ -147,6 +147,105 @@ impl SubscriptionProxyRouteError {
     }
 }
 
+pub fn parse_subscription_proxy_http_request(
+    raw: &[u8],
+    remote_addr: &str,
+) -> Result<SubscriptionProxyInboundRequest, String> {
+    let text = std::str::from_utf8(raw).map_err(|_| "invalid utf-8 request".to_string())?;
+    let Some((head, _)) = text.split_once("\r\n\r\n") else {
+        return Err("incomplete http request".to_string());
+    };
+    let mut lines = head.split("\r\n");
+    let request_line = lines
+        .next()
+        .ok_or_else(|| "missing http request line".to_string())?;
+    let mut parts = request_line.split_whitespace();
+    let method = parts
+        .next()
+        .ok_or_else(|| "missing http method".to_string())?
+        .to_string();
+    let target = parts
+        .next()
+        .ok_or_else(|| "missing http target".to_string())?;
+    let version = parts
+        .next()
+        .ok_or_else(|| "missing http version".to_string())?;
+    if !version.starts_with("HTTP/") {
+        return Err("invalid http version".to_string());
+    }
+    let (path, raw_query) = target
+        .split_once('?')
+        .map(|(path, query)| (path.to_string(), query.to_string()))
+        .unwrap_or_else(|| (target.to_string(), String::new()));
+    if path.is_empty() || !path.starts_with('/') {
+        return Err("invalid http path".to_string());
+    }
+
+    let mut headers = BTreeMap::new();
+    for line in lines {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let Some((key, value)) = line.split_once(':') else {
+            return Err("invalid http header".to_string());
+        };
+        let key = key.trim();
+        if key.is_empty() {
+            return Err("invalid http header".to_string());
+        }
+        headers.insert(key.to_string(), value.trim().to_string());
+    }
+    let host = headers
+        .iter()
+        .find(|(key, _)| key.eq_ignore_ascii_case("host"))
+        .map(|(_, value)| value.clone())
+        .unwrap_or_default();
+
+    Ok(SubscriptionProxyInboundRequest {
+        method,
+        path,
+        raw_query,
+        host,
+        remote_addr: remote_addr.to_string(),
+        headers,
+    })
+}
+
+pub fn render_subscription_proxy_http_response(
+    response: &SubscriptionProxyClientResponse,
+) -> Vec<u8> {
+    let mut output = Vec::new();
+    let reason = http_reason_phrase(response.status);
+    output.extend_from_slice(format!("HTTP/1.1 {} {}\r\n", response.status, reason).as_bytes());
+    output.extend_from_slice(format!("Content-Length: {}\r\n", response.body.len()).as_bytes());
+    output.extend_from_slice(b"Connection: close\r\n");
+    for (key, value) in &response.headers {
+        if valid_http_header_name(key) && valid_http_header_value(value) {
+            output.extend_from_slice(format!("{key}: {value}\r\n").as_bytes());
+        }
+    }
+    output.extend_from_slice(b"\r\n");
+    output.extend_from_slice(&response.body);
+    output
+}
+
+pub fn subscription_proxy_error_response(
+    error: &SubscriptionProxyRouteError,
+) -> SubscriptionProxyClientResponse {
+    let mut headers = BTreeMap::new();
+    headers.insert("Content-Type".to_string(), "text/plain; charset=utf-8".to_string());
+    let message = match error {
+        SubscriptionProxyRouteError::NotFound => "not found",
+        SubscriptionProxyRouteError::MethodNotAllowed => "method not allowed",
+        SubscriptionProxyRouteError::BadGateway(_) => "bad gateway",
+    };
+    SubscriptionProxyClientResponse {
+        status: error.status_code(),
+        headers,
+        body: format!("{message}\n").into_bytes(),
+    }
+}
+
 impl SubscriptionProxyRuntimeManager {
     pub fn new() -> Self {
         Self::default()
@@ -1133,6 +1232,47 @@ fn read_limited_upstream_body<R: Read>(
     Ok(body)
 }
 
+fn http_reason_phrase(status: u16) -> &'static str {
+    match status {
+        200 => "OK",
+        400 => "Bad Request",
+        404 => "Not Found",
+        405 => "Method Not Allowed",
+        502 => "Bad Gateway",
+        _ => "OK",
+    }
+}
+
+fn valid_http_header_name(value: &str) -> bool {
+    !value.is_empty()
+        && value.bytes().all(|byte| {
+            matches!(
+                byte,
+                b'!' | b'#'
+                    | b'$'
+                    | b'%'
+                    | b'&'
+                    | b'\''
+                    | b'*'
+                    | b'+'
+                    | b'-'
+                    | b'.'
+                    | b'^'
+                    | b'_'
+                    | b'`'
+                    | b'|'
+                    | b'~'
+                    | b'0'..=b'9'
+                    | b'A'..=b'Z'
+                    | b'a'..=b'z'
+            )
+        })
+}
+
+fn valid_http_header_value(value: &str) -> bool {
+    !value.bytes().any(|byte| matches!(byte, b'\r' | b'\n'))
+}
+
 fn first_non_empty(value: &str, fallback: &str) -> String {
     if value.is_empty() {
         fallback.to_string()
@@ -1332,6 +1472,7 @@ mod tests {
         build_subscription_upstream_url, normalize_subscription_proxy_config,
         handle_subscription_proxy_http_request, handle_subscription_proxy_request,
         normalize_subscription_proxy_config_with_public_ipv4,
+        parse_subscription_proxy_http_request,
         plan_subscription_proxy_health_response, plan_subscription_proxy_http_request,
         plan_subscription_proxy_http_server, plan_subscription_proxy_main_server,
         plan_subscription_proxy_request, plan_subscription_proxy_response,
@@ -1341,7 +1482,9 @@ mod tests {
         prepare_subscription_proxy_certificate_status,
         prepare_subscription_proxy_certificate_status_with_file_writes,
         read_limited_upstream_body,
+        render_subscription_proxy_http_response,
         resolve_subscription_certificate_domain, subscription_proxy_certificate_owner_site_id,
+        subscription_proxy_error_response,
         subscription_proxy_file_readable, subscription_proxy_fingerprint,
         write_subscription_proxy_file, SubscriptionProxyApplyAction, SubscriptionProxyFileWrite,
         SubscriptionProxyInboundRequest, SubscriptionProxyRoute, SubscriptionProxyRouteError,
@@ -2320,6 +2463,45 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(err, SubscriptionProxyRouteError::NotFound);
+    }
+
+    #[test]
+    fn parses_minimal_http_request_for_subscription_proxy_server() {
+        let request = parse_subscription_proxy_http_request(
+            b"HEAD /sub/site-a/token?flag=sing-box HTTP/1.1\r\nHost: proxy.example.test\r\nUser-Agent: Keli\r\n\r\n",
+            "198.51.100.8:51234",
+        )
+        .unwrap();
+
+        assert_eq!(request.method, "HEAD");
+        assert_eq!(request.path, "/sub/site-a/token");
+        assert_eq!(request.raw_query, "flag=sing-box");
+        assert_eq!(request.host, "proxy.example.test");
+        assert_eq!(request.remote_addr, "198.51.100.8:51234");
+        assert_eq!(request.headers["User-Agent"], "Keli");
+    }
+
+    #[test]
+    fn renders_http_response_and_route_errors() {
+        let mut headers = BTreeMap::new();
+        headers.insert("Content-Type".to_string(), "text/plain".to_string());
+        headers.insert("Bad\nHeader".to_string(), "ignored".to_string());
+        let response = render_subscription_proxy_http_response(&SubscriptionProxyClientResponse {
+            status: 200,
+            headers,
+            body: b"ok".to_vec(),
+        });
+        let text = String::from_utf8(response).unwrap();
+
+        assert!(text.starts_with("HTTP/1.1 200 OK\r\n"));
+        assert!(text.contains("Content-Length: 2\r\n"));
+        assert!(text.contains("Content-Type: text/plain\r\n"));
+        assert!(text.ends_with("\r\n\r\nok"));
+
+        let response =
+            subscription_proxy_error_response(&SubscriptionProxyRouteError::MethodNotAllowed);
+        assert_eq!(response.status, 405);
+        assert_eq!(response.body, b"method not allowed\n".to_vec());
     }
 
     #[test]
