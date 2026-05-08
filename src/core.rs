@@ -520,27 +520,32 @@ fn keli_core_rs_route_outbound(
         .and_then(Value::as_str)
         .map(str::trim)
         .unwrap_or_default();
-    if protocol != "freedom" {
+    let protocol = protocol.to_ascii_lowercase();
+    if !matches!(protocol.as_str(), "freedom" | "socks" | "socks5" | "http") {
         return Err(CoreError::new(format!(
             "keli-core-rs route outbound {tag} protocol {protocol} on inbound {} is not supported yet",
             inbound.tag
         )));
     }
 
-    let (address, port) = keli_core_rs_route_outbound_endpoint(&outbound);
+    let (address, port, username, password) = keli_core_rs_route_outbound_endpoint(&outbound);
 
     Ok(Some((
         tag.clone(),
         json!({
             "tag": tag,
-            "protocol": "freedom",
+            "protocol": protocol,
             "address": address,
-            "port": port
+            "port": port,
+            "username": username,
+            "password": password
         }),
     )))
 }
 
-fn keli_core_rs_route_outbound_endpoint(outbound: &Value) -> (Option<String>, Option<u16>) {
+fn keli_core_rs_route_outbound_endpoint(
+    outbound: &Value,
+) -> (Option<String>, Option<u16>, Option<String>, Option<String>) {
     let address = outbound
         .get("address")
         .and_then(Value::as_str)
@@ -552,7 +557,12 @@ fn keli_core_rs_route_outbound_endpoint(outbound: &Value) -> (Option<String>, Op
         .and_then(Value::as_u64)
         .and_then(|value| u16::try_from(value).ok());
     if address.is_some() || port.is_some() {
-        return (address, port);
+        return (
+            address,
+            port,
+            outbound_string(outbound, "username").or_else(|| outbound_string(outbound, "user")),
+            outbound_string(outbound, "password").or_else(|| outbound_string(outbound, "pass")),
+        );
     }
 
     let redirect = outbound
@@ -561,9 +571,50 @@ fn keli_core_rs_route_outbound_endpoint(outbound: &Value) -> (Option<String>, Op
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|value| !value.is_empty());
-    redirect
-        .map(parse_route_redirect_endpoint)
-        .unwrap_or((None, None))
+    if let Some(redirect) = redirect {
+        let (address, port) = parse_route_redirect_endpoint(redirect);
+        return (address, port, None, None);
+    }
+
+    outbound
+        .get("settings")
+        .and_then(|settings| settings.get("servers"))
+        .and_then(Value::as_array)
+        .and_then(|servers| servers.first())
+        .map(keli_core_rs_route_outbound_server_endpoint)
+        .unwrap_or((None, None, None, None))
+}
+
+fn outbound_string(value: &Value, key: &str) -> Option<String> {
+    value
+        .get(key)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+fn keli_core_rs_route_outbound_server_endpoint(
+    server: &Value,
+) -> (Option<String>, Option<u16>, Option<String>, Option<String>) {
+    let address = outbound_string(server, "address");
+    let port = server
+        .get("port")
+        .and_then(Value::as_u64)
+        .and_then(|value| u16::try_from(value).ok());
+    let user = server
+        .get("users")
+        .and_then(Value::as_array)
+        .and_then(|users| users.first());
+    let username = outbound_string(server, "username")
+        .or_else(|| outbound_string(server, "user"))
+        .or_else(|| user.and_then(|user| outbound_string(user, "user")))
+        .or_else(|| user.and_then(|user| outbound_string(user, "username")));
+    let password = outbound_string(server, "password")
+        .or_else(|| outbound_string(server, "pass"))
+        .or_else(|| user.and_then(|user| outbound_string(user, "pass")))
+        .or_else(|| user.and_then(|user| outbound_string(user, "password")));
+    (address, port, username, password)
 }
 
 fn parse_route_redirect_endpoint(value: &str) -> (Option<String>, Option<u16>) {
@@ -3050,13 +3101,43 @@ mod tests {
     }
 
     #[test]
-    fn keli_core_rs_rejects_non_freedom_route_outbound() {
+    fn renders_keli_core_rs_proxy_route_outbounds() {
         let mut node = test_node("http", 83, "");
         node.common.routes = vec![Route {
             id: 1,
             match_rules: vec!["domain:example.com".to_string()],
             action: "route".to_string(),
-            action_value: Some(r#"{"tag":"proxy","protocol":"socks"}"#.to_string()),
+            action_value: Some(
+                r#"{"tag":"proxy","protocol":"socks","settings":{"servers":[{"address":"127.0.0.1","port":1080,"users":[{"user":"alice","pass":"secret"}]}]}}"#
+                    .to_string(),
+            ),
+        }];
+        let plan = CorePlan::from_nodes(
+            CoreKind::KeliCoreRs,
+            PathBuf::from("/srv/v2node/keli-core-rs.json"),
+            &[node],
+        )
+        .unwrap();
+
+        let config = render_core_config(&plan).unwrap();
+
+        assert_eq!(config["outbounds"][1]["tag"], "proxy");
+        assert_eq!(config["outbounds"][1]["protocol"], "socks");
+        assert_eq!(config["outbounds"][1]["address"], "127.0.0.1");
+        assert_eq!(config["outbounds"][1]["port"], 1080);
+        assert_eq!(config["outbounds"][1]["username"], "alice");
+        assert_eq!(config["outbounds"][1]["password"], "secret");
+        assert_eq!(config["routes"][0]["outbound"]["protocol"], "socks");
+    }
+
+    #[test]
+    fn keli_core_rs_rejects_unsupported_route_outbound() {
+        let mut node = test_node("http", 83, "");
+        node.common.routes = vec![Route {
+            id: 1,
+            match_rules: vec!["domain:example.com".to_string()],
+            action: "route".to_string(),
+            action_value: Some(r#"{"tag":"proxy","protocol":"vless"}"#.to_string()),
         }];
         let plan = CorePlan::from_nodes(
             CoreKind::KeliCoreRs,
@@ -3067,7 +3148,7 @@ mod tests {
 
         let err = render_core_config(&plan).unwrap_err();
 
-        assert!(err.message.contains("protocol socks"));
+        assert!(err.message.contains("protocol vless"));
     }
 
     #[test]
