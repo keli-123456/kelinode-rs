@@ -240,7 +240,8 @@ pub fn sidecar_config_path(
 ) -> PathBuf {
     let base = base_config_path.as_ref();
     let dir = base.parent().unwrap_or_else(|| Path::new("."));
-    dir.join(format!("sidecar-{protocol}-{node_id}.json"))
+    let extension = if protocol == "naive" { "Caddyfile" } else { "json" };
+    dir.join(format!("sidecar-{protocol}-{node_id}.{extension}"))
 }
 
 fn reject_sidecar_protocols_for_core(
@@ -294,13 +295,59 @@ pub fn render_core_config(plan: &CorePlan) -> Result<Value, CoreError> {
 fn render_sidecar_config(plan: &CorePlan, name: &str) -> Result<Value, CoreError> {
     match name {
         "mieru" => render_mieru_sidecar_config(plan),
-        "naive" => Err(CoreError::new(
-            "naive sidecar config requires a Caddy forward_proxy server and is not rendered by kelinode-rs yet",
-        )),
+        "naive" => Ok(Value::String(render_naive_sidecar_config(plan)?)),
         value => Err(CoreError::new(format!(
             "sidecar core config rendering is not implemented for {value}",
         ))),
     }
+}
+
+fn render_naive_sidecar_config(plan: &CorePlan) -> Result<String, CoreError> {
+    if plan.inbounds.len() != 1 {
+        return Err(CoreError::new(
+            "naive sidecar config must contain exactly one inbound",
+        ));
+    }
+    let inbound = &plan.inbounds[0];
+    if inbound.protocol != "naive" {
+        return Err(CoreError::new(format!(
+            "naive sidecar cannot render protocol {}",
+            inbound.protocol
+        )));
+    }
+
+    let listen = naive_caddy_listen(inbound);
+    let server_name = inbound.server_name.trim();
+    let site = if server_name.is_empty() {
+        listen
+    } else {
+        format!("{listen}, {server_name}")
+    };
+    let tls = if !inbound.cert_file.trim().is_empty() && !inbound.key_file.trim().is_empty() {
+        format!(
+            "    tls {} {}\n",
+            caddy_token(&inbound.cert_file),
+            caddy_token(&inbound.key_file)
+        )
+    } else {
+        String::new()
+    };
+    let users = inbound
+        .users
+        .iter()
+        .map(|user| {
+            format!(
+                "            basic_auth {} {}\n",
+                caddy_token(&user.uuid),
+                caddy_token(&user.uuid)
+            )
+        })
+        .collect::<String>();
+
+    Ok(format!(
+        "{{\n    order forward_proxy first\n}}\n\n{} {{\n{}    route {{\n        forward_proxy {{\n{}            hide_ip\n            hide_via\n        }}\n        respond \"OK\" 200\n    }}\n}}\n",
+        site, tls, users
+    ))
 }
 
 fn render_mieru_sidecar_config(plan: &CorePlan) -> Result<Value, CoreError> {
@@ -527,6 +574,10 @@ fn render_keli_core_rs_user(user: &InboundUserPlan) -> Value {
 }
 
 pub fn write_core_config(plan: &CorePlan) -> Result<CoreConfigWriteResult, CoreError> {
+    if matches!(&plan.kind, CoreKind::Sidecar(name) if name == "naive") {
+        let content = render_naive_sidecar_config(plan)?;
+        return write_core_config_bytes(&plan.config_path, content.into_bytes(), plan.inbounds.len());
+    }
     let value = render_core_config(plan)?;
     write_core_config_value(&plan.config_path, &value, plan.inbounds.len())
 }
@@ -537,6 +588,20 @@ pub fn write_core_config_value(
     inbound_count: usize,
 ) -> Result<CoreConfigWriteResult, CoreError> {
     let path = path.as_ref();
+    let mut content = serde_json::to_vec_pretty(value).map_err(|err| {
+        CoreError::new(format!("encode core config {}: {err}", path.display()))
+    })?;
+    content.push(b'\n');
+
+    write_core_config_bytes(path, content, inbound_count)
+}
+
+fn write_core_config_bytes(
+    path: impl AsRef<Path>,
+    content: Vec<u8>,
+    inbound_count: usize,
+) -> Result<CoreConfigWriteResult, CoreError> {
+    let path = path.as_ref();
     let layout = core_file_layout(path);
     fs::create_dir_all(&layout.config_dir).map_err(|err| {
         CoreError::new(format!(
@@ -544,11 +609,6 @@ pub fn write_core_config_value(
             layout.config_dir.display()
         ))
     })?;
-
-    let mut content = serde_json::to_vec_pretty(value).map_err(|err| {
-        CoreError::new(format!("encode core config {}: {err}", path.display()))
-    })?;
-    content.push(b'\n');
 
     if fs::read(path).ok().as_deref() == Some(content.as_slice()) {
         return Ok(CoreConfigWriteResult {
@@ -1488,6 +1548,28 @@ fn cert_domain(cert: &CertInfo) -> String {
     cert.cert_domain.clone()
 }
 
+fn naive_caddy_listen(inbound: &InboundPlan) -> String {
+    let listen = inbound.listen.trim();
+    if listen.is_empty() || listen == "::" || listen == "0.0.0.0" {
+        return format!(":{}", inbound.port);
+    }
+    if listen.contains(':') && !listen.starts_with('[') {
+        format!("[{}]:{}", listen, inbound.port)
+    } else {
+        format!("{}:{}", listen, inbound.port)
+    }
+}
+
+fn caddy_token(value: &str) -> String {
+    if value.chars().all(|character| {
+        character.is_ascii_alphanumeric() || matches!(character, '.' | '_' | '-' | '/' | ':' | '$')
+    }) {
+        return value.to_string();
+    }
+
+    format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
+}
+
 fn first_non_empty(value: &str, fallback: &str) -> String {
     if value.is_empty() {
         fallback.to_string()
@@ -1626,7 +1708,7 @@ mod tests {
     fn derives_sidecar_config_path_next_to_core_config() {
         assert_eq!(
             sidecar_config_path("/srv/v2node/config.json", "naive", 36),
-            PathBuf::from("/srv/v2node/sidecar-naive-36.json")
+            PathBuf::from("/srv/v2node/sidecar-naive-36.Caddyfile")
         );
     }
 
@@ -1680,18 +1762,44 @@ mod tests {
     }
 
     #[test]
-    fn naive_sidecar_config_is_explicitly_not_rendered() {
+    fn renders_naive_sidecar_caddyfile_from_users() {
         let node = test_node("naive", 39, "");
-        let plan = CorePlan::from_nodes(
+        let tag = node.tag.clone();
+        let mut users = std::collections::BTreeMap::new();
+        users.insert(
+            tag,
+            vec![UserInfo {
+                id: 39,
+                uuid: "naive-secret".to_string(),
+                speed_limit: 0,
+                device_limit: 0,
+            }],
+        );
+        let plan = CorePlan::from_nodes_with_users(
             CoreKind::Sidecar("naive".to_string()),
-            PathBuf::from("/srv/v2node/sidecar-naive-39.json"),
+            PathBuf::from("/srv/v2node/sidecar-naive-39.Caddyfile"),
             &[node],
+            &users,
         )
         .unwrap();
 
-        let err = render_core_config(&plan).unwrap_err();
+        let config = render_core_config(&plan).unwrap();
+        let caddyfile = config.as_str().unwrap();
 
-        assert!(err.message.contains("Caddy forward_proxy"));
+        assert!(caddyfile.contains("forward_proxy"));
+        assert!(caddyfile.contains("basic_auth naive-secret naive-secret"));
+
+        let dir = temp_test_dir("naive-caddyfile-write");
+        let path = dir.join("sidecar-naive-39.Caddyfile");
+        let mut plan = plan;
+        plan.config_path = path.clone();
+        let written = write_core_config(&plan).unwrap();
+        let saved = fs::read_to_string(&path).unwrap();
+
+        assert!(written.changed);
+        assert!(saved.starts_with("{\n    order forward_proxy first"));
+        assert!(!saved.starts_with('"'));
+        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]
