@@ -472,7 +472,7 @@ fn validate_keli_core_rs_inbound(inbound: &InboundPlan) -> Result<(), CoreError>
         "tuic" => validate_keli_core_rs_tuic_inbound(inbound),
         "hysteria" => validate_keli_core_rs_hysteria2_inbound(inbound),
         value => Err(CoreError::new(format!(
-            "keli-core-rs native renderer only supports socks/http/shadowsocks/vmess/vless/trojan/anytls tcp, vmess/vless/trojan ws/httpupgrade, tuic tcp/udp relay, and hysteria2 tcp/udp relay today; inbound {} uses {}",
+            "keli-core-rs native renderer only supports socks/http/shadowsocks/vmess/vless/trojan/anytls tcp, vmess/vless/trojan ws/httpupgrade/grpc, tuic tcp/udp relay, and hysteria2 tcp/udp relay today; inbound {} uses {}",
             inbound.tag, value
         ))),
     }
@@ -511,9 +511,9 @@ fn validate_keli_core_rs_plain_tcp_inbound(inbound: &InboundPlan) -> Result<(), 
 fn validate_keli_core_rs_tcp_or_ws_inbound(inbound: &InboundPlan) -> Result<(), CoreError> {
     let protocol = inbound.protocol.as_str();
     let network = keli_core_rs_transport_network(inbound);
-    if !matches!(network.as_str(), "tcp" | "ws" | "httpupgrade") {
+    if !matches!(network.as_str(), "tcp" | "ws" | "httpupgrade" | "grpc") {
         return Err(CoreError::new(format!(
-            "keli-core-rs {protocol} currently supports only tcp/ws/httpupgrade transport; inbound {} uses {}",
+            "keli-core-rs {protocol} currently supports only tcp/ws/httpupgrade/grpc transport; inbound {} uses {}",
             inbound.tag, network
         )));
     }
@@ -542,15 +542,19 @@ fn validate_keli_core_rs_tcp_or_ws_inbound(inbound: &InboundPlan) -> Result<(), 
         return Ok(());
     }
 
-    validate_keli_core_rs_http_transport_settings(inbound, &network)
+    if network == "grpc" {
+        validate_keli_core_rs_grpc_transport_settings(inbound)
+    } else {
+        validate_keli_core_rs_http_transport_settings(inbound, &network)
+    }
 }
 
 fn validate_keli_core_rs_tls_inbound(inbound: &InboundPlan) -> Result<(), CoreError> {
     let protocol = inbound.protocol.as_str();
     let network = keli_core_rs_transport_network(inbound);
-    if !matches!(network.as_str(), "tcp" | "ws" | "httpupgrade") {
+    if !matches!(network.as_str(), "tcp" | "ws" | "httpupgrade" | "grpc") {
         return Err(CoreError::new(format!(
-            "keli-core-rs {protocol} tls currently supports only tcp/ws/httpupgrade transport; inbound {} uses {}",
+            "keli-core-rs {protocol} tls currently supports only tcp/ws/httpupgrade/grpc transport; inbound {} uses {}",
             inbound.tag, network
         )));
     }
@@ -741,6 +745,45 @@ fn validate_keli_core_rs_http_transport_headers(
     Ok(())
 }
 
+fn validate_keli_core_rs_grpc_transport_settings(inbound: &InboundPlan) -> Result<(), CoreError> {
+    if json_value_is_empty(&inbound.network_settings) {
+        return Ok(());
+    }
+    let Some(settings) = inbound.network_settings.as_object() else {
+        return Err(CoreError::new(format!(
+            "keli-core-rs grpc settings on inbound {} must be an object",
+            inbound.tag
+        )));
+    };
+    for (key, value) in settings {
+        match key.as_str() {
+            "serviceName" | "service_name" => {
+                if !value.is_string() {
+                    return Err(CoreError::new(format!(
+                        "keli-core-rs grpc setting {key} on inbound {} must be a string",
+                        inbound.tag
+                    )));
+                }
+            }
+            "multiMode" | "multi_mode" => {
+                if value.as_bool().unwrap_or(false) {
+                    return Err(CoreError::new(format!(
+                        "keli-core-rs grpc TunMulti is not supported yet on inbound {}",
+                        inbound.tag
+                    )));
+                }
+            }
+            _ => {
+                return Err(CoreError::new(format!(
+                    "keli-core-rs grpc setting {key} on inbound {} is not supported yet",
+                    inbound.tag
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
 fn json_value_is_empty(value: &Value) -> bool {
     value.is_null()
         || value
@@ -846,7 +889,16 @@ fn render_keli_core_rs_transport(inbound: &InboundPlan) -> Value {
             Value::Null
         },
     );
-    transport.insert("service_name".to_string(), Value::Null);
+    transport.insert(
+        "service_name".to_string(),
+        if network == "grpc" {
+            grpc_service_name_setting(&inbound.network_settings)
+                .map(Value::String)
+                .unwrap_or_else(|| Value::String("GunService".to_string()))
+        } else {
+            Value::Null
+        },
+    );
     transport.insert("proxy_protocol".to_string(), Value::Bool(false));
 
     if inbound.protocol == "hysteria" {
@@ -884,6 +936,7 @@ fn keli_core_rs_transport_network(inbound: &InboundPlan) -> String {
     {
         "websocket" => "ws".to_string(),
         "http_upgrade" | "http-upgrade" | "httpupgrade" => "httpupgrade".to_string(),
+        "gun" => "grpc".to_string(),
         value => value.to_string(),
     }
 }
@@ -898,6 +951,10 @@ fn websocket_host_setting(settings: &Value) -> Option<String> {
             .get("headers")
             .and_then(|headers| network_setting_string(headers, &["Host", "host"]))
     })
+}
+
+fn grpc_service_name_setting(settings: &Value) -> Option<String> {
+    network_setting_string(settings, &["serviceName", "service_name"])
 }
 
 fn render_keli_core_rs_user(user: &InboundUserPlan) -> Value {
@@ -2338,7 +2395,7 @@ mod tests {
     #[test]
     fn keli_core_rs_rejects_vless_unsupported_transport_until_core_supports_it() {
         let mut node = test_node("vless", 47, "");
-        node.common.network = "grpc".to_string();
+        node.common.network = "kcp".to_string();
         let plan = CorePlan::from_nodes(
             CoreKind::KeliCoreRs,
             PathBuf::from("/srv/v2node/keli-core-rs.json"),
@@ -2348,7 +2405,7 @@ mod tests {
 
         let err = render_core_config(&plan).unwrap_err();
 
-        assert!(err.message.contains("tcp/ws/httpupgrade transport"));
+        assert!(err.message.contains("tcp/ws/httpupgrade/grpc transport"));
     }
 
     #[test]
@@ -2464,6 +2521,30 @@ mod tests {
         assert_eq!(
             config["inbounds"][0]["transport"]["host"],
             "edge.example.test"
+        );
+    }
+
+    #[test]
+    fn renders_keli_core_rs_grpc_transport_settings() {
+        let mut vless = test_node("vless", 65, "");
+        vless.common.network = "grpc".to_string();
+        vless.common.network_settings = json!({
+            "serviceName": "KeliService",
+            "multiMode": false
+        });
+        let plan = CorePlan::from_nodes(
+            CoreKind::KeliCoreRs,
+            PathBuf::from("/srv/v2node/keli-core-rs.json"),
+            &[vless],
+        )
+        .unwrap();
+
+        let config = render_core_config(&plan).unwrap();
+
+        assert_eq!(config["inbounds"][0]["transport"]["network"], "grpc");
+        assert_eq!(
+            config["inbounds"][0]["transport"]["service_name"],
+            "KeliService"
         );
     }
 
@@ -2769,7 +2850,7 @@ mod tests {
     #[test]
     fn keli_core_rs_rejects_trojan_unsupported_transport_until_core_supports_it() {
         let mut node = test_node("trojan", 52, "");
-        node.common.network = "grpc".to_string();
+        node.common.network = "kcp".to_string();
         let plan = CorePlan::from_nodes(
             CoreKind::KeliCoreRs,
             PathBuf::from("/srv/v2node/keli-core-rs.json"),
@@ -2779,7 +2860,7 @@ mod tests {
 
         let err = render_core_config(&plan).unwrap_err();
 
-        assert!(err.message.contains("tcp/ws/httpupgrade transport"));
+        assert!(err.message.contains("tcp/ws/httpupgrade/grpc transport"));
     }
 
     #[test]
