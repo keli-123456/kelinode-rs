@@ -659,11 +659,21 @@ fn validate_keli_core_rs_hysteria2_inbound(inbound: &InboundPlan) -> Result<(), 
             inbound.tag
         )));
     }
-    if !inbound.obfs.trim().is_empty() || !inbound.obfs_password.trim().is_empty() {
-        return Err(CoreError::new(format!(
-            "keli-core-rs hysteria2 currently does not support obfs on inbound {}",
-            inbound.tag
-        )));
+    let obfs = inbound.obfs.trim();
+    let obfs_password = inbound.obfs_password.trim();
+    if !obfs.is_empty() || !obfs_password.is_empty() {
+        if !obfs.eq_ignore_ascii_case("salamander") {
+            return Err(CoreError::new(format!(
+                "keli-core-rs hysteria2 only supports salamander obfs on inbound {}",
+                inbound.tag
+            )));
+        }
+        if obfs_password.len() < 4 {
+            return Err(CoreError::new(format!(
+                "keli-core-rs hysteria2 salamander obfs password must be at least 4 bytes on inbound {}",
+                inbound.tag
+            )));
+        }
     }
     Ok(())
 }
@@ -845,6 +855,18 @@ fn render_keli_core_rs_transport(inbound: &InboundPlan) -> Value {
             if inbound.down_mbps > 0 {
                 transport.insert("down_mbps".to_string(), json!(inbound.down_mbps));
             }
+        }
+        if !inbound.obfs.trim().is_empty() {
+            transport.insert(
+                "obfs".to_string(),
+                Value::String(inbound.obfs.trim().to_string()),
+            );
+        }
+        if !inbound.obfs_password.trim().is_empty() {
+            transport.insert(
+                "obfs_password".to_string(),
+                Value::String(inbound.obfs_password.trim().to_string()),
+            );
         }
     }
 
@@ -2514,7 +2536,7 @@ mod tests {
     }
 
     #[test]
-    fn keli_core_rs_rejects_hysteria2_obfs_until_core_supports_it() {
+    fn renders_keli_core_rs_hysteria2_salamander_obfs() {
         let mut node = test_node("hysteria2", 67, "");
         node.security = Security::Tls;
         node.common.cert_info.as_mut().unwrap().cert_file = "/srv/v2node/hy2.cer".to_string();
@@ -2528,9 +2550,33 @@ mod tests {
         )
         .unwrap();
 
+        let config = render_core_config(&plan).unwrap();
+
+        assert_eq!(config["inbounds"][0]["transport"]["obfs"], "salamander");
+        assert_eq!(
+            config["inbounds"][0]["transport"]["obfs_password"],
+            "obfs-secret"
+        );
+    }
+
+    #[test]
+    fn keli_core_rs_rejects_unsupported_hysteria2_obfs() {
+        let mut node = test_node("hysteria2", 70, "");
+        node.security = Security::Tls;
+        node.common.cert_info.as_mut().unwrap().cert_file = "/srv/v2node/hy2.cer".to_string();
+        node.common.cert_info.as_mut().unwrap().key_file = "/srv/v2node/hy2.key".to_string();
+        node.common.obfs = "unknown".to_string();
+        node.common.obfs_password = "obfs-secret".to_string();
+        let plan = CorePlan::from_nodes(
+            CoreKind::KeliCoreRs,
+            PathBuf::from("/srv/v2node/keli-core-rs.json"),
+            &[node],
+        )
+        .unwrap();
+
         let err = render_core_config(&plan).unwrap_err();
 
-        assert!(err.message.contains("does not support obfs"));
+        assert!(err.message.contains("only supports salamander obfs"));
     }
 
     #[test]
