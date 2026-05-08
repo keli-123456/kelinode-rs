@@ -465,12 +465,12 @@ fn validate_keli_core_rs_inbound(inbound: &InboundPlan) -> Result<(), CoreError>
             }
             Ok(())
         }
-        "vless" | "trojan" => {
+        "vless" | "trojan" | "vmess" => {
             validate_keli_core_rs_tcp_or_ws_inbound(inbound)?;
             Ok(())
         }
         value => Err(CoreError::new(format!(
-            "keli-core-rs native renderer only supports socks/http/shadowsocks/vless/trojan/anytls tcp and vless/trojan ws today; inbound {} uses {}",
+            "keli-core-rs native renderer only supports socks/http/shadowsocks/vmess/vless/trojan/anytls tcp and vmess/vless/trojan ws today; inbound {} uses {}",
             inbound.tag, value
         ))),
     }
@@ -518,6 +518,12 @@ fn validate_keli_core_rs_tcp_or_ws_inbound(inbound: &InboundPlan) -> Result<(), 
     if !matches!(inbound.security.as_str(), "none" | "tls") {
         return Err(CoreError::new(format!(
             "keli-core-rs {protocol} currently supports only security none/tls; inbound {} uses {}",
+            inbound.tag, inbound.security
+        )));
+    }
+    if protocol == "vmess" && inbound.security != "none" {
+        return Err(CoreError::new(format!(
+            "keli-core-rs vmess currently supports only security none; inbound {} uses {}",
             inbound.tag, inbound.security
         )));
     }
@@ -1976,17 +1982,19 @@ mod tests {
     }
 
     #[test]
-    fn renders_keli_core_rs_native_socks_http_shadowsocks_vless_trojan_anytls_config_from_panel_users() {
+    fn renders_keli_core_rs_native_socks_http_shadowsocks_vmess_vless_trojan_anytls_config_from_panel_users() {
         let socks = test_node("socks", 40, "");
         let http = test_node("http", 41, "127.0.0.1");
         let mut shadowsocks = test_node("shadowsocks", 54, "127.0.0.1");
         shadowsocks.common.cipher = "aes-128-gcm".to_string();
+        let vmess = test_node("vmess", 43, "127.0.0.1");
         let vless = test_node("vless", 45, "127.0.0.1");
         let trojan = test_node("trojan", 50, "127.0.0.1");
         let anytls = test_node("anytls", 58, "127.0.0.1");
         let socks_tag = socks.tag.clone();
         let http_tag = http.tag.clone();
         let shadowsocks_tag = shadowsocks.tag.clone();
+        let vmess_tag = vmess.tag.clone();
         let vless_tag = vless.tag.clone();
         let trojan_tag = trojan.tag.clone();
         let anytls_tag = anytls.tag.clone();
@@ -2014,6 +2022,15 @@ mod tests {
             vec![UserInfo {
                 id: 45,
                 uuid: "11111111-1111-1111-1111-111111111111".to_string(),
+                speed_limit: 0,
+                device_limit: 0,
+            }],
+        );
+        users.insert(
+            vmess_tag.clone(),
+            vec![UserInfo {
+                id: 43,
+                uuid: "33333333-3333-3333-3333-333333333333".to_string(),
                 speed_limit: 0,
                 device_limit: 0,
             }],
@@ -2048,7 +2065,7 @@ mod tests {
         let plan = CorePlan::from_nodes_with_users(
             CoreKind::KeliCoreRs,
             PathBuf::from("/srv/v2node/keli-core-rs.json"),
-            &[socks, http, shadowsocks, vless, trojan, anytls],
+            &[socks, http, shadowsocks, vmess, vless, trojan, anytls],
             &users,
         )
         .unwrap();
@@ -2073,27 +2090,33 @@ mod tests {
         assert_eq!(config["inbounds"][2]["users"][0]["uuid"], "ss-password");
         assert_eq!(config["inbounds"][2]["users"][0]["speed_limit"], 3072);
         assert_eq!(config["inbounds"][2]["users"][0]["device_limit"], 4);
-        assert_eq!(config["inbounds"][3]["protocol"], "vless");
+        assert_eq!(config["inbounds"][3]["protocol"], "vmess");
         assert_eq!(config["inbounds"][3]["listen"], "127.0.0.1");
         assert_eq!(
             config["inbounds"][3]["users"][0]["uuid"],
-            "11111111-1111-1111-1111-111111111111"
+            "33333333-3333-3333-3333-333333333333"
         );
-        assert_eq!(config["inbounds"][4]["protocol"], "trojan");
+        assert_eq!(config["inbounds"][4]["protocol"], "vless");
         assert_eq!(config["inbounds"][4]["listen"], "127.0.0.1");
         assert_eq!(
             config["inbounds"][4]["users"][0]["uuid"],
-            "trojan-password"
+            "11111111-1111-1111-1111-111111111111"
         );
-        assert_eq!(config["inbounds"][4]["users"][0]["speed_limit"], 2048);
-        assert_eq!(config["inbounds"][4]["users"][0]["device_limit"], 3);
-        assert_eq!(config["inbounds"][5]["protocol"], "anytls");
+        assert_eq!(config["inbounds"][5]["protocol"], "trojan");
+        assert_eq!(config["inbounds"][5]["listen"], "127.0.0.1");
         assert_eq!(
             config["inbounds"][5]["users"][0]["uuid"],
+            "trojan-password"
+        );
+        assert_eq!(config["inbounds"][5]["users"][0]["speed_limit"], 2048);
+        assert_eq!(config["inbounds"][5]["users"][0]["device_limit"], 3);
+        assert_eq!(config["inbounds"][6]["protocol"], "anytls");
+        assert_eq!(
+            config["inbounds"][6]["users"][0]["uuid"],
             "anytls-password"
         );
-        assert_eq!(config["inbounds"][5]["users"][0]["speed_limit"], 4096);
-        assert_eq!(config["inbounds"][5]["users"][0]["device_limit"], 5);
+        assert_eq!(config["inbounds"][6]["users"][0]["speed_limit"], 4096);
+        assert_eq!(config["inbounds"][6]["users"][0]["device_limit"], 5);
         assert_eq!(config["outbounds"][0]["tag"], "direct");
         assert_eq!(config["stats"]["per_user"], true);
     }
@@ -2122,7 +2145,7 @@ mod tests {
 
     #[test]
     fn keli_core_rs_rejects_unimplemented_protocols() {
-        let node = test_node("vmess", 43, "");
+        let node = test_node("hysteria2", 43, "");
         let plan = CorePlan::from_nodes(
             CoreKind::KeliCoreRs,
             PathBuf::from("/srv/v2node/keli-core-rs.json"),
@@ -2134,7 +2157,7 @@ mod tests {
 
         assert!(err
             .message
-            .contains("only supports socks/http/shadowsocks/vless/trojan/anytls"));
+            .contains("only supports socks/http/shadowsocks/vmess/vless/trojan/anytls"));
     }
 
     #[test]
@@ -2206,13 +2229,21 @@ mod tests {
     }
 
     #[test]
-    fn renders_keli_core_rs_vless_and_trojan_websocket_transport_settings() {
+    fn renders_keli_core_rs_vmess_vless_and_trojan_websocket_transport_settings() {
         let mut vless = test_node("vless", 60, "");
         vless.common.network = "ws".to_string();
         vless.common.network_settings = json!({
             "path": "/vless",
             "headers": {
                 "Host": "vless.example.test"
+            }
+        });
+        let mut vmess = test_node("vmess", 63, "");
+        vmess.common.network = "ws".to_string();
+        vmess.common.network_settings = json!({
+            "path": "/vmess",
+            "headers": {
+                "Host": "vmess.example.test"
             }
         });
         let mut trojan = test_node("trojan", 61, "");
@@ -2224,7 +2255,7 @@ mod tests {
         let plan = CorePlan::from_nodes(
             CoreKind::KeliCoreRs,
             PathBuf::from("/srv/v2node/keli-core-rs.json"),
-            &[vless, trojan],
+            &[vless, vmess, trojan],
         )
         .unwrap();
 
@@ -2237,11 +2268,37 @@ mod tests {
             "vless.example.test"
         );
         assert_eq!(config["inbounds"][1]["transport"]["network"], "ws");
-        assert_eq!(config["inbounds"][1]["transport"]["path"], "/trojan");
+        assert_eq!(config["inbounds"][1]["transport"]["path"], "/vmess");
         assert_eq!(
             config["inbounds"][1]["transport"]["host"],
+            "vmess.example.test"
+        );
+        assert_eq!(config["inbounds"][2]["transport"]["network"], "ws");
+        assert_eq!(config["inbounds"][2]["transport"]["path"], "/trojan");
+        assert_eq!(
+            config["inbounds"][2]["transport"]["host"],
             "trojan.example.test"
         );
+    }
+
+    #[test]
+    fn keli_core_rs_rejects_vmess_tls_until_core_supports_it() {
+        let mut node = test_node("vmess", 64, "");
+        node.security = Security::Tls;
+        node.common.cert_info.as_mut().unwrap().cert_file = "/srv/v2node/vmess.cer".to_string();
+        node.common.cert_info.as_mut().unwrap().key_file = "/srv/v2node/vmess.key".to_string();
+        let plan = CorePlan::from_nodes(
+            CoreKind::KeliCoreRs,
+            PathBuf::from("/srv/v2node/keli-core-rs.json"),
+            &[node],
+        )
+        .unwrap();
+
+        let err = render_core_config(&plan).unwrap_err();
+
+        assert!(err
+            .message
+            .contains("vmess currently supports only security none"));
     }
 
     #[test]
