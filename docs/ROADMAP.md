@@ -88,6 +88,7 @@
 - Subscription proxy apply decision planning for disabled, unchanged, start, and error states.
 - Subscription proxy runtime manager state tracking for fingerprint and machine-report status.
 - Subscription proxy runtime manager filesystem write and readable-file integration.
+- Runtime health refresh integration for subscription proxy manager status.
 - Compatibility tests around protocol parsing and endpoint construction.
 
 ## Phase 2: Runtime Control

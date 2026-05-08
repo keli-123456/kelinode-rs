@@ -22,6 +22,7 @@ use crate::runtime::{
     node_config_for_info as runtime_node_config_for_info, rebuild_runtime_plan_with_users,
     RuntimeBootstrapPlan,
 };
+use crate::subscription_proxy::SubscriptionProxyRuntimeManager;
 use crate::system::{ResourceSampler, SystemPublicIpProbe};
 use crate::user::{
     apply_full_user_list, apply_user_delta_body, load_user_sync_state, save_user_sync_state,
@@ -162,6 +163,7 @@ pub struct PanelRuntimeLoop<'a, P, F> {
     pub public_ip_probe: bool,
     pub upgrade_status: Option<Value>,
     pub resource_sampler: ResourceSampler,
+    pub subscription_proxy_manager: Option<SubscriptionProxyRuntimeManager>,
     user_sync: BTreeMap<String, RuntimeUserSyncEntry>,
 }
 
@@ -193,6 +195,7 @@ where
             public_ip_probe: false,
             upgrade_status: None,
             resource_sampler: ResourceSampler::default(),
+            subscription_proxy_manager: None,
             user_sync: BTreeMap::new(),
         }
     }
@@ -215,6 +218,14 @@ where
 
     pub fn with_panel_clients(mut self, clients: Vec<PanelClient>) -> Self {
         self.panel_clients = clients;
+        self
+    }
+
+    pub fn with_subscription_proxy_manager(
+        mut self,
+        manager: SubscriptionProxyRuntimeManager,
+    ) -> Self {
+        self.subscription_proxy_manager = Some(manager);
         self
     }
 }
@@ -256,6 +267,9 @@ where
                     resources,
                 );
             }
+            if let Some(manager) = &self.subscription_proxy_manager {
+                refresh_subscription_proxy_health(&mut options, manager);
+            }
             let report_to_panel = options.report_to_panel;
             if report_to_panel && self.panel_clients.is_empty() {
                 return Err("runtime tick requested panel report without panel client".to_string());
@@ -289,6 +303,13 @@ fn refresh_runtime_health(
     options.control.health.version = version.to_string();
     options.control.health.resources = resources;
     options.control.health.upgrade = upgrade_status;
+}
+
+fn refresh_subscription_proxy_health(
+    options: &mut RuntimeTickOptions,
+    manager: &SubscriptionProxyRuntimeManager,
+) {
+    options.control.health.subscription_proxy = Some(manager.status());
 }
 
 impl Default for RuntimeLoopOptions {
@@ -784,7 +805,7 @@ mod tests {
 
     use super::{
         handle_runtime_loop_event, node_config_for_info, refresh_runtime_health,
-        runtime_loop_event_for_task, run_runtime_loop,
+        refresh_subscription_proxy_health, runtime_loop_event_for_task, run_runtime_loop,
         run_runtime_loop_async, run_runtime_loop_async_with_events, should_run,
         user_delta_not_supported,
         AsyncRuntimeLoopCallbacks, PanelRuntimeLoop, RuntimeLoopCallbacks, RuntimeLoopExit,
@@ -801,6 +822,7 @@ mod tests {
     use crate::process::MemoryProcessSupervisor;
     use crate::realtime::RealtimeRuntimeTask;
     use crate::runtime::build_runtime_bootstrap_plan;
+    use crate::subscription_proxy::SubscriptionProxyRuntimeManager;
     use serde_json::json;
 
     #[test]
@@ -831,6 +853,36 @@ mod tests {
             options.control.health.upgrade,
             Some(json!({"status": "running"}))
         );
+    }
+
+    #[test]
+    fn subscription_proxy_health_refresh_uses_manager_status() {
+        let mut manager = SubscriptionProxyRuntimeManager::new();
+        manager
+            .apply(
+                &crate::config::SubscriptionProxyConfig {
+                    enabled: true,
+                    allow_http_fallback: true,
+                    site_id: "site-a".to_string(),
+                    upstream_base_url: "https://panel.example.test".to_string(),
+                    certificate_domain: "proxy.example.test".to_string(),
+                    ..crate::config::SubscriptionProxyConfig::default()
+                },
+                |_| String::new(),
+                |_, _| Ok("csr".to_string()),
+                |_| false,
+                |_| Ok(()),
+            )
+            .unwrap();
+        let mut options = RuntimeTickOptions::default();
+
+        refresh_subscription_proxy_health(&mut options, &manager);
+
+        let status = options.control.health.subscription_proxy.unwrap();
+        assert_eq!(status.status, "running");
+        assert_eq!(status.mode, "http");
+        assert_eq!(status.certificate_domain, "proxy.example.test");
+        assert_eq!(status.csr_pem, "csr");
     }
 
     #[test]

@@ -82,6 +82,7 @@ First cut:
 - Plan subscription proxy apply decisions for disabled, unchanged, start, and error states.
 - Add a subscription proxy runtime manager that tracks fingerprint and reportable status.
 - Wire the subscription proxy runtime manager to filesystem writes and readable-file checks.
+- Feed subscription proxy manager status into runtime health refresh.
 
 Not implemented yet:
 
