@@ -557,7 +557,7 @@ fn normalize_sidecar_env(values: &BTreeMap<String, String>) -> BTreeMap<String, 
 }
 
 fn normalize_string_list(values: &[String]) -> Vec<String> {
-    let mut output = Vec::new();
+    let mut output: Vec<String> = Vec::new();
     for value in values {
         let cleaned = value.trim();
         if cleaned.is_empty() || output.iter().any(|existing| existing.as_str() == cleaned) {

@@ -109,6 +109,8 @@
 - Optional subscription proxy HTTP challenge server planning from `http_listen`.
 - Main subscription proxy server planning from `https_listen` for HTTPS and HTTP fallback modes.
 - Machine-profile panel reporting for subscription-proxy-only deployments.
+- Experimental `keli-core-rs` native config rendering for SOCKS/HTTP inbounds, users, direct outbound, stats, and domain block routes.
+- `keli-core-rs` process spec using `run-config <config>` while keeping Xray as the stable default core path.
 - Compatibility tests around protocol parsing and endpoint construction.
 
 ## Phase 2: Runtime Control

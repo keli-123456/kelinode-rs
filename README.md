@@ -110,6 +110,7 @@ Not implemented yet:
 - Complete per-protocol user options for bandwidth limits, device-limit enforcement, and advanced protocol-specific credentials inside the runtime data path.
 - Naive sidecar runtime still needs a concrete Caddy forward_proxy integration before it can serve traffic.
 - Mieru sidecar traffic requires operators to configure the `mita` command, arguments, and optional environment for their deployment style.
+- Experimental `keli-core-rs` native rendering is limited to SOCKS/HTTP, direct outbound, per-user credentials, and basic domain block routes.
 - Subscription reverse proxy.
 
 ## Sidecar Process Example
@@ -144,4 +145,4 @@ cargo run -- version
 cargo run -- run /etc/v2node/config.yml
 ```
 
-This Windows workspace currently does not have Cargo installed, so build validation should run on a Rust-enabled Linux or CI machine.
+This Windows workspace has Rust installed through rustup for local validation.

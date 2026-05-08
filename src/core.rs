@@ -11,6 +11,7 @@ pub enum CoreKind {
     Xray,
     SingBox,
     Mihomo,
+    KeliCoreRs,
     Sidecar(String),
 }
 
@@ -254,6 +255,7 @@ pub fn core_file_layout(config_path: impl AsRef<Path>) -> CoreFileLayout {
 pub fn render_core_config(plan: &CorePlan) -> Result<Value, CoreError> {
     match &plan.kind {
         CoreKind::Xray => Ok(render_xray_config(plan)),
+        CoreKind::KeliCoreRs => render_keli_core_rs_config(plan),
         CoreKind::SingBox => Err(CoreError::new(
             "sing-box core config rendering is not implemented yet",
         )),
@@ -318,6 +320,106 @@ fn render_mieru_sidecar_config(plan: &CorePlan) -> Result<Value, CoreError> {
         "loggingLevel": "INFO",
         "mtu": 1400
     }))
+}
+
+fn render_keli_core_rs_config(plan: &CorePlan) -> Result<Value, CoreError> {
+    let mut routes = Vec::new();
+    for inbound in &plan.inbounds {
+        if !matches!(inbound.protocol.as_str(), "socks" | "http") {
+            return Err(CoreError::new(format!(
+                "keli-core-rs native renderer only supports socks/http today; inbound {} uses {}",
+                inbound.tag, inbound.protocol
+            )));
+        }
+
+        for route in &inbound.routes {
+            if route.match_rules.is_empty() {
+                continue;
+            }
+            match route.action.as_str() {
+                "block" => routes.push(json!({
+                    "targets": &route.match_rules,
+                    "action": "block"
+                })),
+                value => {
+                    return Err(CoreError::new(format!(
+                        "keli-core-rs route action {value} on inbound {} is not supported yet",
+                        inbound.tag
+                    )));
+                }
+            }
+        }
+    }
+
+    Ok(json!({
+        "instance_id": keli_core_rs_instance_id(plan),
+        "log_level": "info",
+        "inbounds": plan
+            .inbounds
+            .iter()
+            .map(render_keli_core_rs_inbound)
+            .collect::<Vec<_>>(),
+        "outbounds": [
+            {
+                "tag": "direct",
+                "protocol": "freedom",
+                "address": null,
+                "port": null
+            }
+        ],
+        "routes": routes,
+        "stats": {
+            "enabled": true,
+            "per_user": true
+        }
+    }))
+}
+
+fn keli_core_rs_instance_id(plan: &CorePlan) -> String {
+    plan.config_path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("kelinode-rs")
+        .to_string()
+}
+
+fn render_keli_core_rs_inbound(inbound: &InboundPlan) -> Value {
+    json!({
+        "tag": &inbound.tag,
+        "protocol": &inbound.protocol,
+        "listen": &inbound.listen,
+        "port": inbound.port,
+        "users": inbound
+            .users
+            .iter()
+            .map(render_keli_core_rs_user)
+            .collect::<Vec<_>>(),
+        "transport": {
+            "network": first_non_empty(inbound.network.trim(), "tcp"),
+            "path": null,
+            "host": null,
+            "service_name": null,
+            "proxy_protocol": false
+        },
+        "tls": null,
+        "sniffing": {
+            "enabled": true,
+            "dest_override": ["http", "tls"]
+        }
+    })
+}
+
+fn render_keli_core_rs_user(user: &InboundUserPlan) -> Value {
+    json!({
+        "id": user.id,
+        "uuid": &user.uuid,
+        "password": null,
+        "email": &user.email,
+        "speed_limit": user.speed_limit,
+        "device_limit": user.device_limit
+    })
 }
 
 pub fn write_core_config(plan: &CorePlan) -> Result<CoreConfigWriteResult, CoreError> {
@@ -473,7 +575,7 @@ pub fn should_fallback_node_listen_ip(raw: &str) -> bool {
 }
 
 pub fn resolve_tls_alpn(node: &NodeInfo) -> Vec<String> {
-    let mut alpn = Vec::new();
+    let mut alpn: Vec<String> = Vec::new();
     for value in &node.common.tls_settings.alpn {
         let text = value.trim();
         if text.is_empty() || alpn.iter().any(|existing| existing.as_str() == text) {
@@ -1476,6 +1578,116 @@ mod tests {
         let err = render_core_config(&plan).unwrap_err();
 
         assert!(err.message.contains("Caddy forward_proxy"));
+    }
+
+    #[test]
+    fn renders_keli_core_rs_native_socks_http_config_from_panel_users() {
+        let socks = test_node("socks", 40, "");
+        let http = test_node("http", 41, "127.0.0.1");
+        let socks_tag = socks.tag.clone();
+        let http_tag = http.tag.clone();
+        let mut users = std::collections::BTreeMap::new();
+        users.insert(
+            socks_tag.clone(),
+            vec![UserInfo {
+                id: 40,
+                uuid: "socks-user".to_string(),
+                speed_limit: 1024,
+                device_limit: 2,
+            }],
+        );
+        users.insert(
+            http_tag.clone(),
+            vec![UserInfo {
+                id: 41,
+                uuid: "http-user".to_string(),
+                speed_limit: 0,
+                device_limit: 0,
+            }],
+        );
+        let plan = CorePlan::from_nodes_with_users(
+            CoreKind::KeliCoreRs,
+            PathBuf::from("/srv/v2node/keli-core-rs.json"),
+            &[socks, http],
+            &users,
+        )
+        .unwrap();
+
+        let config = render_core_config(&plan).unwrap();
+
+        assert_eq!(config["instance_id"], "keli-core-rs");
+        assert_eq!(config["inbounds"][0]["protocol"], "socks");
+        assert_eq!(config["inbounds"][0]["listen"], "::");
+        assert_eq!(config["inbounds"][0]["transport"]["network"], "tcp");
+        assert_eq!(config["inbounds"][0]["users"][0]["uuid"], "socks-user");
+        assert_eq!(
+            config["inbounds"][0]["users"][0]["email"],
+            format!("{socks_tag}|socks-user")
+        );
+        assert_eq!(config["inbounds"][0]["users"][0]["speed_limit"], 1024);
+        assert_eq!(config["inbounds"][0]["users"][0]["device_limit"], 2);
+        assert_eq!(config["inbounds"][1]["protocol"], "http");
+        assert_eq!(config["inbounds"][1]["listen"], "127.0.0.1");
+        assert_eq!(config["outbounds"][0]["tag"], "direct");
+        assert_eq!(config["stats"]["per_user"], true);
+    }
+
+    #[test]
+    fn renders_keli_core_rs_block_routes() {
+        let mut node = test_node("http", 42, "");
+        node.common.routes = vec![Route {
+            id: 1,
+            match_rules: vec!["*.blocked.example".to_string()],
+            action: "block".to_string(),
+            action_value: None,
+        }];
+        let plan = CorePlan::from_nodes(
+            CoreKind::KeliCoreRs,
+            PathBuf::from("/srv/v2node/keli-core-rs.json"),
+            &[node],
+        )
+        .unwrap();
+
+        let config = render_core_config(&plan).unwrap();
+
+        assert_eq!(config["routes"][0]["targets"][0], "*.blocked.example");
+        assert_eq!(config["routes"][0]["action"], "block");
+    }
+
+    #[test]
+    fn keli_core_rs_rejects_unimplemented_protocols() {
+        let node = test_node("vless", 43, "");
+        let plan = CorePlan::from_nodes(
+            CoreKind::KeliCoreRs,
+            PathBuf::from("/srv/v2node/keli-core-rs.json"),
+            &[node],
+        )
+        .unwrap();
+
+        let err = render_core_config(&plan).unwrap_err();
+
+        assert!(err.message.contains("only supports socks/http"));
+    }
+
+    #[test]
+    fn keli_core_rs_rejects_unsupported_route_actions() {
+        let mut node = test_node("socks", 44, "");
+        node.common.routes = vec![Route {
+            id: 1,
+            match_rules: vec!["10.0.0.0/8".to_string()],
+            action: "block_ip".to_string(),
+            action_value: None,
+        }];
+        let plan = CorePlan::from_nodes(
+            CoreKind::KeliCoreRs,
+            PathBuf::from("/srv/v2node/keli-core-rs.json"),
+            &[node],
+        )
+        .unwrap();
+
+        let err = render_core_config(&plan).unwrap_err();
+
+        assert!(err.message.contains("route action block_ip"));
     }
 
     #[test]

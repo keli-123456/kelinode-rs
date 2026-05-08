@@ -1765,7 +1765,7 @@ mod tests {
         spawn_subscription_proxy_main_http_fallback_server,
         subscription_proxy_file_readable, subscription_proxy_fingerprint,
         write_subscription_proxy_file, SubscriptionProxyApplyAction, SubscriptionProxyFileWrite,
-        SubscriptionProxyMainServerPlan,
+        SubscriptionProxyClientResponse, SubscriptionProxyMainServerPlan,
         SubscriptionProxyInboundRequest, SubscriptionProxyRoute, SubscriptionProxyRouteError,
         SubscriptionProxyRuntimeManager, SubscriptionProxyServeMode, SubscriptionProxyStatus,
         SubscriptionProxyUpstreamResponse,
@@ -2960,6 +2960,7 @@ mod tests {
         normalize_subscription_proxy_config(&SubscriptionProxyConfig {
             enabled: true,
             https_listen: "0.0.0.0:443".to_string(),
+            certificate_domain: "proxy.example.test".to_string(),
             cert_file: "/etc/v2node/fullchain.pem".to_string(),
             key_file: "/etc/v2node/private.key".to_string(),
             profiles: vec![SubscriptionProxyProfile {

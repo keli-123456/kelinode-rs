@@ -276,6 +276,7 @@ fn default_core_command(kind: &CoreKind) -> Option<&'static str> {
         CoreKind::Xray => Some("xray"),
         CoreKind::SingBox => Some("sing-box"),
         CoreKind::Mihomo => Some("mihomo"),
+        CoreKind::KeliCoreRs => Some("keli-core-rs"),
         CoreKind::Sidecar(_) => None,
     }
 }
@@ -289,6 +290,7 @@ fn core_process_args(
         CoreKind::Xray => Ok(vec!["run".to_string(), "-config".to_string(), config]),
         CoreKind::SingBox => Ok(vec!["run".to_string(), "-c".to_string(), config]),
         CoreKind::Mihomo => Ok(vec!["-f".to_string(), config]),
+        CoreKind::KeliCoreRs => Ok(vec!["run-config".to_string(), config]),
         CoreKind::Sidecar(name) => Err(ProcessError::new(format!(
             "sidecar process args are not implemented for {name}",
         ))),
@@ -300,6 +302,7 @@ fn core_kind_label(kind: &CoreKind) -> String {
         CoreKind::Xray => "xray".to_string(),
         CoreKind::SingBox => "sing-box".to_string(),
         CoreKind::Mihomo => "mihomo".to_string(),
+        CoreKind::KeliCoreRs => "keli-core-rs".to_string(),
         CoreKind::Sidecar(name) => format!("sidecar-{name}"),
     }
 }
@@ -330,6 +333,26 @@ mod tests {
         assert_eq!(spec.name, "core:xray");
         assert_eq!(spec.command, "xray");
         assert_eq!(spec.args, vec!["run", "-config", "/srv/v2node/config.json"]);
+        assert_eq!(spec.working_dir, Some(PathBuf::from("/srv/v2node")));
+    }
+
+    #[test]
+    fn builds_keli_core_rs_process_spec_from_core_plan() {
+        let plan = CorePlan {
+            kind: CoreKind::KeliCoreRs,
+            config_path: PathBuf::from("/srv/v2node/keli-core-rs.json"),
+            listen_tags: Vec::new(),
+            inbounds: Vec::new(),
+        };
+
+        let spec = core_process_spec(&plan, None).unwrap();
+
+        assert_eq!(spec.name, "core:keli-core-rs");
+        assert_eq!(spec.command, "keli-core-rs");
+        assert_eq!(
+            spec.args,
+            vec!["run-config", "/srv/v2node/keli-core-rs.json"]
+        );
         assert_eq!(spec.working_dir, Some(PathBuf::from("/srv/v2node")));
     }
 

@@ -119,10 +119,9 @@ impl UpgradeExecutor for SystemUpgradeExecutor {
         if output.status.success() {
             Ok(())
         } else {
-            let detail = first_non_empty(
-                String::from_utf8_lossy(&output.stderr).trim(),
-                String::from_utf8_lossy(&output.stdout).trim(),
-            );
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let detail = first_non_empty(stderr.trim(), stdout.trim());
             Err(format!("update launcher exited with {}: {detail}", output.status))
         }
     }
