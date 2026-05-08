@@ -1,6 +1,7 @@
 use serde_json::{json, Value};
 
 use crate::config::AgentConfig;
+use crate::core::CoreKind;
 use crate::machine::{MachineStatusPayload, NodeFailurePayload};
 use crate::node::NodeFailure;
 use crate::port_forward::{HysteriaPortForwardStatus, HysteriaPortForwardToolStatus};
@@ -172,37 +173,57 @@ fn user_limit_value(plan: &RuntimeBootstrapPlan) -> Value {
     let mut users = 0usize;
     let mut speed_limited_users = 0usize;
     let mut device_limited_users = 0usize;
+    let mut enforced_limited_users = 0usize;
+    let mut pending_limited_users = 0usize;
 
     for core in plan.core_plan.iter().chain(plan.sidecar_core_plans.iter()) {
+        let limits_enforced = matches!(core.kind, CoreKind::KeliCoreRs);
         for inbound in &core.inbounds {
             for user in &inbound.users {
                 users += 1;
-                if user.speed_limit > 0 {
+                let speed_limited = user.speed_limit > 0;
+                let device_limited = user.device_limit > 0;
+                if speed_limited {
                     speed_limited_users += 1;
                 }
-                if user.device_limit > 0 {
+                if device_limited {
                     device_limited_users += 1;
+                }
+                if speed_limited || device_limited {
+                    if limits_enforced {
+                        enforced_limited_users += 1;
+                    } else {
+                        pending_limited_users += 1;
+                    }
                 }
             }
         }
     }
 
     let active = speed_limited_users > 0 || device_limited_users > 0;
+    let enforcement = if !active {
+        "none_required"
+    } else if pending_limited_users == 0 {
+        "keli_core_rs"
+    } else if enforced_limited_users > 0 {
+        "partial"
+    } else {
+        "external_core_pending"
+    };
+    let warning = if pending_limited_users > 0 {
+        "per-user speed and device limits are not enforced by this external-core runtime yet"
+    } else {
+        ""
+    };
     json!({
         "users": users,
         "speed_limited_users": speed_limited_users,
         "device_limited_users": device_limited_users,
+        "enforced_limited_users": enforced_limited_users,
+        "pending_limited_users": pending_limited_users,
         "active": active,
-        "enforcement": if active {
-            "external_core_pending"
-        } else {
-            "none_required"
-        },
-        "warning": if active {
-            "per-user speed and device limits are not enforced by the external-core runtime yet"
-        } else {
-            ""
-        }
+        "enforcement": enforcement,
+        "warning": warning
     })
 }
 
@@ -478,6 +499,51 @@ mod tests {
         assert_eq!(limits["device_limited_users"], json!(1));
         assert_eq!(limits["active"], json!(true));
         assert_eq!(limits["enforcement"], json!("external_core_pending"));
+        assert_eq!(limits["pending_limited_users"], json!(1));
+        assert_eq!(limits["enforced_limited_users"], json!(0));
+    }
+
+    #[test]
+    fn machine_status_marks_keli_core_rs_user_limits_as_enforced() {
+        let mut resolved = ResolvedConfig {
+            kernel: Default::default(),
+            realtime: Default::default(),
+            machine: ResolvedMachineConfig {
+                enabled: true,
+                continue_on_error: true,
+                profiles: Vec::new(),
+            },
+            agent: AgentConfig::default(),
+            nodes: vec![node_config("https://panel.example.test", 8, 3)],
+        };
+        resolved.kernel.r#type = "keli-core-rs".to_string();
+        let node = test_node("socks", 8);
+        let tag = node.tag.clone();
+        let mut users = BTreeMap::new();
+        users.insert(
+            tag,
+            vec![UserInfo {
+                id: 1,
+                uuid: "11111111-1111-1111-1111-111111111111".to_string(),
+                speed_limit: 20,
+                device_limit: 2,
+            }],
+        );
+        let plan =
+            build_runtime_bootstrap_plan_with_users(resolved, vec![node], Vec::new(), &users)
+                .unwrap();
+
+        let payload = build_machine_status_payload(3, &plan, HealthReportInput::default());
+
+        let limits = &payload.status["core"]["user_limits"];
+        assert_eq!(limits["users"], json!(1));
+        assert_eq!(limits["speed_limited_users"], json!(1));
+        assert_eq!(limits["device_limited_users"], json!(1));
+        assert_eq!(limits["active"], json!(true));
+        assert_eq!(limits["enforcement"], json!("keli_core_rs"));
+        assert_eq!(limits["pending_limited_users"], json!(0));
+        assert_eq!(limits["enforced_limited_users"], json!(1));
+        assert_eq!(limits["warning"], json!(""));
     }
 
     #[test]
