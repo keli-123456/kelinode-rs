@@ -11,6 +11,8 @@ kernel:
 
 The matching core-side gate is `keli-core-rs/docs/PARITY.md`.
 
+When the native core is already running, `kelinode-rs` writes the rendered config file for persistence and sends the same config through the local `ApplyConfig` control socket. If the control socket is unavailable or too old, it falls back to the previous process reload behavior.
+
 ## Renderer Rules
 
 - Render only options that `keli-core-rs` validates and has a runtime path for.

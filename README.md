@@ -112,6 +112,7 @@ Not implemented yet:
 - Mieru sidecar traffic requires operators to configure the `mita` command, arguments, and optional environment for their deployment style.
 - Experimental `keli-core-rs` native rendering covers SOCKS/HTTP, Shadowsocks, VMess, VLESS, Trojan, AnyTLS, Hysteria2, TUIC, common TCP/WS/HTTPUpgrade/gRPC transports, VLESS REALITY config, direct outbound, per-user credentials, and basic domain block routes.
 - Set `kernel.type: keli-core-rs` to select the experimental Rust-native core plan; `xray` remains the default.
+- When `keli-core-rs` is already running, `kelinode-rs` hot-applies changed native configs through the local `ApplyConfig` control socket and falls back to a process reload if that control path is unavailable.
 - Real-client interop and production soak testing are still required before making `keli-core-rs` the default.
 - Subscription reverse proxy.
 

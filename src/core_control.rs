@@ -36,6 +36,7 @@ impl std::error::Error for KeliCoreControlError {}
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum KeliCoreCommand {
+    ApplyConfig { config: Value },
     DrainTraffic { minimum_bytes: u64 },
     Status,
     Stop,
@@ -72,6 +73,13 @@ pub struct KeliCoreTrafficRecord {
     pub online_ips: Vec<String>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct KeliCoreApplyResult {
+    pub decision: String,
+    pub status: Value,
+    pub listeners: Vec<Value>,
+}
+
 impl KeliCoreControlClient {
     pub fn new(addr: impl Into<String>) -> Self {
         Self {
@@ -91,6 +99,24 @@ impl KeliCoreControlClient {
 
     pub fn status(&self) -> Result<KeliCoreResponse, KeliCoreControlError> {
         self.send(&KeliCoreCommand::Status)
+    }
+
+    pub fn apply_config(&self, config: Value) -> Result<KeliCoreApplyResult, KeliCoreControlError> {
+        match self.send(&KeliCoreCommand::ApplyConfig { config })? {
+            KeliCoreResponse::Applied {
+                decision,
+                status,
+                listeners,
+            } => Ok(KeliCoreApplyResult {
+                decision,
+                status,
+                listeners,
+            }),
+            KeliCoreResponse::Error { message } => Err(KeliCoreControlError::new(message)),
+            response => Err(KeliCoreControlError::new(format!(
+                "unexpected keli-core-rs apply response: {response:?}"
+            ))),
+        }
     }
 
     pub fn drain_traffic(
@@ -232,6 +258,51 @@ mod tests {
             .unwrap();
 
         assert!(matches!(response, KeliCoreResponse::Status { .. }));
+        join.join().unwrap();
+    }
+
+    #[test]
+    fn applies_config_over_json_line_control_socket() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let join = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut command = String::new();
+            BufReader::new(stream.try_clone().unwrap())
+                .read_line(&mut command)
+                .unwrap();
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(command.trim()).unwrap(),
+                json!({
+                    "type": "apply_config",
+                    "config": {
+                        "instance_id": "node-a",
+                        "inbounds": []
+                    }
+                })
+            );
+            writeln!(
+                stream,
+                "{}",
+                json!({
+                    "type": "applied",
+                    "decision": "updated",
+                    "status": "running",
+                    "listeners": []
+                })
+            )
+            .unwrap();
+        });
+
+        let applied = KeliCoreControlClient::new(addr.to_string())
+            .apply_config(json!({
+                "instance_id": "node-a",
+                "inbounds": []
+            }))
+            .unwrap();
+
+        assert_eq!(applied.decision, "updated");
+        assert_eq!(applied.status, json!("running"));
         join.join().unwrap();
     }
 }

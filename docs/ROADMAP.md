@@ -113,7 +113,8 @@
 - `keli-core-rs` process spec using `run-config <config>` while keeping Xray as the stable default core path.
 - `kernel.type` runtime selection for `xray` and the opt-in `keli-core-rs` plan.
 - Deterministic local control address wiring for `keli-core-rs run-config --control`.
-- JSON-line `keli-core-rs` control client for status, stop, and per-user traffic drain.
+- JSON-line `keli-core-rs` control client for status, stop, `ApplyConfig`, and per-user traffic drain.
+- Runtime hot-apply path for running `keli-core-rs` configs, with process reload fallback for old or unavailable control sockets.
 - Compatibility tests around protocol parsing and endpoint construction.
 
 ## Phase 2: Runtime Control

@@ -1,7 +1,10 @@
 use std::collections::BTreeMap;
 
 use crate::config::SidecarProcessConfig;
-use crate::core::{write_core_config, CoreConfigWriteResult, CoreKind, CorePlan};
+use crate::core::{
+    render_core_config, write_core_config, CoreConfigWriteResult, CoreKind, CorePlan,
+};
+use crate::core_control::KeliCoreControlClient;
 use crate::health::{build_machine_status_payload, HealthReportInput};
 use crate::machine::{MachineStatusPayload, MachineStatusResponse, MachineUpgradeCommand};
 use crate::panel::types::UserInfo;
@@ -10,7 +13,10 @@ use crate::port_forward::{
     inspect_hysteria_port_forward, repair_hysteria_port_forward, HysteriaPortForwardStatus,
     PortForwardExecutor,
 };
-use crate::process::{core_process_spec, sidecar_process_spec, ProcessStatus, ProcessSupervisor};
+use crate::process::{
+    core_process_spec, keli_core_rs_control_addr, sidecar_process_spec, ProcessSpec, ProcessStatus,
+    ProcessSupervisor,
+};
 use crate::runtime::{rebuild_runtime_plan_with_users, RuntimeBootstrapPlan};
 use crate::upgrade::{UpgradeExecutor, UpgradeManager, UpgradeStatus};
 use serde_json::Value;
@@ -21,6 +27,7 @@ pub struct RuntimeControlOptions {
     pub core_command: Option<String>,
     pub sidecar_processes: BTreeMap<String, SidecarProcessConfig>,
     pub start_core: bool,
+    pub hot_apply_keli_core_rs: bool,
     pub repair_port_forward: bool,
     pub health: HealthReportInput,
 }
@@ -80,14 +87,8 @@ where
     if let Some(core_plan) = &plan.core_plan {
         let write_result = write_core_config(core_plan).map_err(|err| err.message)?;
         if options.start_core {
-            let spec = core_process_spec(core_plan, options.core_command.as_deref())
-                .map_err(|err| err.message)?;
-            let status = if write_result.changed {
-                process_supervisor.reload(&spec)
-            } else {
-                process_supervisor.start(&spec)
-            }
-            .map_err(|err| err.message)?;
+            let status =
+                apply_core_process(core_plan, &write_result, process_supervisor, &options)?;
             core_process = Some(status);
         }
         core_config = Some(write_result);
@@ -137,6 +138,65 @@ where
         hy2_port_forward,
         machine_status,
     })
+}
+
+fn apply_core_process<P>(
+    core_plan: &CorePlan,
+    write_result: &CoreConfigWriteResult,
+    process_supervisor: &mut P,
+    options: &RuntimeControlOptions,
+) -> Result<ProcessStatus, String>
+where
+    P: ProcessSupervisor,
+{
+    let spec =
+        core_process_spec(core_plan, options.core_command.as_deref()).map_err(|err| err.message)?;
+    if write_result.changed {
+        if options.hot_apply_keli_core_rs {
+            match try_hot_apply_keli_core_rs_config(core_plan, process_supervisor, &spec) {
+                Ok(Some(status)) => return Ok(status),
+                Ok(None) => {}
+                Err(error) => {
+                    let mut status = process_supervisor
+                        .reload(&spec)
+                        .map_err(|err| err.message)?;
+                    status.message =
+                        format!("reloaded after keli-core-rs hot apply failed: {error}");
+                    return Ok(status);
+                }
+            }
+        }
+        return process_supervisor.reload(&spec).map_err(|err| err.message);
+    }
+
+    process_supervisor.start(&spec).map_err(|err| err.message)
+}
+
+fn try_hot_apply_keli_core_rs_config<P>(
+    core_plan: &CorePlan,
+    process_supervisor: &mut P,
+    spec: &ProcessSpec,
+) -> Result<Option<ProcessStatus>, String>
+where
+    P: ProcessSupervisor,
+{
+    if core_plan.kind != CoreKind::KeliCoreRs {
+        return Ok(None);
+    }
+
+    let current = process_supervisor
+        .status(&spec.name)
+        .map_err(|err| err.message)?;
+    if !current.is_running() {
+        return Ok(None);
+    }
+
+    let config = render_core_config(core_plan).map_err(|err| err.message)?;
+    let client = KeliCoreControlClient::new(keli_core_rs_control_addr(&core_plan.config_path));
+    let applied = client.apply_config(config).map_err(|err| err.message)?;
+    let mut status = current;
+    status.message = format!("hot applied keli-core-rs config ({})", applied.decision);
+    Ok(Some(status))
 }
 
 fn configured_sidecar_process<'a>(
@@ -324,7 +384,11 @@ pub fn handle_runtime_signal<E: UpgradeExecutor>(
 mod tests {
     use std::collections::{BTreeMap, BTreeSet};
     use std::fs;
-    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+    use std::io::{BufRead, BufReader, Write};
+    use std::net::TcpListener;
+    use std::sync::mpsc;
+    use std::thread;
+    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
     use serde_json::json;
 
@@ -332,8 +396,10 @@ mod tests {
     use crate::panel::client::{PanelClient, PanelClientOptions};
     use crate::panel::types::{CommonNode, NodeInfo, UserInfo};
     use crate::port_forward::{PortForwardCommand, PortForwardExecutor};
-    use crate::process::MemoryProcessSupervisor;
-    use crate::runtime::{build_runtime_bootstrap_plan, build_runtime_bootstrap_plan_with_users};
+    use crate::process::{keli_core_rs_control_addr, MemoryProcessSupervisor};
+    use crate::runtime::{
+        build_runtime_bootstrap_plan, build_runtime_bootstrap_plan_with_users, RuntimeBootstrapPlan,
+    };
 
     use crate::machine::{MachineStatusPayload, MachineStatusResponse, MachineUpgradeCommand};
     use crate::upgrade::{MemoryUpgradeExecutor, UpgradeManager};
@@ -391,6 +457,100 @@ mod tests {
             json!("running")
         );
         assert_eq!(result.machine_status.status["runtime"]["nodes"], json!(1));
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn hot_applies_running_keli_core_rs_config_without_process_reload() {
+        let (dir, initial_plan, listener) =
+            bindable_keli_core_rs_plan("11111111-1111-1111-1111-111111111111");
+        let mut process = MemoryProcessSupervisor::default();
+        let mut port_forward = FakePortForwardExecutor::default();
+
+        apply_runtime_plan(
+            &initial_plan,
+            &mut process,
+            &mut port_forward,
+            RuntimeControlOptions {
+                machine_id: 3,
+                start_core: true,
+                hot_apply_keli_core_rs: true,
+                ..RuntimeControlOptions::default()
+            },
+        )
+        .unwrap();
+
+        let updated_plan =
+            keli_core_rs_plan_with_user(&dir, "22222222-2222-2222-2222-222222222222");
+        let (seen_tx, seen_rx) = mpsc::channel();
+        let join = thread::spawn(move || {
+            listener.set_nonblocking(true).unwrap();
+            let deadline = Instant::now() + Duration::from_secs(2);
+            loop {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        let mut command = String::new();
+                        BufReader::new(stream.try_clone().unwrap())
+                            .read_line(&mut command)
+                            .unwrap();
+                        let command: serde_json::Value =
+                            serde_json::from_str(command.trim()).unwrap();
+                        writeln!(
+                            stream,
+                            "{}",
+                            json!({
+                                "type": "applied",
+                                "decision": "updated",
+                                "status": "running",
+                                "listeners": []
+                            })
+                        )
+                        .unwrap();
+                        seen_tx.send(command).unwrap();
+                        return;
+                    }
+                    Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                        if Instant::now() >= deadline {
+                            seen_tx
+                                .send(json!({ "error": "no hot apply connection" }))
+                                .unwrap();
+                            return;
+                        }
+                        thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(err) => panic!("accept keli-core-rs control connection: {err}"),
+                }
+            }
+        });
+
+        let result = apply_runtime_plan(
+            &updated_plan,
+            &mut process,
+            &mut port_forward,
+            RuntimeControlOptions {
+                machine_id: 3,
+                start_core: true,
+                hot_apply_keli_core_rs: true,
+                ..RuntimeControlOptions::default()
+            },
+        )
+        .unwrap();
+        let command = seen_rx.recv_timeout(Duration::from_secs(3)).unwrap();
+
+        assert_eq!(command["type"], json!("apply_config"));
+        assert!(command["config"]
+            .to_string()
+            .contains("22222222-2222-2222-2222-222222222222"));
+        assert_eq!(process.starts.len(), 1);
+        assert_eq!(process.stops.len(), 1);
+        assert!(result
+            .core_process
+            .as_ref()
+            .unwrap()
+            .message
+            .contains("updated"));
+        join.join().unwrap();
 
         let _ = fs::remove_dir_all(dir);
     }
@@ -827,6 +987,58 @@ mod tests {
         .unwrap();
 
         NodeInfo::from_common("https://panel.example.test", node_id, common).unwrap()
+    }
+
+    fn bindable_keli_core_rs_plan(
+        user_uuid: &str,
+    ) -> (std::path::PathBuf, RuntimeBootstrapPlan, TcpListener) {
+        for attempt in 0..100 {
+            let dir = temp_test_dir(&format!("runtime-keli-core-hot-apply-{attempt}"));
+            let plan = keli_core_rs_plan_with_user(&dir, user_uuid);
+            let addr = keli_core_rs_control_addr(&plan.core_plan.as_ref().unwrap().config_path);
+            match TcpListener::bind(addr) {
+                Ok(listener) => return (dir, plan, listener),
+                Err(_) => {
+                    let _ = fs::remove_dir_all(dir);
+                }
+            }
+        }
+
+        panic!("could not bind a keli-core-rs control test port")
+    }
+
+    fn keli_core_rs_plan_with_user(dir: &std::path::Path, user_uuid: &str) -> RuntimeBootstrapPlan {
+        let mut resolved = ResolvedConfig {
+            kernel: Default::default(),
+            realtime: Default::default(),
+            machine: ResolvedMachineConfig {
+                enabled: true,
+                continue_on_error: true,
+                profiles: Vec::new(),
+            },
+            agent: Default::default(),
+            nodes: vec![NodeConfig {
+                url: "https://panel.example.test".to_string(),
+                token: "token".to_string(),
+                node_id: 17,
+                machine_id: 3,
+                ..NodeConfig::default()
+            }],
+        };
+        resolved.kernel.r#type = "keli-core-rs".to_string();
+        resolved.kernel.config_dir = dir.join("v2node").display().to_string();
+        let node = test_node("vless", 17);
+        let mut users = BTreeMap::new();
+        users.insert(
+            node.tag.clone(),
+            vec![UserInfo {
+                id: 17,
+                uuid: user_uuid.to_string(),
+                speed_limit: 0,
+                device_limit: 0,
+            }],
+        );
+        build_runtime_bootstrap_plan_with_users(resolved, vec![node], Vec::new(), &users).unwrap()
     }
 
     fn temp_test_dir(label: &str) -> std::path::PathBuf {

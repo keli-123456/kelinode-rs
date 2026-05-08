@@ -337,6 +337,7 @@ fn runtime_loop_options(plan: &RuntimeBootstrapPlan, report_to_panel: bool) -> R
                 .unwrap_or_default(),
             start_core: true,
             sidecar_processes: plan.resolved.kernel.sidecars.clone(),
+            hot_apply_keli_core_rs: true,
             repair_port_forward: true,
             ..RuntimeControlOptions::default()
         },
