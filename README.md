@@ -111,6 +111,22 @@ Not implemented yet:
 - Mieru sidecar traffic requires operators to configure the `mita` command, arguments, and optional environment for their deployment style.
 - Subscription reverse proxy.
 
+## Sidecar Process Example
+
+Mieru sidecar nodes can run `mita` with the generated config path passed through an environment variable:
+
+```yaml
+kernel:
+  sidecars:
+    mieru:
+      command: "/usr/local/bin/mita"
+      args: ["run"]
+      env:
+        MITA_CONFIG_JSON_FILE: "{config}"
+```
+
+Use a small wrapper command instead when a sidecar needs a multi-step apply/start flow.
+
 ## Compatibility Targets
 
 - Existing `keliboard` node API version: `2026-04-26`.

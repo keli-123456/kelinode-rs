@@ -46,5 +46,6 @@ Initial supported protocol names mirror Go `kelinode`:
 - `anytls`
 - `socks`
 - `http`
+- `mieru` when a matching sidecar process is explicitly configured
 
-Naive and Mieru require explicit sidecar integration before the panel should expose them as Rust node supported protocols.
+Naive still requires explicit Caddy forward_proxy integration before the panel should expose it as a Rust node supported protocol.
