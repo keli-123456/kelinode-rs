@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use crate::config::{
     AgentConfig, AppConfig, NodeConfig, ResolvedConfig, SubscriptionProxyConfig,
 };
-use crate::core::{split_core_plans_for_nodes, CorePlan};
+use crate::core::{split_core_plans_for_nodes, CorePlan, CorePlanBundle};
 use crate::machine::{resolve_machine_profiles_from_panel, MachineResolveSummary};
 use crate::node::{users_by_node_tag, NodeFailure, NodeManager, NodeManagerOptions};
 use crate::panel::types::{NodeInfo, UserInfo};
@@ -148,7 +148,7 @@ pub fn build_runtime_bootstrap_plan_with_users(
     let subscription_proxy_only =
         node_infos.is_empty() && resolved.agent.subscription_proxy.enabled;
     let core_bundle = if node_infos.is_empty() {
-        Default::default()
+        CorePlanBundle::default()
     } else {
         split_core_plans_for_nodes(
             core_config_path(&resolved),

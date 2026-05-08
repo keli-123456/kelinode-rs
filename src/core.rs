@@ -34,6 +34,7 @@ pub struct InboundPlan {
     pub protocol: String,
     pub listen: String,
     pub port: u16,
+    pub port_range: String,
     pub security: String,
     pub network: String,
     pub network_settings: Value,
@@ -259,10 +260,64 @@ pub fn render_core_config(plan: &CorePlan) -> Result<Value, CoreError> {
         CoreKind::Mihomo => Err(CoreError::new(
             "mihomo core config rendering is not implemented yet",
         )),
-        CoreKind::Sidecar(name) => Err(CoreError::new(format!(
-            "sidecar core config rendering is not implemented for {name}",
+        CoreKind::Sidecar(name) => render_sidecar_config(plan, name),
+    }
+}
+
+fn render_sidecar_config(plan: &CorePlan, name: &str) -> Result<Value, CoreError> {
+    match name {
+        "mieru" => render_mieru_sidecar_config(plan),
+        "naive" => Err(CoreError::new(
+            "naive sidecar config requires a Caddy forward_proxy server and is not rendered by kelinode-rs yet",
+        )),
+        value => Err(CoreError::new(format!(
+            "sidecar core config rendering is not implemented for {value}",
         ))),
     }
+}
+
+fn render_mieru_sidecar_config(plan: &CorePlan) -> Result<Value, CoreError> {
+    let mut port_bindings = Vec::new();
+    let mut users = Vec::new();
+
+    for inbound in &plan.inbounds {
+        if inbound.protocol != "mieru" {
+            return Err(CoreError::new(format!(
+                "mieru sidecar cannot render protocol {}",
+                inbound.protocol
+            )));
+        }
+
+        let mut binding = Map::new();
+        if inbound.port_range.is_empty() {
+            binding.insert("port".to_string(), json!(inbound.port));
+        } else {
+            binding.insert("portRange".to_string(), json!(&inbound.port_range));
+        }
+        binding.insert(
+            "protocol".to_string(),
+            json!(resolve_mieru_transport(&inbound.network)?),
+        );
+        port_bindings.push(Value::Object(binding));
+
+        for user in &inbound.users {
+            let credential = user.uuid.trim();
+            if credential.is_empty() {
+                continue;
+            }
+            users.push(json!({
+                "name": credential,
+                "password": credential
+            }));
+        }
+    }
+
+    Ok(json!({
+        "portBindings": port_bindings,
+        "users": users,
+        "loggingLevel": "INFO",
+        "mtu": 1400
+    }))
 }
 
 pub fn write_core_config(plan: &CorePlan) -> Result<CoreConfigWriteResult, CoreError> {
@@ -338,8 +393,9 @@ pub fn build_inbound_plan_with_users(
         protocol: core_protocol_name(node.protocol),
         listen: resolve_node_listen_ip(&node.common.listen_ip),
         port: node.common.server_port,
+        port_range: resolve_node_port_range(node),
         security: security_name(node.security),
-        network: core_network_name(node),
+        network: core_network_name(node)?,
         network_settings: node.common.network_settings.clone(),
         flow: node.common.flow.trim().to_string(),
         cipher: node.common.cipher.trim().to_string(),
@@ -439,16 +495,46 @@ fn core_protocol_name(protocol: Protocol) -> String {
     }
 }
 
-fn core_network_name(node: &NodeInfo) -> String {
+fn core_network_name(node: &NodeInfo) -> Result<String, CoreError> {
     if !node.common.network.trim().is_empty() {
-        return node.common.network.trim().to_string();
+        return Ok(node.common.network.trim().to_string());
     }
 
-    match node.protocol {
+    Ok(match node.protocol {
         Protocol::Trojan => "tcp".to_string(),
         Protocol::Hysteria2 => "hysteria".to_string(),
         Protocol::Tuic => "tuic".to_string(),
+        Protocol::Mieru => resolve_mieru_transport(&node.common.transport)?,
         _ => String::new(),
+    })
+}
+
+fn resolve_node_port_range(node: &NodeInfo) -> String {
+    let ports = node.common.ports.0.trim();
+    if !ports.is_empty() {
+        return ports.to_string();
+    }
+
+    let port = node.common.port.0.trim();
+    if port.contains('-') {
+        port.to_string()
+    } else {
+        String::new()
+    }
+}
+
+fn resolve_mieru_transport(value: &str) -> Result<String, CoreError> {
+    let transport = value.trim();
+    if transport.is_empty() {
+        return Ok("TCP".to_string());
+    }
+
+    let transport = transport.to_ascii_uppercase();
+    match transport.as_str() {
+        "TCP" | "UDP" => Ok(transport),
+        _ => Err(CoreError::new(format!(
+            "mieru transport {transport} is not supported"
+        ))),
     }
 }
 
@@ -1253,7 +1339,7 @@ mod tests {
         should_fallback_node_listen_ip, sidecar_config_path, split_core_plans_for_nodes,
         write_core_config, CoreKind, CorePlan,
     };
-    use crate::panel::types::{CommonNode, NodeInfo, Route, Security, UserInfo};
+    use crate::panel::types::{CommonNode, NodeInfo, PortValue, Route, Security, UserInfo};
 
     #[test]
     fn core_plan_can_represent_external_xray() {
@@ -1326,6 +1412,70 @@ mod tests {
             sidecar_config_path("/srv/v2node/config.json", "naive", 36),
             PathBuf::from("/srv/v2node/sidecar-naive-36.json")
         );
+    }
+
+    #[test]
+    fn renders_mieru_sidecar_server_config_from_users() {
+        let mut node = test_node("mieru", 37, "");
+        node.common.transport = "udp".to_string();
+        let tag = node.tag.clone();
+        let mut users = std::collections::BTreeMap::new();
+        users.insert(
+            tag,
+            vec![UserInfo {
+                id: 37,
+                uuid: "mieru-secret".to_string(),
+                speed_limit: 0,
+                device_limit: 0,
+            }],
+        );
+        let plan = CorePlan::from_nodes_with_users(
+            CoreKind::Sidecar("mieru".to_string()),
+            PathBuf::from("/srv/v2node/sidecar-mieru-37.json"),
+            &[node],
+            &users,
+        )
+        .unwrap();
+
+        let config = render_core_config(&plan).unwrap();
+
+        assert_eq!(config["portBindings"][0]["port"], 10037);
+        assert_eq!(config["portBindings"][0]["protocol"], "UDP");
+        assert_eq!(config["users"][0]["name"], "mieru-secret");
+        assert_eq!(config["users"][0]["password"], "mieru-secret");
+        assert_eq!(config["loggingLevel"], "INFO");
+    }
+
+    #[test]
+    fn renders_mieru_sidecar_port_range_when_present() {
+        let mut node = test_node("mieru", 38, "");
+        node.common.ports = PortValue("2100-2200".to_string());
+        let plan = CorePlan::from_nodes(
+            CoreKind::Sidecar("mieru".to_string()),
+            PathBuf::from("/srv/v2node/sidecar-mieru-38.json"),
+            &[node],
+        )
+        .unwrap();
+
+        let config = render_core_config(&plan).unwrap();
+
+        assert_eq!(config["portBindings"][0]["portRange"], "2100-2200");
+        assert!(config["portBindings"][0]["port"].is_null());
+    }
+
+    #[test]
+    fn naive_sidecar_config_is_explicitly_not_rendered() {
+        let node = test_node("naive", 39, "");
+        let plan = CorePlan::from_nodes(
+            CoreKind::Sidecar("naive".to_string()),
+            PathBuf::from("/srv/v2node/sidecar-naive-39.json"),
+            &[node],
+        )
+        .unwrap();
+
+        let err = render_core_config(&plan).unwrap_err();
+
+        assert!(err.message.contains("Caddy forward_proxy"));
     }
 
     #[test]

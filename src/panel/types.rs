@@ -25,7 +25,7 @@ pub struct CommonNode {
     pub protocol: String,
     #[serde(default)]
     pub listen_ip: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_u16_from_any")]
     pub server_port: u16,
     #[serde(default)]
     pub port: PortValue,
@@ -43,6 +43,10 @@ pub struct CommonNode {
     pub cert_info: Option<CertInfo>,
     #[serde(default)]
     pub network: String,
+    #[serde(default)]
+    pub transport: String,
+    #[serde(default)]
+    pub multiplexing: String,
     #[serde(default)]
     pub network_settings: Value,
     #[serde(default)]
@@ -386,6 +390,33 @@ impl<'de> Deserialize<'de> for PortValue {
     }
 }
 
+fn deserialize_u16_from_any<'de, D>(deserializer: D) -> Result<u16, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let Some(value) = Option::<Value>::deserialize(deserializer)? else {
+        return Ok(0);
+    };
+
+    match value {
+        Value::Number(number) => number
+            .as_u64()
+            .filter(|value| *value <= u16::MAX as u64)
+            .map(|value| value as u16)
+            .ok_or_else(|| de::Error::custom("port number is out of range")),
+        Value::String(text) => {
+            let text = text.trim();
+            if text.is_empty() {
+                Ok(0)
+            } else {
+                text.parse::<u16>()
+                    .map_err(|_| de::Error::custom("port string is not a valid u16"))
+            }
+        }
+        _ => Err(de::Error::custom("port must be a string or number")),
+    }
+}
+
 fn interval_to_duration(value: &Value) -> Option<Duration> {
     match value {
         Value::Number(number) => number.as_u64().map(Duration::from_secs),
@@ -485,6 +516,21 @@ mod tests {
         assert_eq!(text.0, "1000-2000");
         assert_eq!(number.0, "443");
         assert_eq!(null.0, "");
+    }
+
+    #[test]
+    fn common_node_accepts_string_server_port_and_mieru_fields() {
+        let common: CommonNode = serde_json::from_value(json!({
+            "protocol": "mieru",
+            "server_port": "2999",
+            "transport": "udp",
+            "multiplexing": "MULTIPLEXING_HIGH"
+        }))
+        .unwrap();
+
+        assert_eq!(common.server_port, 2999);
+        assert_eq!(common.transport, "udp");
+        assert_eq!(common.multiplexing, "MULTIPLEXING_HIGH");
     }
 
     #[test]
