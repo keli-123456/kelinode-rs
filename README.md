@@ -112,6 +112,7 @@ Not implemented yet:
 - Mieru sidecar traffic requires operators to configure the `mita` command, arguments, and optional environment for their deployment style.
 - Experimental `keli-core-rs` native rendering is limited to SOCKS/HTTP, direct outbound, per-user credentials, and basic domain block routes.
 - Set `kernel.type: keli-core-rs` to select the experimental Rust-native core plan; `xray` remains the default.
+- Add a JSON-line control client for the `keli-core-rs` local status, stop, and traffic-drain socket.
 - Subscription reverse proxy.
 
 ## Sidecar Process Example
