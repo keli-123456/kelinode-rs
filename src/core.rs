@@ -515,11 +515,14 @@ fn validate_keli_core_rs_tcp_or_ws_inbound(inbound: &InboundPlan) -> Result<(), 
             inbound.tag, network
         )));
     }
-    if inbound.security != "none" {
+    if !matches!(inbound.security.as_str(), "none" | "tls") {
         return Err(CoreError::new(format!(
-            "keli-core-rs {protocol} currently supports only security none; inbound {} uses {}",
+            "keli-core-rs {protocol} currently supports only security none/tls; inbound {} uses {}",
             inbound.tag, inbound.security
         )));
+    }
+    if inbound.security == "tls" {
+        validate_keli_core_rs_tls_inbound(inbound)?;
     }
     if !inbound.flow.trim().is_empty() {
         return Err(CoreError::new(format!(
@@ -538,6 +541,30 @@ fn validate_keli_core_rs_tcp_or_ws_inbound(inbound: &InboundPlan) -> Result<(), 
     }
 
     validate_keli_core_rs_websocket_settings(inbound)
+}
+
+fn validate_keli_core_rs_tls_inbound(inbound: &InboundPlan) -> Result<(), CoreError> {
+    let protocol = inbound.protocol.as_str();
+    let network = keli_core_rs_transport_network(inbound);
+    if network != "tcp" {
+        return Err(CoreError::new(format!(
+            "keli-core-rs {protocol} tls currently supports only tcp transport; inbound {} uses {}",
+            inbound.tag, network
+        )));
+    }
+    if inbound.cert_file.trim().is_empty() || inbound.key_file.trim().is_empty() {
+        return Err(CoreError::new(format!(
+            "keli-core-rs {protocol} tls requires cert_file and key_file on inbound {}",
+            inbound.tag
+        )));
+    }
+    if inbound.reject_unknown_sni {
+        return Err(CoreError::new(format!(
+            "keli-core-rs {protocol} reject_unknown_sni is not supported yet on inbound {}",
+            inbound.tag
+        )));
+    }
+    Ok(())
 }
 
 fn validate_keli_core_rs_websocket_settings(inbound: &InboundPlan) -> Result<(), CoreError> {
@@ -641,11 +668,25 @@ fn render_keli_core_rs_inbound(inbound: &InboundPlan) -> Value {
             .map(render_keli_core_rs_user)
             .collect::<Vec<_>>(),
         "transport": render_keli_core_rs_transport(inbound),
-        "tls": null,
+        "tls": render_keli_core_rs_tls(inbound),
         "sniffing": {
             "enabled": true,
             "dest_override": ["http", "tls"]
         }
+    })
+}
+
+fn render_keli_core_rs_tls(inbound: &InboundPlan) -> Value {
+    if inbound.security != "tls" {
+        return Value::Null;
+    }
+    json!({
+        "server_name": &inbound.server_name,
+        "cert_file": &inbound.cert_file,
+        "key_file": &inbound.key_file,
+        "alpn": &inbound.alpn,
+        "reject_unknown_sni": inbound.reject_unknown_sni,
+        "reality": null
     })
 }
 
@@ -2097,7 +2138,7 @@ mod tests {
     }
 
     #[test]
-    fn keli_core_rs_rejects_vless_tls_until_core_supports_it() {
+    fn keli_core_rs_rejects_vless_reality_until_core_supports_it() {
         let mut node = test_node("vless", 46, "");
         node.security = Security::Reality;
         let plan = CorePlan::from_nodes(
@@ -2109,7 +2150,7 @@ mod tests {
 
         let err = render_core_config(&plan).unwrap_err();
 
-        assert!(err.message.contains("security none"));
+        assert!(err.message.contains("security none/tls"));
     }
 
     #[test]
@@ -2256,19 +2297,38 @@ mod tests {
     }
 
     #[test]
-    fn keli_core_rs_rejects_trojan_tls_until_core_supports_it() {
-        let mut node = test_node("trojan", 51, "");
-        node.security = Security::Tls;
+    fn renders_keli_core_rs_vless_and_trojan_tls_settings() {
+        let mut vless = test_node("vless", 51, "");
+        vless.security = Security::Tls;
+        vless.common.cert_info.as_mut().unwrap().cert_file = "/srv/v2node/vless.cer".to_string();
+        vless.common.cert_info.as_mut().unwrap().key_file = "/srv/v2node/vless.key".to_string();
+        vless.common.cert_info.as_mut().unwrap().cert_domain = "vless.example.test".to_string();
+        let mut trojan = test_node("trojan", 62, "");
+        trojan.security = Security::Tls;
+        trojan.common.cert_info.as_mut().unwrap().cert_file = "/srv/v2node/trojan.cer".to_string();
+        trojan.common.cert_info.as_mut().unwrap().key_file = "/srv/v2node/trojan.key".to_string();
+        trojan.common.cert_info.as_mut().unwrap().cert_domain = "trojan.example.test".to_string();
+        trojan.common.tls_settings.alpn = vec!["h2".to_string(), "http/1.1".to_string()];
         let plan = CorePlan::from_nodes(
             CoreKind::KeliCoreRs,
             PathBuf::from("/srv/v2node/keli-core-rs.json"),
-            &[node],
+            &[vless, trojan],
         )
         .unwrap();
 
-        let err = render_core_config(&plan).unwrap_err();
+        let config = render_core_config(&plan).unwrap();
 
-        assert!(err.message.contains("security none"));
+        assert_eq!(config["inbounds"][0]["tls"]["server_name"], "vless.example.test");
+        assert_eq!(config["inbounds"][0]["tls"]["cert_file"], "/srv/v2node/vless.cer");
+        assert_eq!(config["inbounds"][0]["tls"]["key_file"], "/srv/v2node/vless.key");
+        assert_eq!(
+            config["inbounds"][1]["tls"]["server_name"],
+            "trojan.example.test"
+        );
+        assert_eq!(config["inbounds"][1]["tls"]["cert_file"], "/srv/v2node/trojan.cer");
+        assert_eq!(config["inbounds"][1]["tls"]["key_file"], "/srv/v2node/trojan.key");
+        assert_eq!(config["inbounds"][1]["tls"]["alpn"][0], "h2");
+        assert_eq!(config["inbounds"][1]["tls"]["alpn"][1], "http/1.1");
     }
 
     #[test]
