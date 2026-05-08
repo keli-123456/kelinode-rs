@@ -560,9 +560,9 @@ fn validate_keli_core_rs_tls_inbound(inbound: &InboundPlan) -> Result<(), CoreEr
             inbound.tag
         )));
     }
-    if inbound.reject_unknown_sni {
+    if inbound.reject_unknown_sni && inbound.server_name.trim().is_empty() {
         return Err(CoreError::new(format!(
-            "keli-core-rs {protocol} reject_unknown_sni is not supported yet on inbound {}",
+            "keli-core-rs {protocol} reject_unknown_sni requires server_name on inbound {}",
             inbound.tag
         )));
     }
@@ -588,9 +588,9 @@ fn validate_keli_core_rs_tuic_inbound(inbound: &InboundPlan) -> Result<(), CoreE
             inbound.tag
         )));
     }
-    if inbound.reject_unknown_sni {
+    if inbound.reject_unknown_sni && inbound.server_name.trim().is_empty() {
         return Err(CoreError::new(format!(
-            "keli-core-rs tuic reject_unknown_sni is not supported yet on inbound {}",
+            "keli-core-rs tuic reject_unknown_sni requires server_name on inbound {}",
             inbound.tag
         )));
     }
@@ -641,9 +641,9 @@ fn validate_keli_core_rs_hysteria2_inbound(inbound: &InboundPlan) -> Result<(), 
             inbound.tag
         )));
     }
-    if inbound.reject_unknown_sni {
+    if inbound.reject_unknown_sni && inbound.server_name.trim().is_empty() {
         return Err(CoreError::new(format!(
-            "keli-core-rs hysteria2 reject_unknown_sni is not supported yet on inbound {}",
+            "keli-core-rs hysteria2 reject_unknown_sni requires server_name on inbound {}",
             inbound.tag
         )));
     }
@@ -2698,6 +2698,7 @@ mod tests {
         vless.common.cert_info.as_mut().unwrap().cert_file = "/srv/v2node/vless.cer".to_string();
         vless.common.cert_info.as_mut().unwrap().key_file = "/srv/v2node/vless.key".to_string();
         vless.common.cert_info.as_mut().unwrap().cert_domain = "vless.example.test".to_string();
+        vless.common.cert_info.as_mut().unwrap().reject_unknown_sni = true;
         vless.common.network = "ws".to_string();
         vless.common.network_settings = json!({
             "path": "/vless-tls"
@@ -2720,6 +2721,7 @@ mod tests {
         assert_eq!(config["inbounds"][0]["tls"]["server_name"], "vless.example.test");
         assert_eq!(config["inbounds"][0]["tls"]["cert_file"], "/srv/v2node/vless.cer");
         assert_eq!(config["inbounds"][0]["tls"]["key_file"], "/srv/v2node/vless.key");
+        assert_eq!(config["inbounds"][0]["tls"]["reject_unknown_sni"], true);
         assert_eq!(config["inbounds"][0]["transport"]["network"], "ws");
         assert_eq!(config["inbounds"][0]["transport"]["path"], "/vless-tls");
         assert_eq!(
