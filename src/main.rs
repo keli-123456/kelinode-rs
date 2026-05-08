@@ -200,7 +200,11 @@ where
     F: kelinode_rs::port_forward::PortForwardExecutor,
 {
     if let Some(core_plan) = runner.plan.core_plan.as_ref() {
-        let spec = core_process_spec(core_plan, None).map_err(|err| err.message)?;
+        let spec = core_process_spec(
+            core_plan,
+            non_empty_command_override(&runner.plan.resolved.kernel.core_command),
+        )
+        .map_err(|err| err.message)?;
         runner
             .process_supervisor
             .stop(&spec.name)
@@ -335,6 +339,8 @@ fn runtime_loop_options(plan: &RuntimeBootstrapPlan, report_to_panel: bool) -> R
                     })
                 })
                 .unwrap_or_default(),
+            core_command: non_empty_command_override(&plan.resolved.kernel.core_command)
+                .map(str::to_string),
             start_core: true,
             sidecar_processes: plan.resolved.kernel.sidecars.clone(),
             hot_apply_keli_core_rs: true,
@@ -350,6 +356,15 @@ fn runtime_loop_options(plan: &RuntimeBootstrapPlan, report_to_panel: bool) -> R
         options.tick_interval = Duration::from_secs(60);
     }
     options
+}
+
+fn non_empty_command_override(value: &str) -> Option<&str> {
+    let value = value.trim();
+    if value.is_empty() {
+        None
+    } else {
+        Some(value)
+    }
 }
 
 fn runtime_tick_interval(plan: &RuntimeBootstrapPlan) -> Duration {
@@ -410,7 +425,7 @@ mod tests {
 
     #[test]
     fn runtime_loop_options_keep_binary_machine_reporting_enabled() {
-        let plan = test_plan(
+        let mut plan = test_plan(
             vec![test_node_with_intervals(7, 30, 45)],
             vec![NodeConfig {
                 url: "https://panel.example.test".to_string(),
@@ -420,10 +435,15 @@ mod tests {
                 ..NodeConfig::default()
             }],
         );
+        plan.resolved.kernel.core_command = "/opt/keli/bin/keli-core-rs".to_string();
 
         let options = runtime_loop_options(&plan, true);
 
         assert_eq!(options.control.machine_id, 33);
+        assert_eq!(
+            options.control.core_command.as_deref(),
+            Some("/opt/keli/bin/keli-core-rs")
+        );
         assert!(options.control.start_core);
         assert!(options.control.repair_port_forward);
         assert_eq!(options.panel_report_interval, 1);

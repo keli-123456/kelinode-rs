@@ -112,11 +112,25 @@ Not implemented yet:
 - Mieru sidecar traffic on the default Xray path requires operators to configure the `mita` command, arguments, and optional environment for their deployment style.
 - Experimental `keli-core-rs` native rendering covers SOCKS/HTTP, Shadowsocks, VMess, VLESS, Trojan, AnyTLS, Hysteria2, TUIC, Mieru TCP with expanded port ranges, common TCP/WS/HTTPUpgrade/gRPC transports, VLESS REALITY config, direct outbound, per-user credentials, and common block/route rules.
 - Set `kernel.type: keli-core-rs` to select the experimental Rust-native core plan; `xray` remains the default.
+- Set `kernel.core_command` when the native core binary is installed outside `PATH`, such as from a `keli-core-rs` release tarball.
 - When `keli-core-rs` is already running, `kelinode-rs` hot-applies changed native configs through the local `ApplyConfig` control socket and falls back to a process reload if that control path is unavailable.
 - Real-client interop and production soak testing are still required before making `keli-core-rs` the default.
 - Subscription reverse proxy.
 
 The native renderer parity gate is tracked in `docs/NATIVE_CORE_PARITY.md`.
+
+## Native Core Binary Example
+
+`kelinode-rs` starts `keli-core-rs run-config <generated-config> --control <local-addr>` when the native core path is selected. Install the `keli-core-rs` release binary on the same machine and either keep it in `PATH` or point the runtime at the absolute binary path:
+
+```yaml
+kernel:
+  type: keli-core-rs
+  core_command: "/usr/local/bin/keli-core-rs"
+  config_dir: "/etc/v2node"
+```
+
+Leave `core_command` empty when the binary name `keli-core-rs` resolves from `PATH`.
 
 ## Sidecar Process Example
 

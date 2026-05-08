@@ -41,6 +41,8 @@ pub struct PanelConfig {
 pub struct KernelConfig {
     #[serde(default = "default_core_type")]
     pub r#type: String,
+    #[serde(default)]
+    pub core_command: String,
     #[serde(default = "default_config_dir")]
     pub config_dir: String,
     #[serde(default)]
@@ -285,6 +287,7 @@ impl AppConfig {
     pub fn resolve_runtime(&self) -> Result<ResolvedConfig, String> {
         let mut kernel = self.kernel.clone();
         kernel.r#type = kernel.r#type.trim().to_string();
+        kernel.core_command = kernel.core_command.trim().to_string();
         kernel.config_dir = normalize_config_dir(&kernel.config_dir);
         kernel.sidecars = normalize_sidecar_processes(&kernel.sidecars);
         kernel.dns_servers = normalize_string_list(&kernel.dns_servers);
@@ -396,6 +399,7 @@ impl Default for KernelConfig {
     fn default() -> Self {
         Self {
             r#type: default_core_type(),
+            core_command: String::new(),
             config_dir: default_config_dir(),
             sidecars: BTreeMap::new(),
             log_level: String::new(),
@@ -663,6 +667,7 @@ mod tests {
         let kernel = KernelConfig::default();
 
         assert_eq!(kernel.r#type, "xray");
+        assert!(kernel.core_command.is_empty());
         assert_eq!(kernel.config_dir, DEFAULT_CONFIG_DIR);
     }
 
@@ -868,6 +873,21 @@ mod tests {
         assert_eq!(sidecar.args, vec!["run", "--config", "{config}"]);
         assert_eq!(sidecar.env["MITA_CONFIG_JSON_FILE"], "{config}".to_string());
         assert!(!sidecar.env.contains_key(""));
+    }
+
+    #[test]
+    fn resolve_runtime_normalizes_core_command() {
+        let mut config = AppConfig::default();
+        config.panel.url = "https://panel.example.test".to_string();
+        config.panel.token = "token".to_string();
+        config.panel.node_id = 1;
+        config.kernel.r#type = " keli-core-rs ".to_string();
+        config.kernel.core_command = " /usr/local/bin/keli-core-rs ".to_string();
+
+        let resolved = config.resolve_runtime().unwrap();
+
+        assert_eq!(resolved.kernel.r#type, "keli-core-rs");
+        assert_eq!(resolved.kernel.core_command, "/usr/local/bin/keli-core-rs");
     }
 
     #[test]
