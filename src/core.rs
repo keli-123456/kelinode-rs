@@ -22,6 +22,12 @@ pub struct CorePlan {
     pub inbounds: Vec<InboundPlan>,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct CorePlanBundle {
+    pub xray: Option<CorePlan>,
+    pub sidecars: Vec<CorePlan>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct InboundPlan {
     pub tag: String,
@@ -155,12 +161,59 @@ impl CorePlan {
     }
 }
 
+pub fn split_core_plans_for_nodes(
+    config_path: PathBuf,
+    nodes: &[NodeInfo],
+    users_by_node_tag: &BTreeMap<String, Vec<UserInfo>>,
+) -> Result<CorePlanBundle, CoreError> {
+    let xray_nodes = nodes
+        .iter()
+        .filter(|node| sidecar_protocol_name(node.protocol).is_none())
+        .cloned()
+        .collect::<Vec<_>>();
+    let xray = if xray_nodes.is_empty() {
+        None
+    } else {
+        Some(CorePlan::from_nodes_with_users(
+            CoreKind::Xray,
+            config_path.clone(),
+            &xray_nodes,
+            users_by_node_tag,
+        )?)
+    };
+
+    let mut sidecars = Vec::new();
+    for node in nodes {
+        let Some(protocol) = sidecar_protocol_name(node.protocol) else {
+            continue;
+        };
+        sidecars.push(CorePlan::from_nodes_with_users(
+            CoreKind::Sidecar(protocol.to_string()),
+            sidecar_config_path(&config_path, protocol, node.id),
+            std::slice::from_ref(node),
+            users_by_node_tag,
+        )?);
+    }
+
+    Ok(CorePlanBundle { xray, sidecars })
+}
+
 pub fn sidecar_protocol_name(protocol: Protocol) -> Option<&'static str> {
     match protocol {
         Protocol::Naive => Some("naive"),
         Protocol::Mieru => Some("mieru"),
         _ => None,
     }
+}
+
+pub fn sidecar_config_path(
+    base_config_path: impl AsRef<Path>,
+    protocol: &str,
+    node_id: u32,
+) -> PathBuf {
+    let base = base_config_path.as_ref();
+    let dir = base.parent().unwrap_or_else(|| Path::new("."));
+    dir.join(format!("sidecar-{protocol}-{node_id}.json"))
 }
 
 fn reject_sidecar_protocols_for_core(
@@ -1197,7 +1250,8 @@ mod tests {
 
     use super::{
         build_inbound_plan, core_file_layout, render_core_config, resolve_node_listen_ip,
-        should_fallback_node_listen_ip, write_core_config, CoreKind, CorePlan,
+        should_fallback_node_listen_ip, sidecar_config_path, split_core_plans_for_nodes,
+        write_core_config, CoreKind, CorePlan,
     };
     use crate::panel::types::{CommonNode, NodeInfo, Route, Security, UserInfo};
 
@@ -1242,6 +1296,36 @@ mod tests {
 
         assert!(err.message.contains("protocol naive"));
         assert!(err.message.contains("requires a sidecar runtime"));
+    }
+
+    #[test]
+    fn splits_xray_and_sidecar_protocol_plans() {
+        let nodes = vec![test_node("vless", 34, ""), test_node("mieru", 35, "")];
+        let bundle = split_core_plans_for_nodes(
+            PathBuf::from("/srv/v2node/config.json"),
+            &nodes,
+            &std::collections::BTreeMap::new(),
+        )
+        .unwrap();
+
+        let xray = bundle.xray.unwrap();
+        assert_eq!(xray.inbounds.len(), 1);
+        assert_eq!(xray.inbounds[0].protocol, "vless");
+        assert_eq!(bundle.sidecars.len(), 1);
+        assert_eq!(bundle.sidecars[0].kind, CoreKind::Sidecar("mieru".to_string()));
+        assert_eq!(bundle.sidecars[0].inbounds[0].protocol, "mieru");
+        assert_eq!(
+            bundle.sidecars[0].config_path,
+            PathBuf::from("/srv/v2node/sidecar-mieru-35.json")
+        );
+    }
+
+    #[test]
+    fn derives_sidecar_config_path_next_to_core_config() {
+        assert_eq!(
+            sidecar_config_path("/srv/v2node/config.json", "naive", 36),
+            PathBuf::from("/srv/v2node/sidecar-naive-36.json")
+        );
     }
 
     #[test]

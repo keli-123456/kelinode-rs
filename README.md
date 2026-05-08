@@ -44,6 +44,7 @@ First cut:
 - Render HY2 bandwidth/obfs stream settings and TUIC congestion/0-RTT settings.
 - Render Shadowsocks 2022 server keys and Go-compatible per-user keys.
 - Parse Naive and Mieru node protocols while refusing to fake them inside the Xray renderer.
+- Split mixed node sets into Xray and per-node sidecar core plans for Naive/Mieru.
 - Report node traffic/online snapshots through the unified panel endpoint with legacy fallback.
 - Batch report per-node activity snapshots by runtime tag for multi-node machines.
 - Advance cached user sync state from delta or full-list responses with Go-compatible empty-list semantics.
