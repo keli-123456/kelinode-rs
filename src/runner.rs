@@ -55,7 +55,13 @@ pub enum RuntimeLoopExitReason {
 #[derive(Debug)]
 pub struct RuntimeLoopEvent {
     pub kind: RuntimeLoopEventKind,
-    reply: Option<tokio::sync::oneshot::Sender<Result<String, String>>>,
+    reply: Option<tokio::sync::oneshot::Sender<Result<RuntimeLoopEventReply, String>>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RuntimeLoopEventReply {
+    pub status: String,
+    pub message: String,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -81,7 +87,7 @@ impl RuntimeLoopEvent {
 
     fn with_reply(
         kind: RuntimeLoopEventKind,
-        reply: tokio::sync::oneshot::Sender<Result<String, String>>,
+        reply: tokio::sync::oneshot::Sender<Result<RuntimeLoopEventReply, String>>,
     ) -> Self {
         Self {
             kind,
@@ -114,6 +120,22 @@ impl RealtimeRuntimeWorkers {
 
     pub fn is_empty(&self) -> bool {
         self.handles.is_empty()
+    }
+}
+
+impl RuntimeLoopEventReply {
+    fn queued(message: impl Into<String>) -> Self {
+        Self {
+            status: "queued".to_string(),
+            message: message.into(),
+        }
+    }
+
+    fn applied(message: impl Into<String>) -> Self {
+        Self {
+            status: "applied".to_string(),
+            message: message.into(),
+        }
     }
 }
 
@@ -434,15 +456,18 @@ where
     }
 
     let (status, message) = match result.await {
-        Ok(Ok(message)) => ("applied", message),
-        Ok(Err(error)) => ("failed", error),
-        Err(_) => ("failed", "runtime event reply dropped".to_string()),
+        Ok(Ok(reply)) => (reply.status, reply.message),
+        Ok(Err(error)) => ("failed".to_string(), error),
+        Err(_) => (
+            "failed".to_string(),
+            "runtime event reply dropped".to_string(),
+        ),
     };
     transport
         .send(build_realtime_receipt(
             topic,
             source,
-            status,
+            &status,
             &message,
             unix_now(),
         ))
@@ -649,7 +674,10 @@ where
     let reply = event.reply;
     let result = match event.kind {
         RuntimeLoopEventKind::Reload => {
-            Ok((RuntimeLoopSignal::Reload, "reload queued".to_string()))
+            Ok((
+                RuntimeLoopSignal::Reload,
+                RuntimeLoopEventReply::queued("reload queued"),
+            ))
         }
         RuntimeLoopEventKind::RefreshUsers => {
             match callbacks.refresh_users().await {
@@ -661,7 +689,10 @@ where
                     })
                     .await
                 {
-                    Ok(signal) => Ok((signal, "user refresh applied".to_string())),
+                    Ok(signal) => Ok((
+                        signal,
+                        RuntimeLoopEventReply::applied("user refresh applied"),
+                    )),
                     Err(error) => Err(error),
                 },
                 Err(error) => Err(error),
@@ -673,7 +704,7 @@ where
         let _ = reply.send(
             result
                 .as_ref()
-                .map(|(_, message)| message.clone())
+                .map(|(_, reply)| reply.clone())
                 .map_err(|error| error.clone()),
         );
     }
@@ -1098,8 +1129,31 @@ mod tests {
         .unwrap();
 
         assert_eq!(signal, RuntimeLoopSignal::Continue);
-        assert_eq!(result.await.unwrap().unwrap(), "user refresh applied");
+        let reply = result.await.unwrap().unwrap();
+        assert_eq!(reply.status, "applied");
+        assert_eq!(reply.message, "user refresh applied");
         assert_eq!(callbacks.refreshes, 1);
+    }
+
+    #[tokio::test]
+    async fn runtime_event_marks_reload_reply_as_queued() {
+        let (reply, result) = tokio::sync::oneshot::channel();
+        let mut callbacks = AsyncFakeCallbacks::default();
+
+        let signal = handle_runtime_loop_event(
+            &mut callbacks,
+            &RuntimeLoopOptions::default(),
+            RuntimeLoopEvent::with_reply(RuntimeLoopEventKind::Reload, reply),
+        )
+        .await
+        .unwrap();
+
+        let reply = result.await.unwrap().unwrap();
+
+        assert_eq!(signal, RuntimeLoopSignal::Reload);
+        assert_eq!(reply.status, "queued");
+        assert_eq!(reply.message, "reload queued");
+        assert_eq!(callbacks.refreshes, 0);
     }
 
     #[test]

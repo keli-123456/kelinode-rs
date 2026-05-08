@@ -63,6 +63,7 @@ First cut:
 - Let the async runtime loop react to external realtime reload and user-refresh events.
 - Start realtime workers from the `run` command and queue reload/user-refresh runtime events.
 - Tie realtime receipts to runtime event replies so user refresh can report applied or failed.
+- Mark realtime reload receipts as queued instead of applied because the runtime exits for rebuild.
 - Wrap self-upgrade execution with install-dir backup, post-install version verification, and rollback.
 - Probe external IPv4/IPv6 addresses for machine status when local interface candidates are missing.
 - Collect Linux root disk usage and network byte counters for machine status payloads.
@@ -105,7 +106,6 @@ First cut:
 
 Not implemented yet:
 
-- Realtime config reload receipts can still race with process restart because the runtime exits to rebuild immediately after replying.
 - Complete per-protocol user options for bandwidth limits, device-limit enforcement, and advanced protocol-specific credentials.
 - Naive sidecar runtime still needs a concrete Caddy forward_proxy integration before it can serve traffic.
 - Mieru sidecar traffic requires operators to configure the `mita` command, arguments, and optional environment for their deployment style.

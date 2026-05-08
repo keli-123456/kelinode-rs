@@ -66,6 +66,7 @@
 - Async runtime loop event channel for realtime reload and immediate user-refresh triggers.
 - `run` command realtime worker startup with queued reload and user-refresh events.
 - Realtime event replies for applied/failed receipts after runtime user-refresh handling.
+- Realtime reload event replies marked as queued while the runtime exits for config rebuild.
 - Self-upgrade wrapper with install-dir backup, post-install version verification, and rollback.
 - External IPv4/IPv6 probes for machine status when local public candidates are missing.
 - Go-compatible `node_tag|uuid` user emails in generated core clients.
