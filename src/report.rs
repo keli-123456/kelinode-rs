@@ -87,20 +87,20 @@ pub fn keli_core_traffic_snapshots(
 ) -> BTreeMap<String, NodeActivitySnapshot> {
     let mut snapshots = BTreeMap::new();
     for record in records {
-        let Some(uid) = core_plan.inbounds.iter().find_map(|inbound| {
-            (inbound.tag == record.node_tag).then(|| {
-                inbound
-                    .users
-                    .iter()
-                    .find(|user| user.uuid == record.user_uuid)
-                    .map(|user| user.id)
-            })?
+        let Some((node_tag, uid)) = core_plan.inbounds.iter().find_map(|inbound| {
+            let node_tag = normalize_keli_core_record_tag(&record.node_tag, &inbound.tag)?;
+            let uid = inbound
+                .users
+                .iter()
+                .find(|user| user.uuid == record.user_uuid)
+                .map(|user| user.id)?;
+            Some((node_tag.to_string(), uid))
         }) else {
             continue;
         };
 
         let snapshot = snapshots
-            .entry(record.node_tag.clone())
+            .entry(node_tag)
             .or_insert_with(NodeActivitySnapshot::default);
         merge_user_traffic(
             &mut snapshot.traffic,
@@ -111,6 +111,20 @@ pub fn keli_core_traffic_snapshots(
         merge_online_ips(&mut snapshot.online, uid, &record.online_ips);
     }
     snapshots
+}
+
+fn normalize_keli_core_record_tag<'a>(
+    record_tag: &'a str,
+    inbound_tag: &'a str,
+) -> Option<&'a str> {
+    if record_tag == inbound_tag {
+        return Some(inbound_tag);
+    }
+    let suffix = record_tag.strip_prefix(inbound_tag)?;
+    suffix
+        .strip_prefix("|port:")
+        .filter(|port| !port.is_empty() && port.chars().all(|value| value.is_ascii_digit()))
+        .map(|_| inbound_tag)
 }
 
 fn merge_user_traffic(traffic: &mut Vec<UserTraffic>, uid: u32, upload: i64, download: i64) {
@@ -444,6 +458,19 @@ mod tests {
         assert_eq!(drainer.minimums, vec![64]);
         assert_eq!(snapshots["node-a"].traffic[0].uid, 8);
         assert_eq!(snapshots["node-a"].traffic[0].upload, 30);
+    }
+
+    #[test]
+    fn folds_keli_core_expanded_port_tags_back_to_node_tag() {
+        let records = vec![traffic_record("node-a|port:2100", "uuid-a", 12, 34)];
+
+        let snapshots = keli_core_traffic_snapshots(&core_plan(), &records);
+
+        assert!(snapshots.contains_key("node-a"));
+        assert!(!snapshots.contains_key("node-a|port:2100"));
+        assert_eq!(snapshots["node-a"].traffic[0].uid, 7);
+        assert_eq!(snapshots["node-a"].traffic[0].upload, 12);
+        assert_eq!(snapshots["node-a"].traffic[0].download, 34);
     }
 
     #[test]

@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
@@ -493,11 +493,7 @@ fn render_keli_core_rs_config(plan: &CorePlan) -> Result<Value, CoreError> {
         "instance_id": keli_core_rs_instance_id(plan),
         "log_level": "info",
         "dns": render_keli_core_rs_dns(plan)?,
-        "inbounds": plan
-            .inbounds
-            .iter()
-            .map(render_keli_core_rs_inbound)
-            .collect::<Vec<_>>(),
+        "inbounds": render_keli_core_rs_inbounds(&plan.inbounds)?,
         "outbounds": outbounds,
         "routes": routes,
         "stats": {
@@ -1078,9 +1074,9 @@ fn validate_keli_core_rs_plain_tcp_inbound(inbound: &InboundPlan) -> Result<(), 
             inbound.tag, inbound.security
         )));
     }
-    if protocol == "mieru" && !inbound.port_range.trim().is_empty() {
+    if protocol != "mieru" && !inbound.port_range.trim().is_empty() {
         return Err(CoreError::new(format!(
-            "keli-core-rs mieru native TCP currently supports only a single port; inbound {} uses port range {}",
+            "keli-core-rs {protocol} currently supports only a single port; inbound {} uses port range {}",
             inbound.tag, inbound.port_range
         )));
     }
@@ -1527,6 +1523,80 @@ fn render_keli_core_rs_inbound(inbound: &InboundPlan) -> Value {
             "dest_override": ["http", "tls"]
         }
     })
+}
+
+fn render_keli_core_rs_inbounds(inbounds: &[InboundPlan]) -> Result<Vec<Value>, CoreError> {
+    let mut rendered = Vec::new();
+    for inbound in inbounds {
+        for expanded in expand_keli_core_rs_inbound(inbound)? {
+            rendered.push(render_keli_core_rs_inbound(&expanded));
+        }
+    }
+    Ok(rendered)
+}
+
+fn expand_keli_core_rs_inbound(inbound: &InboundPlan) -> Result<Vec<InboundPlan>, CoreError> {
+    if inbound.protocol != "mieru" || inbound.port_range.trim().is_empty() {
+        return Ok(vec![inbound.clone()]);
+    }
+    let ports = parse_keli_core_rs_port_range(&inbound.port_range).map_err(|message| {
+        CoreError::new(format!(
+            "keli-core-rs mieru port range on inbound {} is invalid: {message}",
+            inbound.tag
+        ))
+    })?;
+    Ok(ports
+        .into_iter()
+        .map(|port| {
+            let mut expanded = inbound.clone();
+            expanded.tag = format!("{}|port:{port}", inbound.tag);
+            expanded.port = port;
+            expanded.port_range.clear();
+            expanded
+        })
+        .collect())
+}
+
+fn parse_keli_core_rs_port_range(raw: &str) -> Result<Vec<u16>, String> {
+    let mut ports = Vec::new();
+    let mut seen = BTreeSet::new();
+    for token in raw.split(',') {
+        let token = token.trim();
+        if token.is_empty() {
+            continue;
+        }
+        let (start, end) = if let Some((start, end)) = token.split_once('-') {
+            let start = start
+                .trim()
+                .parse::<u16>()
+                .map_err(|_| format!("bad port range start {token}"))?;
+            let end = end
+                .trim()
+                .parse::<u16>()
+                .map_err(|_| format!("bad port range end {token}"))?;
+            if start > end {
+                return Err(format!("range start is greater than end in {token}"));
+            }
+            (start, end)
+        } else {
+            let port = token
+                .parse::<u16>()
+                .map_err(|_| format!("bad port {token}"))?;
+            (port, port)
+        };
+        for port in start..=end {
+            if seen.insert(port) {
+                ports.push(port);
+            }
+            if ports.len() > 2048 {
+                return Err("port range expands to more than 2048 ports".to_string());
+            }
+        }
+    }
+    if ports.is_empty() {
+        return Err("empty port range".to_string());
+    }
+    Ok(ports)
 }
 
 fn keli_core_rs_protocol_name(inbound: &InboundPlan) -> &str {
@@ -2970,9 +3040,9 @@ mod tests {
     }
 
     #[test]
-    fn keli_core_rs_rejects_mieru_port_range_until_native_udp_multiplexing_exists() {
+    fn keli_core_rs_expands_mieru_port_range_inbounds() {
         let mut node = test_node("mieru", 41, "");
-        node.common.ports = PortValue("2100-2200".to_string());
+        node.common.ports = PortValue("2100-2102".to_string());
         let plan = CorePlan::from_nodes(
             CoreKind::KeliCoreRs,
             PathBuf::from("/srv/v2node/config.json"),
@@ -2980,10 +3050,15 @@ mod tests {
         )
         .unwrap();
 
-        let err = render_core_config(&plan).unwrap_err();
+        let config = render_core_config(&plan).unwrap();
 
-        assert!(err.message.contains("single port"));
-        assert!(err.message.contains("2100-2200"));
+        assert_eq!(config["inbounds"].as_array().unwrap().len(), 3);
+        assert_eq!(config["inbounds"][0]["port"], 2100);
+        assert_eq!(
+            config["inbounds"][0]["tag"],
+            "[https://panel.example.test]-mieru:41|port:2100"
+        );
+        assert_eq!(config["inbounds"][2]["port"], 2102);
     }
 
     #[test]

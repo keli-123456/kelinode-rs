@@ -110,7 +110,7 @@ Not implemented yet:
 - Complete per-protocol user options for bandwidth limits, device-limit enforcement, and advanced protocol-specific credentials inside the runtime data path.
 - Naive sidecar runtime still needs a concrete Caddy forward_proxy integration before it can serve traffic.
 - Mieru sidecar traffic on the default Xray path requires operators to configure the `mita` command, arguments, and optional environment for their deployment style.
-- Experimental `keli-core-rs` native rendering covers SOCKS/HTTP, Shadowsocks, VMess, VLESS, Trojan, AnyTLS, Hysteria2, TUIC, Mieru TCP, common TCP/WS/HTTPUpgrade/gRPC transports, VLESS REALITY config, direct outbound, per-user credentials, and basic domain block routes.
+- Experimental `keli-core-rs` native rendering covers SOCKS/HTTP, Shadowsocks, VMess, VLESS, Trojan, AnyTLS, Hysteria2, TUIC, Mieru TCP with expanded port ranges, common TCP/WS/HTTPUpgrade/gRPC transports, VLESS REALITY config, direct outbound, per-user credentials, and common block/route rules.
 - Set `kernel.type: keli-core-rs` to select the experimental Rust-native core plan; `xray` remains the default.
 - When `keli-core-rs` is already running, `kelinode-rs` hot-applies changed native configs through the local `ApplyConfig` control socket and falls back to a process reload if that control path is unavailable.
 - Real-client interop and production soak testing are still required before making `keli-core-rs` the default.
