@@ -470,8 +470,9 @@ fn validate_keli_core_rs_inbound(inbound: &InboundPlan) -> Result<(), CoreError>
             Ok(())
         }
         "tuic" => validate_keli_core_rs_tuic_inbound(inbound),
+        "hysteria" => validate_keli_core_rs_hysteria2_inbound(inbound),
         value => Err(CoreError::new(format!(
-            "keli-core-rs native renderer only supports socks/http/shadowsocks/vmess/vless/trojan/anytls tcp, vmess/vless/trojan ws, and tuic tcp relay today; inbound {} uses {}",
+            "keli-core-rs native renderer only supports socks/http/shadowsocks/vmess/vless/trojan/anytls tcp, vmess/vless/trojan ws, tuic tcp relay, and hysteria2 tcp relay today; inbound {} uses {}",
             inbound.tag, value
         ))),
     }
@@ -620,6 +621,56 @@ fn validate_keli_core_rs_tuic_inbound(inbound: &InboundPlan) -> Result<(), CoreE
     Ok(())
 }
 
+fn validate_keli_core_rs_hysteria2_inbound(inbound: &InboundPlan) -> Result<(), CoreError> {
+    let network = keli_core_rs_transport_network(inbound);
+    if !matches!(network.as_str(), "hysteria" | "hysteria2") {
+        return Err(CoreError::new(format!(
+            "keli-core-rs hysteria2 currently requires hysteria transport; inbound {} uses {}",
+            inbound.tag, inbound.network
+        )));
+    }
+    if inbound.security != "tls" {
+        return Err(CoreError::new(format!(
+            "keli-core-rs hysteria2 currently requires tls security; inbound {} uses {}",
+            inbound.tag, inbound.security
+        )));
+    }
+    if inbound.cert_file.trim().is_empty() || inbound.key_file.trim().is_empty() {
+        return Err(CoreError::new(format!(
+            "keli-core-rs hysteria2 tls requires cert_file and key_file on inbound {}",
+            inbound.tag
+        )));
+    }
+    if inbound.reject_unknown_sni {
+        return Err(CoreError::new(format!(
+            "keli-core-rs hysteria2 reject_unknown_sni is not supported yet on inbound {}",
+            inbound.tag
+        )));
+    }
+    if !inbound.flow.trim().is_empty() {
+        return Err(CoreError::new(format!(
+            "keli-core-rs hysteria2 currently does not support flow {}; inbound {}",
+            inbound.flow, inbound.tag
+        )));
+    }
+    if !json_value_is_empty(&inbound.network_settings) {
+        return Err(CoreError::new(format!(
+            "keli-core-rs hysteria2 currently does not support transport settings on inbound {}",
+            inbound.tag
+        )));
+    }
+    if (!inbound.ignore_client_bandwidth && (inbound.up_mbps > 0 || inbound.down_mbps > 0))
+        || !inbound.obfs.trim().is_empty()
+        || !inbound.obfs_password.trim().is_empty()
+    {
+        return Err(CoreError::new(format!(
+            "keli-core-rs hysteria2 currently does not support bandwidth override or obfs on inbound {}",
+            inbound.tag
+        )));
+    }
+    Ok(())
+}
+
 fn validate_keli_core_rs_websocket_settings(inbound: &InboundPlan) -> Result<(), CoreError> {
     if json_value_is_empty(&inbound.network_settings) {
         return Ok(());
@@ -716,7 +767,7 @@ fn keli_core_rs_instance_id(plan: &CorePlan) -> String {
 fn render_keli_core_rs_inbound(inbound: &InboundPlan) -> Value {
     json!({
         "tag": &inbound.tag,
-        "protocol": &inbound.protocol,
+        "protocol": keli_core_rs_protocol_name(inbound),
         "listen": &inbound.listen,
         "port": inbound.port,
         "cipher": if inbound.protocol == "shadowsocks" {
@@ -736,6 +787,14 @@ fn render_keli_core_rs_inbound(inbound: &InboundPlan) -> Value {
             "dest_override": ["http", "tls"]
         }
     })
+}
+
+fn keli_core_rs_protocol_name(inbound: &InboundPlan) -> &str {
+    if inbound.protocol == "hysteria" {
+        "hysteria2"
+    } else {
+        &inbound.protocol
+    }
 }
 
 fn render_keli_core_rs_tls(inbound: &InboundPlan) -> Value {
@@ -2201,7 +2260,7 @@ mod tests {
 
     #[test]
     fn keli_core_rs_rejects_unimplemented_protocols() {
-        let node = test_node("hysteria2", 43, "");
+        let node = test_node("naive", 43, "");
         let plan = CorePlan::from_nodes(
             CoreKind::KeliCoreRs,
             PathBuf::from("/srv/v2node/keli-core-rs.json"),
@@ -2398,6 +2457,63 @@ mod tests {
             config["inbounds"][0]["users"][0]["uuid"],
             "11111111-1111-1111-1111-111111111111"
         );
+    }
+
+    #[test]
+    fn renders_keli_core_rs_hysteria2_tls_settings() {
+        let mut node = test_node("hysteria2", 66, "");
+        node.security = Security::Tls;
+        node.common.cert_info.as_mut().unwrap().cert_file = "/srv/v2node/hy2.cer".to_string();
+        node.common.cert_info.as_mut().unwrap().key_file = "/srv/v2node/hy2.key".to_string();
+        node.common.cert_info.as_mut().unwrap().cert_domain = "hy2.example.test".to_string();
+        let tag = node.tag.clone();
+        let mut users = std::collections::BTreeMap::new();
+        users.insert(
+            tag,
+            vec![UserInfo {
+                id: 66,
+                uuid: "hy2-password".to_string(),
+                speed_limit: 0,
+                device_limit: 0,
+            }],
+        );
+        let plan = CorePlan::from_nodes_with_users(
+            CoreKind::KeliCoreRs,
+            PathBuf::from("/srv/v2node/keli-core-rs.json"),
+            &[node],
+            &users,
+        )
+        .unwrap();
+
+        let config = render_core_config(&plan).unwrap();
+
+        assert_eq!(config["inbounds"][0]["protocol"], "hysteria2");
+        assert_eq!(config["inbounds"][0]["transport"]["network"], "hysteria");
+        assert_eq!(config["inbounds"][0]["tls"]["server_name"], "hy2.example.test");
+        assert_eq!(config["inbounds"][0]["tls"]["cert_file"], "/srv/v2node/hy2.cer");
+        assert_eq!(config["inbounds"][0]["tls"]["key_file"], "/srv/v2node/hy2.key");
+        assert_eq!(config["inbounds"][0]["tls"]["alpn"][0], "h3");
+        assert_eq!(config["inbounds"][0]["users"][0]["uuid"], "hy2-password");
+    }
+
+    #[test]
+    fn keli_core_rs_rejects_hysteria2_obfs_until_core_supports_it() {
+        let mut node = test_node("hysteria2", 67, "");
+        node.security = Security::Tls;
+        node.common.cert_info.as_mut().unwrap().cert_file = "/srv/v2node/hy2.cer".to_string();
+        node.common.cert_info.as_mut().unwrap().key_file = "/srv/v2node/hy2.key".to_string();
+        node.common.obfs = "salamander".to_string();
+        node.common.obfs_password = "obfs-secret".to_string();
+        let plan = CorePlan::from_nodes(
+            CoreKind::KeliCoreRs,
+            PathBuf::from("/srv/v2node/keli-core-rs.json"),
+            &[node],
+        )
+        .unwrap();
+
+        let err = render_core_config(&plan).unwrap_err();
+
+        assert!(err.message.contains("bandwidth override or obfs"));
     }
 
     #[test]
