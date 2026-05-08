@@ -521,12 +521,6 @@ fn validate_keli_core_rs_tcp_or_ws_inbound(inbound: &InboundPlan) -> Result<(), 
             inbound.tag, inbound.security
         )));
     }
-    if protocol == "vmess" && inbound.security != "none" {
-        return Err(CoreError::new(format!(
-            "keli-core-rs vmess currently supports only security none; inbound {} uses {}",
-            inbound.tag, inbound.security
-        )));
-    }
     if inbound.security == "tls" {
         validate_keli_core_rs_tls_inbound(inbound)?;
     }
@@ -2282,11 +2276,12 @@ mod tests {
     }
 
     #[test]
-    fn keli_core_rs_rejects_vmess_tls_until_core_supports_it() {
+    fn renders_keli_core_rs_vmess_tls_settings() {
         let mut node = test_node("vmess", 64, "");
         node.security = Security::Tls;
         node.common.cert_info.as_mut().unwrap().cert_file = "/srv/v2node/vmess.cer".to_string();
         node.common.cert_info.as_mut().unwrap().key_file = "/srv/v2node/vmess.key".to_string();
+        node.common.cert_info.as_mut().unwrap().cert_domain = "vmess.example.test".to_string();
         let plan = CorePlan::from_nodes(
             CoreKind::KeliCoreRs,
             PathBuf::from("/srv/v2node/keli-core-rs.json"),
@@ -2294,11 +2289,13 @@ mod tests {
         )
         .unwrap();
 
-        let err = render_core_config(&plan).unwrap_err();
+        let config = render_core_config(&plan).unwrap();
 
-        assert!(err
-            .message
-            .contains("vmess currently supports only security none"));
+        assert_eq!(config["inbounds"][0]["protocol"], "vmess");
+        assert_eq!(config["inbounds"][0]["tls"]["server_name"], "vmess.example.test");
+        assert_eq!(config["inbounds"][0]["tls"]["cert_file"], "/srv/v2node/vmess.cer");
+        assert_eq!(config["inbounds"][0]["tls"]["key_file"], "/srv/v2node/vmess.key");
+        assert_eq!(config["inbounds"][0]["transport"]["network"], "tcp");
     }
 
     #[test]
