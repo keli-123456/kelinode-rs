@@ -85,6 +85,7 @@ First cut:
 - Feed subscription proxy manager status into runtime health refresh.
 - Plan the optional subscription proxy HTTP challenge server from `http_listen`.
 - Plan the main subscription proxy server from `https_listen` for HTTPS and HTTP fallback modes.
+- Keep machine-profile panel reporting alive for subscription-proxy-only deployments.
 
 Not implemented yet:
 

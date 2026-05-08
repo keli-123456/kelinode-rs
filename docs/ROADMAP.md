@@ -91,6 +91,7 @@
 - Runtime health refresh integration for subscription proxy manager status.
 - Optional subscription proxy HTTP challenge server planning from `http_listen`.
 - Main subscription proxy server planning from `https_listen` for HTTPS and HTTP fallback modes.
+- Machine-profile panel reporting for subscription-proxy-only deployments.
 - Compatibility tests around protocol parsing and endpoint construction.
 
 ## Phase 2: Runtime Control

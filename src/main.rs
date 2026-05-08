@@ -1,6 +1,6 @@
 #![forbid(unsafe_code)]
 
-use kelinode_rs::config::AppConfig;
+use kelinode_rs::config::{AppConfig, MachineProfileConfig, DEFAULT_TIMEOUT_SECS};
 use kelinode_rs::control::{handle_runtime_signal, RuntimeControlOptions, RuntimeLoopSignal};
 use kelinode_rs::panel::client::{PanelClient, PanelClientOptions};
 use kelinode_rs::panel::contract::NODE_API_CONTRACT_VERSION;
@@ -212,8 +212,45 @@ fn machine_panel_clients(plan: &RuntimeBootstrapPlan) -> Result<Vec<PanelClient>
                 .map_err(|err| err.to_string())?,
         );
     }
+    for profile in plan
+        .resolved
+        .machine
+        .profiles
+        .iter()
+        .filter(|profile| profile.machine_id > 0)
+    {
+        let key = format!(
+            "{}#{}#{}",
+            profile.url.trim_end_matches('/'),
+            profile.machine_id,
+            profile.token
+        );
+        if !seen.insert(key) {
+            continue;
+        }
+        clients.push(
+            PanelClient::new(panel_options_from_machine_profile(profile))
+                .map_err(|err| err.to_string())?,
+        );
+    }
 
     Ok(clients)
+}
+
+fn panel_options_from_machine_profile(profile: &MachineProfileConfig) -> PanelClientOptions {
+    let timeout = if profile.timeout == 0 {
+        DEFAULT_TIMEOUT_SECS
+    } else {
+        profile.timeout
+    };
+    PanelClientOptions {
+        api_host: profile.url.clone(),
+        token: profile.token.clone(),
+        node_id: 0,
+        machine_id: profile.machine_id,
+        timeout: Duration::from_secs(timeout),
+        config_dir: profile.config_dir.clone(),
+    }
 }
 
 fn runtime_loop_options(
@@ -232,6 +269,15 @@ fn runtime_loop_options(
                     } else {
                         None
                     }
+                })
+                .or_else(|| {
+                    plan.resolved.machine.profiles.iter().find_map(|profile| {
+                        if profile.machine_id > 0 {
+                            Some(profile.machine_id)
+                        } else {
+                            None
+                        }
+                    })
                 })
                 .unwrap_or_default(),
             start_core: true,
@@ -293,7 +339,10 @@ fn print_help() {
 #[cfg(test)]
 mod tests {
     use super::{machine_panel_clients, runtime_loop_options, runtime_tick_interval};
-    use kelinode_rs::config::{NodeConfig, ResolvedConfig, ResolvedMachineConfig};
+    use kelinode_rs::config::{
+        AgentConfig, MachineProfileConfig, NodeConfig, ResolvedConfig,
+        ResolvedMachineConfig, SubscriptionProxyConfig,
+    };
     use kelinode_rs::panel::types::{CommonNode, NodeInfo};
     use kelinode_rs::runtime::{build_runtime_bootstrap_plan, RuntimeBootstrapPlan};
     use serde_json::json;
@@ -368,16 +417,56 @@ mod tests {
         assert_eq!(clients[1].options().machine_id, 2);
     }
 
+    #[test]
+    fn machine_panel_clients_include_subscription_proxy_only_profiles() {
+        let plan = test_plan_with_machine_profiles(
+            Vec::new(),
+            Vec::new(),
+            vec![MachineProfileConfig {
+                url: "https://panel.example.test".to_string(),
+                token: "machine-token".to_string(),
+                machine_id: 6,
+                timeout: 12,
+                ..MachineProfileConfig::default()
+            }],
+        );
+
+        let clients = machine_panel_clients(&plan).unwrap();
+        let options = runtime_loop_options(&plan, true);
+
+        assert!(plan.subscription_proxy_only);
+        assert_eq!(clients.len(), 1);
+        assert_eq!(clients[0].options().api_host, "https://panel.example.test");
+        assert_eq!(clients[0].options().machine_id, 6);
+        assert_eq!(clients[0].options().node_id, 0);
+        assert_eq!(clients[0].options().timeout, Duration::from_secs(12));
+        assert_eq!(options.control.machine_id, 6);
+    }
+
     fn test_plan(nodes: Vec<NodeInfo>, configs: Vec<NodeConfig>) -> RuntimeBootstrapPlan {
+        test_plan_with_machine_profiles(nodes, configs, Vec::new())
+    }
+
+    fn test_plan_with_machine_profiles(
+        nodes: Vec<NodeInfo>,
+        configs: Vec<NodeConfig>,
+        profiles: Vec<MachineProfileConfig>,
+    ) -> RuntimeBootstrapPlan {
+        let subscription_proxy_enabled = !profiles.is_empty() && nodes.is_empty();
         let resolved = ResolvedConfig {
             kernel: Default::default(),
             realtime: Default::default(),
             machine: ResolvedMachineConfig {
                 enabled: true,
                 continue_on_error: true,
-                profiles: Vec::new(),
+                profiles,
             },
-            agent: Default::default(),
+            agent: AgentConfig {
+                subscription_proxy: SubscriptionProxyConfig {
+                    enabled: subscription_proxy_enabled,
+                    ..SubscriptionProxyConfig::default()
+                },
+            },
             nodes: configs,
         };
 
