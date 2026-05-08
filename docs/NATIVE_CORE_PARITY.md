@@ -34,7 +34,7 @@ When the native core is already running, `kelinode-rs` writes the rendered confi
 | Hysteria2 | Partial | TLS, bandwidth options, salamander obfs | Transport settings, non-salamander obfs |
 | TUIC | Partial | TLS, UUID users, cubic/bbr/new_reno congestion | zero-RTT, non-UUID users |
 | Naive | Sidecar | Caddyfile sidecar plan | Native core rendering |
-| Mieru | Partial | Native TCP inbound when `kernel.type: keli-core-rs`; `mita` JSON sidecar plan for Xray/default path | UDP, multiplexing, traffic-pattern tuning, real-client matrix |
+| Mieru | Partial | Native single-port TCP inbound when `kernel.type: keli-core-rs`; `mita` JSON sidecar plan for Xray/default path | Port ranges, UDP, multiplexing, traffic-pattern tuning, real-client matrix |
 
 ## Route Renderer Matrix
 

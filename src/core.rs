@@ -1078,6 +1078,12 @@ fn validate_keli_core_rs_plain_tcp_inbound(inbound: &InboundPlan) -> Result<(), 
             inbound.tag, inbound.security
         )));
     }
+    if protocol == "mieru" && !inbound.port_range.trim().is_empty() {
+        return Err(CoreError::new(format!(
+            "keli-core-rs mieru native TCP currently supports only a single port; inbound {} uses port range {}",
+            inbound.tag, inbound.port_range
+        )));
+    }
     validate_keli_core_rs_flow(inbound, &network)?;
     if !json_value_is_empty(&inbound.network_settings) {
         return Err(CoreError::new(format!(
@@ -2932,6 +2938,23 @@ mod tests {
         assert_eq!(config["inbounds"][0]["transport"]["network"], "tcp");
         assert_eq!(config["inbounds"][0]["users"][0]["uuid"], "mieru-secret");
         assert!(config["inbounds"][0]["users"][0]["password"].is_null());
+    }
+
+    #[test]
+    fn keli_core_rs_rejects_mieru_port_range_until_native_udp_multiplexing_exists() {
+        let mut node = test_node("mieru", 41, "");
+        node.common.ports = PortValue("2100-2200".to_string());
+        let plan = CorePlan::from_nodes(
+            CoreKind::KeliCoreRs,
+            PathBuf::from("/srv/v2node/config.json"),
+            &[node],
+        )
+        .unwrap();
+
+        let err = render_core_config(&plan).unwrap_err();
+
+        assert!(err.message.contains("single port"));
+        assert!(err.message.contains("2100-2200"));
     }
 
     #[test]
