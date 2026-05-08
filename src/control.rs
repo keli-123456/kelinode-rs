@@ -127,6 +127,9 @@ where
     if health.core.is_none() {
         health.core = core_process.clone();
     }
+    if health.sidecars.is_empty() {
+        health.sidecars = sidecar_processes.clone();
+    }
     let machine_status =
         build_machine_status_payload(options.machine_id, &report_plan, health);
 
@@ -552,6 +555,14 @@ mod tests {
         .unwrap();
 
         assert_eq!(result.sidecar_processes.len(), 1);
+        assert_eq!(
+            result.machine_status.status["core"]["sidecar_statuses"][0]["state"],
+            json!("running")
+        );
+        assert_eq!(
+            result.machine_status.status["core"]["sidecar_statuses"][0]["name"],
+            json!("core:sidecar-mieru")
+        );
         assert_eq!(process.starts.len(), 1);
         assert_eq!(process.starts[0].name, "core:sidecar-mieru");
         assert_eq!(

@@ -31,6 +31,7 @@ pub struct HealthReportInput {
     pub version: String,
     pub resources: ResourceSnapshot,
     pub core: Option<ProcessStatus>,
+    pub sidecars: Vec<ProcessStatus>,
     pub subscription_proxy: Option<SubscriptionProxyStatus>,
     pub upgrade: Option<Value>,
 }
@@ -57,7 +58,10 @@ pub fn build_machine_status_payload(
     );
     payload.insert_status("version", version_value(input.version));
     payload.insert_status("runtime", runtime_value(plan));
-    payload.insert_status("core", core_value(plan, input.core.as_ref()));
+    payload.insert_status(
+        "core",
+        core_value(plan, input.core.as_ref(), &input.sidecars),
+    );
     payload.insert_status(
         "hy2_port_forward",
         hy2_port_forward_value(&plan.hy2_port_forward),
@@ -127,7 +131,11 @@ fn runtime_value(plan: &RuntimeBootstrapPlan) -> Value {
     })
 }
 
-fn core_value(plan: &RuntimeBootstrapPlan, status: Option<&ProcessStatus>) -> Value {
+fn core_value(
+    plan: &RuntimeBootstrapPlan,
+    status: Option<&ProcessStatus>,
+    sidecars: &[ProcessStatus],
+) -> Value {
     let config_path = plan
         .core_plan
         .as_ref()
@@ -143,6 +151,10 @@ fn core_value(plan: &RuntimeBootstrapPlan, status: Option<&ProcessStatus>) -> Va
         .map(|core| core.inbounds.len())
         .sum::<usize>();
     let status = status.map(process_status_value);
+    let sidecar_statuses = sidecars
+        .iter()
+        .map(process_status_value)
+        .collect::<Vec<_>>();
 
     json!({
         "configured": plan.core_plan.is_some(),
@@ -150,6 +162,7 @@ fn core_value(plan: &RuntimeBootstrapPlan, status: Option<&ProcessStatus>) -> Va
         "inbounds": inbounds,
         "sidecars": plan.sidecar_core_plans.len(),
         "sidecar_inbounds": sidecar_inbounds,
+        "sidecar_statuses": sidecar_statuses,
         "status": status
     })
 }
@@ -328,6 +341,7 @@ mod tests {
                     ..ResourceSnapshot::default()
                 },
                 core: Some(ProcessStatus::running("core:xray", 42)),
+                sidecars: Vec::new(),
                 subscription_proxy: None,
                 upgrade: None,
             },
