@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use crate::config::{
     AgentConfig, AppConfig, NodeConfig, ResolvedConfig, SubscriptionProxyConfig,
 };
-use crate::core::{CoreKind, CorePlan};
+use crate::core::{split_core_plans_for_nodes, CorePlan};
 use crate::machine::{resolve_machine_profiles_from_panel, MachineResolveSummary};
 use crate::node::{users_by_node_tag, NodeFailure, NodeManager, NodeManagerOptions};
 use crate::panel::types::{NodeInfo, UserInfo};
@@ -36,6 +36,7 @@ pub struct RuntimeBootstrapPlan {
     pub node_infos: Vec<NodeInfo>,
     pub node_failures: Vec<NodeFailure>,
     pub core_plan: Option<CorePlan>,
+    pub sidecar_core_plans: Vec<CorePlan>,
     pub realtime_options: Vec<RealtimeOptions>,
     pub hy2_port_forward: HysteriaPortForwardStatus,
     pub subscription_proxy_only: bool,
@@ -146,18 +147,15 @@ pub fn build_runtime_bootstrap_plan_with_users(
 ) -> Result<RuntimeBootstrapPlan, String> {
     let subscription_proxy_only =
         node_infos.is_empty() && resolved.agent.subscription_proxy.enabled;
-    let core_plan = if node_infos.is_empty() {
-        None
+    let core_bundle = if node_infos.is_empty() {
+        Default::default()
     } else {
-        Some(
-            CorePlan::from_nodes_with_users(
-                CoreKind::Xray,
-                core_config_path(&resolved),
-                &node_infos,
-                users_by_node_tag,
-            )
-                .map_err(|err| err.message)?,
+        split_core_plans_for_nodes(
+            core_config_path(&resolved),
+            &node_infos,
+            users_by_node_tag,
         )
+        .map_err(|err| err.message)?
     };
     let (hy2_rules, hy2_errors) = build_hysteria_port_forward_rules(&node_infos);
     let realtime_options = resolve_realtime_options_for_nodes(&resolved, &node_infos);
@@ -169,7 +167,8 @@ pub fn build_runtime_bootstrap_plan_with_users(
         node_count: node_infos.len(),
         node_infos,
         node_failures,
-        core_plan,
+        core_plan: core_bundle.xray,
+        sidecar_core_plans: core_bundle.sidecars,
         realtime_options,
         hy2_port_forward: new_hysteria_port_forward_status(&hy2_rules, &hy2_errors, false),
         subscription_proxy_only,
@@ -523,6 +522,68 @@ mod tests {
             plan.core_plan.as_ref().unwrap().inbounds[0].users[0].uuid,
             "uuid-a"
         );
+    }
+
+    #[test]
+    fn builds_runtime_plan_with_sidecar_protocols() {
+        let resolved = ResolvedConfig {
+            kernel: Default::default(),
+            realtime: Default::default(),
+            machine: ResolvedMachineConfig {
+                enabled: true,
+                continue_on_error: true,
+                profiles: Vec::new(),
+            },
+            agent: AgentConfig::default(),
+            nodes: vec![
+                NodeConfig {
+                    url: "https://panel.example.test".to_string(),
+                    node_id: 7,
+                    ..NodeConfig::default()
+                },
+                NodeConfig {
+                    url: "https://panel.example.test".to_string(),
+                    node_id: 8,
+                    ..NodeConfig::default()
+                },
+            ],
+        };
+        let nodes = vec![
+            test_node("vless", 7, 443, ""),
+            test_node("mieru", 8, 8443, ""),
+        ];
+
+        let plan = build_runtime_bootstrap_plan(resolved, nodes, Vec::new()).unwrap();
+
+        assert_eq!(plan.core_plan.as_ref().unwrap().inbounds.len(), 1);
+        assert_eq!(plan.sidecar_core_plans.len(), 1);
+        assert_eq!(plan.sidecar_core_plans[0].inbounds[0].protocol, "mieru");
+    }
+
+    #[test]
+    fn sidecar_only_runtime_plan_does_not_fake_xray_core() {
+        let resolved = ResolvedConfig {
+            kernel: Default::default(),
+            realtime: Default::default(),
+            machine: ResolvedMachineConfig {
+                enabled: true,
+                continue_on_error: true,
+                profiles: Vec::new(),
+            },
+            agent: AgentConfig::default(),
+            nodes: vec![NodeConfig {
+                url: "https://panel.example.test".to_string(),
+                node_id: 9,
+                ..NodeConfig::default()
+            }],
+        };
+        let nodes = vec![test_node("naive", 9, 9443, "")];
+
+        let plan = build_runtime_bootstrap_plan(resolved, nodes, Vec::new()).unwrap();
+
+        assert!(plan.core_plan.is_none());
+        assert_eq!(plan.sidecar_core_plans.len(), 1);
+        assert_eq!(plan.sidecar_core_plans[0].inbounds[0].protocol, "naive");
     }
 
     #[test]

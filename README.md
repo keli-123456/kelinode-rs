@@ -46,6 +46,7 @@ First cut:
 - Parse Naive and Mieru node protocols while refusing to fake them inside the Xray renderer.
 - Split mixed node sets into Xray and per-node sidecar core plans for Naive/Mieru.
 - Build explicit sidecar process specs only when a command and arguments are provided.
+- Preserve sidecar core plans in runtime bootstrap without forcing them through Xray.
 - Report node traffic/online snapshots through the unified panel endpoint with legacy fallback.
 - Batch report per-node activity snapshots by runtime tag for multi-node machines.
 - Advance cached user sync state from delta or full-list responses with Go-compatible empty-list semantics.

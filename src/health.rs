@@ -122,6 +122,7 @@ fn runtime_value(plan: &RuntimeBootstrapPlan) -> Value {
         "nodes": plan.node_count,
         "configured_nodes": plan.resolved.nodes.len(),
         "machine_profiles": plan.bootstrap.machine_profile_count,
+        "sidecars": plan.sidecar_core_plans.len(),
         "subscription_proxy_only": plan.subscription_proxy_only
     })
 }
@@ -136,12 +137,19 @@ fn core_value(plan: &RuntimeBootstrapPlan, status: Option<&ProcessStatus>) -> Va
         .as_ref()
         .map(|core| core.inbounds.len())
         .unwrap_or(0);
+    let sidecar_inbounds = plan
+        .sidecar_core_plans
+        .iter()
+        .map(|core| core.inbounds.len())
+        .sum::<usize>();
     let status = status.map(process_status_value);
 
     json!({
         "configured": plan.core_plan.is_some(),
         "config_path": config_path,
         "inbounds": inbounds,
+        "sidecars": plan.sidecar_core_plans.len(),
+        "sidecar_inbounds": sidecar_inbounds,
         "status": status
     })
 }

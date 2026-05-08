@@ -52,6 +52,7 @@
 - Naive and Mieru protocol parsing with explicit Xray rejection until sidecar runtimes are wired.
 - Core plan splitting for Xray-compatible nodes and per-node Naive/Mieru sidecars.
 - Explicit sidecar process spec construction from configured command and arguments.
+- Runtime bootstrap preservation of sidecar plans without fake Xray rendering.
 - User sync state advancement for delta and full-list responses with empty-list no-change semantics.
 - Runtime user refresh backed by persisted user sync state with delta-first and full-list fallback.
 - Realtime protocol models for websocket messages, receipts, URL derivation, and invalidate actions.
