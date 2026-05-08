@@ -235,6 +235,31 @@ pub fn core_process_spec(
     })
 }
 
+pub fn sidecar_process_spec(
+    plan: &CorePlan,
+    command: &str,
+    args: &[String],
+) -> Result<ProcessSpec, ProcessError> {
+    let CoreKind::Sidecar(_) = &plan.kind else {
+        return Err(ProcessError::new("sidecar process spec requires a sidecar core plan"));
+    };
+    let command = command.trim();
+    if command.is_empty() {
+        return Err(ProcessError::new("sidecar command is not configured"));
+    }
+    let config = plan.config_path.display().to_string();
+    Ok(ProcessSpec {
+        name: format!("core:{}", core_kind_label(&plan.kind)),
+        command: command.to_string(),
+        args: args
+            .iter()
+            .map(|arg| arg.replace("{config}", &config))
+            .collect(),
+        working_dir: plan.config_path.parent().map(|path| path.to_path_buf()),
+        env: BTreeMap::new(),
+    })
+}
+
 fn default_core_command(kind: &CoreKind) -> Option<&'static str> {
     match kind {
         CoreKind::Xray => Some("xray"),
@@ -275,8 +300,8 @@ mod tests {
     use crate::core::{CoreKind, CorePlan};
 
     use super::{
-        core_process_spec, MemoryProcessSupervisor, ProcessState, ProcessStatus,
-        ProcessSupervisor,
+        core_process_spec, sidecar_process_spec, MemoryProcessSupervisor, ProcessState,
+        ProcessStatus, ProcessSupervisor,
     };
 
     #[test]
@@ -309,6 +334,73 @@ mod tests {
 
         assert_eq!(spec.command, "/usr/local/bin/sing-box");
         assert_eq!(spec.args, vec!["run", "-c", "/etc/v2node/sing-box.json"]);
+    }
+
+    #[test]
+    fn core_process_spec_refuses_sidecar_without_explicit_args() {
+        let plan = CorePlan {
+            kind: CoreKind::Sidecar("naive".to_string()),
+            config_path: PathBuf::from("/srv/v2node/sidecar-naive-1.json"),
+            listen_tags: Vec::new(),
+            inbounds: Vec::new(),
+        };
+
+        let err = core_process_spec(&plan, None).unwrap_err();
+
+        assert!(err.message.contains("core command is not configured"));
+    }
+
+    #[test]
+    fn sidecar_process_spec_uses_explicit_command_and_args() {
+        let plan = CorePlan {
+            kind: CoreKind::Sidecar("mieru".to_string()),
+            config_path: PathBuf::from("/srv/v2node/sidecar-mieru-2.json"),
+            listen_tags: Vec::new(),
+            inbounds: Vec::new(),
+        };
+
+        let spec = sidecar_process_spec(
+            &plan,
+            "/usr/local/bin/mieru",
+            &["run".to_string(), "-c".to_string(), "{config}".to_string()],
+        )
+        .unwrap();
+
+        assert_eq!(spec.name, "core:sidecar-mieru");
+        assert_eq!(spec.command, "/usr/local/bin/mieru");
+        assert_eq!(
+            spec.args,
+            vec!["run", "-c", "/srv/v2node/sidecar-mieru-2.json"]
+        );
+        assert_eq!(spec.working_dir, Some(PathBuf::from("/srv/v2node")));
+    }
+
+    #[test]
+    fn sidecar_process_spec_rejects_non_sidecar_plan() {
+        let plan = CorePlan {
+            kind: CoreKind::Xray,
+            config_path: PathBuf::from("/srv/v2node/config.json"),
+            listen_tags: Vec::new(),
+            inbounds: Vec::new(),
+        };
+
+        let err = sidecar_process_spec(&plan, "/usr/local/bin/naive", &[]).unwrap_err();
+
+        assert!(err.message.contains("requires a sidecar core plan"));
+    }
+
+    #[test]
+    fn sidecar_process_spec_rejects_empty_command() {
+        let plan = CorePlan {
+            kind: CoreKind::Sidecar("naive".to_string()),
+            config_path: PathBuf::from("/srv/v2node/sidecar-naive-1.json"),
+            listen_tags: Vec::new(),
+            inbounds: Vec::new(),
+        };
+
+        let err = sidecar_process_spec(&plan, "  ", &["{config}".to_string()]).unwrap_err();
+
+        assert!(err.message.contains("sidecar command is not configured"));
     }
 
     #[test]

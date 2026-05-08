@@ -45,6 +45,7 @@ First cut:
 - Render Shadowsocks 2022 server keys and Go-compatible per-user keys.
 - Parse Naive and Mieru node protocols while refusing to fake them inside the Xray renderer.
 - Split mixed node sets into Xray and per-node sidecar core plans for Naive/Mieru.
+- Build explicit sidecar process specs only when a command and arguments are provided.
 - Report node traffic/online snapshots through the unified panel endpoint with legacy fallback.
 - Batch report per-node activity snapshots by runtime tag for multi-node machines.
 - Advance cached user sync state from delta or full-list responses with Go-compatible empty-list semantics.
@@ -101,6 +102,7 @@ Not implemented yet:
 
 - Realtime config reload receipts can still race with process restart because the runtime exits to rebuild immediately after replying.
 - Complete per-protocol user options for bandwidth limits, device-limit enforcement, and advanced protocol-specific credentials.
+- Naive and Mieru sidecar runtimes still need concrete config renderers and configured launch commands before they can serve traffic.
 - Subscription reverse proxy.
 
 ## Compatibility Targets
