@@ -4,7 +4,9 @@ use std::path::PathBuf;
 use crate::config::{
     AgentConfig, AppConfig, NodeConfig, ResolvedConfig, SubscriptionProxyConfig,
 };
-use crate::core::{split_core_plans_for_nodes, CorePlan, CorePlanBundle};
+use crate::core::{
+    core_kind_from_name, split_core_plans_for_nodes_with_kind, CorePlan, CorePlanBundle,
+};
 use crate::machine::{resolve_machine_profiles_from_panel, MachineResolveSummary};
 use crate::node::{users_by_node_tag, NodeFailure, NodeManager, NodeManagerOptions};
 use crate::panel::types::{NodeInfo, UserInfo};
@@ -150,7 +152,8 @@ pub fn build_runtime_bootstrap_plan_with_users(
     let core_bundle = if node_infos.is_empty() {
         CorePlanBundle::default()
     } else {
-        split_core_plans_for_nodes(
+        split_core_plans_for_nodes_with_kind(
+            core_kind_from_name(&resolved.kernel.r#type).map_err(|err| err.message)?,
             core_config_path(&resolved),
             &node_infos,
             users_by_node_tag,
@@ -313,6 +316,7 @@ mod tests {
         ResolvedMachineConfig, RealtimeConfig, SubscriptionProxyConfig,
         SubscriptionProxyProfile, SubscriptionProxyZeroSslConfig,
     };
+    use crate::core::CoreKind;
     use crate::machine::MachineResolveSummary;
     use crate::panel::types::{CommonNode, NodeInfo, UserInfo};
 
@@ -522,6 +526,32 @@ mod tests {
             plan.core_plan.as_ref().unwrap().inbounds[0].users[0].uuid,
             "uuid-a"
         );
+    }
+
+    #[test]
+    fn kernel_type_selects_keli_core_rs_plan() {
+        let mut resolved = ResolvedConfig {
+            kernel: Default::default(),
+            realtime: Default::default(),
+            machine: ResolvedMachineConfig {
+                enabled: false,
+                continue_on_error: false,
+                profiles: Vec::new(),
+            },
+            agent: AgentConfig::default(),
+            nodes: vec![NodeConfig {
+                url: "https://panel.example.test".to_string(),
+                node_id: 7,
+                ..NodeConfig::default()
+            }],
+        };
+        resolved.kernel.r#type = "keli-core-rs".to_string();
+        let node = test_node("socks", 7, 1080, "");
+
+        let plan = build_runtime_bootstrap_plan(resolved, vec![node], Vec::new()).unwrap();
+
+        assert_eq!(plan.core_plan.as_ref().unwrap().kind, CoreKind::KeliCoreRs);
+        assert_eq!(plan.core_plan.as_ref().unwrap().inbounds[0].protocol, "socks");
     }
 
     #[test]

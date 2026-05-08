@@ -51,3 +51,5 @@ Initial supported protocol names mirror Go `kelinode`:
 Naive still requires explicit Caddy forward_proxy integration before the panel should expose it as a Rust node supported protocol.
 
 The experimental `keli-core-rs` native core path currently accepts only SOCKS and HTTP inbounds. Other panel protocols remain rendered through Xray or explicit sidecars until their Rust data plane is implemented.
+
+Operators opt into that path with `kernel.type: keli-core-rs`; the default remains `xray` for production compatibility.

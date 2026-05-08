@@ -111,6 +111,7 @@ Not implemented yet:
 - Naive sidecar runtime still needs a concrete Caddy forward_proxy integration before it can serve traffic.
 - Mieru sidecar traffic requires operators to configure the `mita` command, arguments, and optional environment for their deployment style.
 - Experimental `keli-core-rs` native rendering is limited to SOCKS/HTTP, direct outbound, per-user credentials, and basic domain block routes.
+- Set `kernel.type: keli-core-rs` to select the experimental Rust-native core plan; `xray` remains the default.
 - Subscription reverse proxy.
 
 ## Sidecar Process Example

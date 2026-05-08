@@ -290,11 +290,30 @@ fn core_process_args(
         CoreKind::Xray => Ok(vec!["run".to_string(), "-config".to_string(), config]),
         CoreKind::SingBox => Ok(vec!["run".to_string(), "-c".to_string(), config]),
         CoreKind::Mihomo => Ok(vec!["-f".to_string(), config]),
-        CoreKind::KeliCoreRs => Ok(vec!["run-config".to_string(), config]),
+        CoreKind::KeliCoreRs => Ok(vec![
+            "run-config".to_string(),
+            config,
+            "--control".to_string(),
+            keli_core_rs_control_addr(config_path),
+        ]),
         CoreKind::Sidecar(name) => Err(ProcessError::new(format!(
             "sidecar process args are not implemented for {name}",
         ))),
     }
+}
+
+pub fn keli_core_rs_control_addr(config_path: &PathBuf) -> String {
+    let hash = fnv1a64(config_path.display().to_string().as_bytes());
+    format!("127.0.0.1:{}", 18080 + (hash % 1000))
+}
+
+fn fnv1a64(bytes: &[u8]) -> u64 {
+    let mut hash = 0xcbf29ce484222325u64;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
 }
 
 fn core_kind_label(kind: &CoreKind) -> String {
@@ -315,8 +334,8 @@ mod tests {
     use crate::core::{CoreKind, CorePlan};
 
     use super::{
-        core_process_spec, sidecar_process_spec, MemoryProcessSupervisor, ProcessState,
-        ProcessStatus, ProcessSupervisor,
+        core_process_spec, keli_core_rs_control_addr, sidecar_process_spec,
+        MemoryProcessSupervisor, ProcessState, ProcessStatus, ProcessSupervisor,
     };
 
     #[test]
@@ -346,12 +365,18 @@ mod tests {
         };
 
         let spec = core_process_spec(&plan, None).unwrap();
+        let control_addr = keli_core_rs_control_addr(&plan.config_path);
 
         assert_eq!(spec.name, "core:keli-core-rs");
         assert_eq!(spec.command, "keli-core-rs");
         assert_eq!(
             spec.args,
-            vec!["run-config", "/srv/v2node/keli-core-rs.json"]
+            vec![
+                "run-config".to_string(),
+                "/srv/v2node/keli-core-rs.json".to_string(),
+                "--control".to_string(),
+                control_addr
+            ]
         );
         assert_eq!(spec.working_dir, Some(PathBuf::from("/srv/v2node")));
     }

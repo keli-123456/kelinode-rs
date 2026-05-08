@@ -286,6 +286,7 @@ impl AppConfig {
 
     pub fn resolve_runtime(&self) -> Result<ResolvedConfig, String> {
         let mut kernel = self.kernel.clone();
+        kernel.r#type = kernel.r#type.trim().to_string();
         kernel.config_dir = normalize_config_dir(&kernel.config_dir);
         kernel.sidecars = normalize_sidecar_processes(&kernel.sidecars);
         kernel.dns_servers = normalize_string_list(&kernel.dns_servers);

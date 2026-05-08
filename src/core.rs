@@ -163,23 +163,48 @@ impl CorePlan {
     }
 }
 
+pub fn core_kind_from_name(value: &str) -> Result<CoreKind, CoreError> {
+    let normalized = value.trim().to_ascii_lowercase().replace('_', "-");
+    match normalized.as_str() {
+        "" | "xray" => Ok(CoreKind::Xray),
+        "sing-box" | "singbox" => Ok(CoreKind::SingBox),
+        "mihomo" | "clash-meta" => Ok(CoreKind::Mihomo),
+        "keli-core-rs" | "kelicore-rs" | "kelicorers" => Ok(CoreKind::KeliCoreRs),
+        other => Err(CoreError::new(format!("unsupported core type {other}"))),
+    }
+}
+
 pub fn split_core_plans_for_nodes(
     config_path: PathBuf,
     nodes: &[NodeInfo],
     users_by_node_tag: &BTreeMap<String, Vec<UserInfo>>,
 ) -> Result<CorePlanBundle, CoreError> {
-    let xray_nodes = nodes
+    split_core_plans_for_nodes_with_kind(
+        CoreKind::Xray,
+        config_path,
+        nodes,
+        users_by_node_tag,
+    )
+}
+
+pub fn split_core_plans_for_nodes_with_kind(
+    core_kind: CoreKind,
+    config_path: PathBuf,
+    nodes: &[NodeInfo],
+    users_by_node_tag: &BTreeMap<String, Vec<UserInfo>>,
+) -> Result<CorePlanBundle, CoreError> {
+    let core_nodes = nodes
         .iter()
         .filter(|node| sidecar_protocol_name(node.protocol).is_none())
         .cloned()
         .collect::<Vec<_>>();
-    let xray = if xray_nodes.is_empty() {
+    let xray = if core_nodes.is_empty() {
         None
     } else {
         Some(CorePlan::from_nodes_with_users(
-            CoreKind::Xray,
+            core_kind,
             config_path.clone(),
-            &xray_nodes,
+            &core_nodes,
             users_by_node_tag,
         )?)
     };
@@ -1437,9 +1462,9 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        build_inbound_plan, core_file_layout, render_core_config, resolve_node_listen_ip,
-        should_fallback_node_listen_ip, sidecar_config_path, split_core_plans_for_nodes,
-        write_core_config, CoreKind, CorePlan,
+        build_inbound_plan, core_file_layout, core_kind_from_name, render_core_config,
+        resolve_node_listen_ip, should_fallback_node_listen_ip, sidecar_config_path,
+        split_core_plans_for_nodes, write_core_config, CoreKind, CorePlan,
     };
     use crate::panel::types::{CommonNode, NodeInfo, PortValue, Route, Security, UserInfo};
 
@@ -1453,6 +1478,16 @@ mod tests {
         };
 
         assert_eq!(plan.listen_tags.len(), 1);
+    }
+
+    #[test]
+    fn parses_kernel_core_kind_names() {
+        assert_eq!(core_kind_from_name(" xray ").unwrap(), CoreKind::Xray);
+        assert_eq!(
+            core_kind_from_name("keli_core_rs").unwrap(),
+            CoreKind::KeliCoreRs
+        );
+        assert!(core_kind_from_name("unknown").is_err());
     }
 
     #[test]

@@ -111,6 +111,8 @@
 - Machine-profile panel reporting for subscription-proxy-only deployments.
 - Experimental `keli-core-rs` native config rendering for SOCKS/HTTP inbounds, users, direct outbound, stats, and domain block routes.
 - `keli-core-rs` process spec using `run-config <config>` while keeping Xray as the stable default core path.
+- `kernel.type` runtime selection for `xray` and the opt-in `keli-core-rs` plan.
+- Deterministic local control address wiring for `keli-core-rs run-config --control`.
 - Compatibility tests around protocol parsing and endpoint construction.
 
 ## Phase 2: Runtime Control
