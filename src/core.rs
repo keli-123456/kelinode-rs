@@ -350,12 +350,7 @@ fn render_mieru_sidecar_config(plan: &CorePlan) -> Result<Value, CoreError> {
 fn render_keli_core_rs_config(plan: &CorePlan) -> Result<Value, CoreError> {
     let mut routes = Vec::new();
     for inbound in &plan.inbounds {
-        if !matches!(inbound.protocol.as_str(), "socks" | "http") {
-            return Err(CoreError::new(format!(
-                "keli-core-rs native renderer only supports socks/http today; inbound {} uses {}",
-                inbound.tag, inbound.protocol
-            )));
-        }
+        validate_keli_core_rs_inbound(inbound)?;
 
         for route in &inbound.routes {
             if route.match_rules.is_empty() {
@@ -398,6 +393,32 @@ fn render_keli_core_rs_config(plan: &CorePlan) -> Result<Value, CoreError> {
             "per_user": true
         }
     }))
+}
+
+fn validate_keli_core_rs_inbound(inbound: &InboundPlan) -> Result<(), CoreError> {
+    match inbound.protocol.as_str() {
+        "socks" | "http" => Ok(()),
+        "vless" => {
+            let network = first_non_empty(inbound.network.trim(), "tcp");
+            if network != "tcp" {
+                return Err(CoreError::new(format!(
+                    "keli-core-rs vless currently supports only tcp transport; inbound {} uses {}",
+                    inbound.tag, network
+                )));
+            }
+            if inbound.security != "none" {
+                return Err(CoreError::new(format!(
+                    "keli-core-rs vless currently supports only security none; inbound {} uses {}",
+                    inbound.tag, inbound.security
+                )));
+            }
+            Ok(())
+        }
+        value => Err(CoreError::new(format!(
+            "keli-core-rs native renderer only supports socks/http/vless tcp today; inbound {} uses {}",
+            inbound.tag, value
+        ))),
+    }
 }
 
 fn keli_core_rs_instance_id(plan: &CorePlan) -> String {
@@ -1616,11 +1637,13 @@ mod tests {
     }
 
     #[test]
-    fn renders_keli_core_rs_native_socks_http_config_from_panel_users() {
+    fn renders_keli_core_rs_native_socks_http_vless_config_from_panel_users() {
         let socks = test_node("socks", 40, "");
         let http = test_node("http", 41, "127.0.0.1");
+        let vless = test_node("vless", 45, "127.0.0.1");
         let socks_tag = socks.tag.clone();
         let http_tag = http.tag.clone();
+        let vless_tag = vless.tag.clone();
         let mut users = std::collections::BTreeMap::new();
         users.insert(
             socks_tag.clone(),
@@ -1640,10 +1663,19 @@ mod tests {
                 device_limit: 0,
             }],
         );
+        users.insert(
+            vless_tag.clone(),
+            vec![UserInfo {
+                id: 45,
+                uuid: "11111111-1111-1111-1111-111111111111".to_string(),
+                speed_limit: 0,
+                device_limit: 0,
+            }],
+        );
         let plan = CorePlan::from_nodes_with_users(
             CoreKind::KeliCoreRs,
             PathBuf::from("/srv/v2node/keli-core-rs.json"),
-            &[socks, http],
+            &[socks, http, vless],
             &users,
         )
         .unwrap();
@@ -1663,6 +1695,12 @@ mod tests {
         assert_eq!(config["inbounds"][0]["users"][0]["device_limit"], 2);
         assert_eq!(config["inbounds"][1]["protocol"], "http");
         assert_eq!(config["inbounds"][1]["listen"], "127.0.0.1");
+        assert_eq!(config["inbounds"][2]["protocol"], "vless");
+        assert_eq!(config["inbounds"][2]["listen"], "127.0.0.1");
+        assert_eq!(
+            config["inbounds"][2]["users"][0]["uuid"],
+            "11111111-1111-1111-1111-111111111111"
+        );
         assert_eq!(config["outbounds"][0]["tag"], "direct");
         assert_eq!(config["stats"]["per_user"], true);
     }
@@ -1691,7 +1729,7 @@ mod tests {
 
     #[test]
     fn keli_core_rs_rejects_unimplemented_protocols() {
-        let node = test_node("vless", 43, "");
+        let node = test_node("vmess", 43, "");
         let plan = CorePlan::from_nodes(
             CoreKind::KeliCoreRs,
             PathBuf::from("/srv/v2node/keli-core-rs.json"),
@@ -1701,7 +1739,39 @@ mod tests {
 
         let err = render_core_config(&plan).unwrap_err();
 
-        assert!(err.message.contains("only supports socks/http"));
+        assert!(err.message.contains("only supports socks/http/vless"));
+    }
+
+    #[test]
+    fn keli_core_rs_rejects_vless_tls_until_core_supports_it() {
+        let mut node = test_node("vless", 46, "");
+        node.security = Security::Reality;
+        let plan = CorePlan::from_nodes(
+            CoreKind::KeliCoreRs,
+            PathBuf::from("/srv/v2node/keli-core-rs.json"),
+            &[node],
+        )
+        .unwrap();
+
+        let err = render_core_config(&plan).unwrap_err();
+
+        assert!(err.message.contains("security none"));
+    }
+
+    #[test]
+    fn keli_core_rs_rejects_vless_non_tcp_transport_until_core_supports_it() {
+        let mut node = test_node("vless", 47, "");
+        node.common.network = "ws".to_string();
+        let plan = CorePlan::from_nodes(
+            CoreKind::KeliCoreRs,
+            PathBuf::from("/srv/v2node/keli-core-rs.json"),
+            &[node],
+        )
+        .unwrap();
+
+        let err = render_core_config(&plan).unwrap_err();
+
+        assert!(err.message.contains("tcp transport"));
     }
 
     #[test]
