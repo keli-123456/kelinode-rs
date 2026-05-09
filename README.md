@@ -107,7 +107,7 @@ First cut:
 
 Not implemented yet:
 
-- Complete per-protocol user options for bandwidth limits, device-limit enforcement, and advanced protocol-specific credentials inside the runtime data path.
+- Complete advanced protocol-specific limit edge cases and credentials beyond the native core's current per-user speed/device enforcement.
 - Naive sidecar runtime still needs a concrete Caddy forward_proxy integration before it can serve traffic.
 - Mieru sidecar traffic on the default Xray path requires operators to configure the `mita` command, arguments, and optional environment for their deployment style.
 - Experimental `keli-core-rs` native rendering covers SOCKS/HTTP, Shadowsocks, VMess, VLESS, Trojan, AnyTLS, Hysteria2, TUIC, Mieru TCP with expanded port ranges and stream multiplexing, common TCP/WS/HTTPUpgrade/gRPC transports, VLESS REALITY config, direct outbound, per-user credentials, and common block/route rules.
