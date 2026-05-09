@@ -688,10 +688,10 @@ fn keli_core_rs_route_outbound_stream(
         .unwrap_or("tcp");
     if !matches!(
         network,
-        "tcp" | "ws" | "httpupgrade" | "grpc" | "h2" | "http" | "xhttp" | "splithttp"
+        "tcp" | "ws" | "httpupgrade" | "grpc" | "h2" | "http" | "xhttp" | "splithttp" | "quic"
     ) {
         return Err(CoreError::new(format!(
-            "keli-core-rs route outbound {tag} on inbound {} supports only tcp/ws/httpupgrade/grpc/h2/xhttp stream-one today; network {network} is not supported yet",
+            "keli-core-rs route outbound {tag} on inbound {} supports only tcp/ws/httpupgrade/grpc/h2/xhttp stream-one/plain quic today; network {network} is not supported yet",
             inbound.tag
         )));
     }
@@ -717,6 +717,7 @@ fn keli_core_rs_route_outbound_stream(
                 || (matches!(network, "h2" | "http") && key == "httpSettings")
                 || (network == "xhttp" && key == "xhttpSettings")
                 || (network == "splithttp" && key == "splithttpSettings")
+                || (network == "quic" && key == "quicSettings")
                 || is_empty_json(value)
             {
                 continue;
@@ -751,6 +752,7 @@ fn keli_core_rs_route_outbound_stream(
         "splithttp" => stream_settings
             .get("splithttpSettings")
             .unwrap_or(&Value::Null),
+        "quic" => stream_settings.get("quicSettings").unwrap_or(&Value::Null),
         _ => &Value::Null,
     };
     let xhttp_stream_one = if matches!(network, "xhttp" | "splithttp") {
@@ -768,6 +770,12 @@ fn keli_core_rs_route_outbound_stream(
                 inbound.tag
             )));
         }
+        true
+    } else {
+        false
+    };
+    let quic_plain = if network == "quic" {
+        validate_plain_quic_settings(inbound, tag, transport_settings)?;
         true
     } else {
         false
@@ -811,9 +819,27 @@ fn keli_core_rs_route_outbound_stream(
     } else {
         BTreeMap::new()
     };
+    let quic_security = if quic_plain {
+        outbound_string(transport_settings, "security").or_else(|| Some("none".to_string()))
+    } else {
+        None
+    };
+    let quic_key = if quic_plain {
+        outbound_string(transport_settings, "key")
+    } else {
+        None
+    };
+    let quic_header_type = if quic_plain {
+        transport_settings
+            .get("header")
+            .and_then(|header| outbound_string(header, "type"))
+            .or_else(|| Some("none".to_string()))
+    } else {
+        None
+    };
     let transport = if matches!(
         network,
-        "ws" | "httpupgrade" | "grpc" | "h2" | "http" | "xhttp" | "splithttp"
+        "ws" | "httpupgrade" | "grpc" | "h2" | "http" | "xhttp" | "splithttp" | "quic"
     ) {
         Some(json!({
             "network": transport_network,
@@ -839,7 +865,10 @@ fn keli_core_rs_route_outbound_stream(
             } else {
                 None
             },
-            "headers": transport_headers
+            "headers": transport_headers,
+            "quic_security": quic_security,
+            "quic_key": quic_key,
+            "quic_header_type": quic_header_type
         }))
     } else {
         None
@@ -1072,6 +1101,77 @@ fn validate_xhttp_stream_one_settings(
                     inbound.tag
                 )));
             }
+        }
+    }
+    Ok(())
+}
+
+fn validate_plain_quic_settings(
+    inbound: &InboundPlan,
+    tag: &str,
+    settings: &Value,
+) -> Result<(), CoreError> {
+    let Some(object) = settings.as_object() else {
+        if settings.is_null() {
+            return Ok(());
+        }
+        return Err(CoreError::new(format!(
+            "keli-core-rs route outbound {tag} on inbound {} quicSettings must be an object",
+            inbound.tag
+        )));
+    };
+    for (key, value) in object {
+        if matches!(key.as_str(), "security" | "key" | "header") || is_empty_json(value) {
+            continue;
+        }
+        return Err(CoreError::new(format!(
+            "keli-core-rs route outbound {tag} on inbound {} does not support quicSettings.{key} yet",
+            inbound.tag
+        )));
+    }
+    let security = outbound_string(settings, "security").unwrap_or_else(|| "none".to_string());
+    if !security.eq_ignore_ascii_case("none") {
+        return Err(CoreError::new(format!(
+            "keli-core-rs route outbound {tag} on inbound {} supports quicSettings.security none only today",
+            inbound.tag
+        )));
+    }
+    if outbound_string(settings, "key")
+        .map(|value| !value.trim().is_empty())
+        .unwrap_or(false)
+    {
+        return Err(CoreError::new(format!(
+            "keli-core-rs route outbound {tag} on inbound {} supports quicSettings.key only with encrypted quic security",
+            inbound.tag
+        )));
+    }
+    if let Some(header) = settings.get("header").filter(|value| !is_empty_json(value)) {
+        let Some(header) = header.as_object() else {
+            return Err(CoreError::new(format!(
+                "keli-core-rs route outbound {tag} on inbound {} quicSettings.header must be an object",
+                inbound.tag
+            )));
+        };
+        for (key, value) in header {
+            if key == "type" || is_empty_json(value) {
+                continue;
+            }
+            return Err(CoreError::new(format!(
+                "keli-core-rs route outbound {tag} on inbound {} does not support quicSettings.header.{key} yet",
+                inbound.tag
+            )));
+        }
+        let header_type = header
+            .get("type")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or("none");
+        if !header_type.eq_ignore_ascii_case("none") {
+            return Err(CoreError::new(format!(
+                "keli-core-rs route outbound {tag} on inbound {} supports quicSettings.header.type none only today",
+                inbound.tag
+            )));
         }
     }
     Ok(())
@@ -4522,6 +4622,38 @@ mod tests {
     }
 
     #[test]
+    fn renders_keli_core_rs_vless_plain_quic_route_outbounds() {
+        let mut node = test_node("http", 105, "");
+        node.common.routes = vec![Route {
+            id: 1,
+            match_rules: vec!["domain:example.com".to_string()],
+            action: "route".to_string(),
+            action_value: Some(
+                r#"{"tag":"vless-quic","protocol":"vless","settings":{"vnext":[{"address":"proxy.example.com","port":443,"users":[{"id":"11111111-1111-1111-1111-111111111111","encryption":"none"}]}]},"streamSettings":{"network":"quic","security":"tls","tlsSettings":{"serverName":"sni.example.com","allowInsecure":true},"quicSettings":{"security":"none","header":{"type":"none"}}}}"#
+                    .to_string(),
+            ),
+        }];
+        let plan = CorePlan::from_nodes(
+            CoreKind::KeliCoreRs,
+            PathBuf::from("/srv/v2node/keli-core-rs.json"),
+            &[node],
+        )
+        .unwrap();
+
+        let config = render_core_config(&plan).unwrap();
+
+        assert_eq!(config["outbounds"][1]["tag"], "vless-quic");
+        assert_eq!(config["outbounds"][1]["protocol"], "vless");
+        assert_eq!(config["outbounds"][1]["transport"]["network"], "quic");
+        assert_eq!(config["outbounds"][1]["transport"]["quic_security"], "none");
+        assert_eq!(
+            config["outbounds"][1]["transport"]["quic_header_type"],
+            "none"
+        );
+        assert!(config["outbounds"][1]["transport"]["quic_key"].is_null());
+    }
+
+    #[test]
     fn renders_keli_core_rs_vmess_alter_id_route_outbounds() {
         let mut node = test_node("http", 101, "");
         node.common.routes = vec![Route {
@@ -4638,6 +4770,27 @@ mod tests {
         .unwrap();
         let err = render_core_config(&plan).unwrap_err();
         assert!(err.message.contains("vless flow only on tcp tls"));
+
+        let mut node = test_node("http", 90, "");
+        node.common.routes = vec![Route {
+            id: 1,
+            match_rules: vec!["domain:example.com".to_string()],
+            action: "route".to_string(),
+            action_value: Some(
+                r#"{"tag":"vless-quic","protocol":"vless","settings":{"vnext":[{"address":"proxy.example.com","port":443,"users":[{"id":"11111111-1111-1111-1111-111111111111","encryption":"none"}]}]},"streamSettings":{"network":"quic","quicSettings":{"security":"aes-128-gcm","key":"secret","header":{"type":"none"}}}}"#
+                    .to_string(),
+            ),
+        }];
+        let plan = CorePlan::from_nodes(
+            CoreKind::KeliCoreRs,
+            PathBuf::from("/srv/v2node/keli-core-rs.json"),
+            &[node],
+        )
+        .unwrap();
+        let err = render_core_config(&plan).unwrap_err();
+        assert!(err
+            .message
+            .contains("supports quicSettings.security none only today"));
     }
 
     #[test]
