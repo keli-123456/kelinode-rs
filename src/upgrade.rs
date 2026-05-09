@@ -7,8 +7,8 @@ use serde_json::Value;
 
 use crate::machine::MachineUpgradeCommand;
 
-const INSTALL_SCRIPT_URL: &str =
-    "https://raw.githubusercontent.com/keli-123456/kelinode/main/script/install.sh";
+const DEFAULT_RELEASE_OWNER: &str = "keli-123456";
+const DEFAULT_RELEASE_PLATFORM: &str = "linux-x86_64";
 
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 pub struct UpgradeStatus {
@@ -30,6 +30,17 @@ pub struct UpgradeLaunchPlan {
     pub command: String,
     pub args: Vec<String>,
     pub log_path: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReleaseUpgradeSpec {
+    pub name: String,
+    pub owner: String,
+    pub repository: String,
+    pub binary: String,
+    pub install_dir: String,
+    pub service_name: String,
+    pub platform: String,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -142,8 +153,56 @@ impl UpgradeExecutor for MemoryUpgradeExecutor {
 }
 
 pub fn upgrade_launch_plan(target_version: &str) -> UpgradeLaunchPlan {
+    release_upgrade_launch_plan(target_version, &ReleaseUpgradeSpec::native_node())
+}
+
+impl ReleaseUpgradeSpec {
+    pub fn native_node() -> Self {
+        Self {
+            name: "kelinode-rs".to_string(),
+            owner: DEFAULT_RELEASE_OWNER.to_string(),
+            repository: "kelinode-rs".to_string(),
+            binary: "kelinode-rs".to_string(),
+            install_dir: "/usr/local/v2node".to_string(),
+            service_name: "v2node".to_string(),
+            platform: DEFAULT_RELEASE_PLATFORM.to_string(),
+        }
+    }
+
+    pub fn native_core() -> Self {
+        Self {
+            name: "keli-core-rs".to_string(),
+            owner: DEFAULT_RELEASE_OWNER.to_string(),
+            repository: "keli-core-rs".to_string(),
+            binary: "keli-core-rs".to_string(),
+            install_dir: "/usr/local/v2node".to_string(),
+            service_name: "v2node".to_string(),
+            platform: DEFAULT_RELEASE_PLATFORM.to_string(),
+        }
+    }
+
+    fn asset_prefix(&self, target_version: &str) -> String {
+        format!("{}-{}-{}", self.name, target_version, self.platform)
+    }
+
+    fn release_asset_url(&self, target_version: &str, suffix: &str) -> String {
+        format!(
+            "https://github.com/{}/{}/releases/download/{}/{}{}",
+            self.owner,
+            self.repository,
+            target_version,
+            self.asset_prefix(target_version),
+            suffix
+        )
+    }
+}
+
+pub fn release_upgrade_launch_plan(
+    target_version: &str,
+    spec: &ReleaseUpgradeSpec,
+) -> UpgradeLaunchPlan {
     let target_version = target_version.trim().to_string();
-    let script = upgrade_shell_script(&target_version);
+    let script = release_upgrade_shell_script(&target_version, spec);
 
     if tool_exists("systemd-run") {
         return UpgradeLaunchPlan {
@@ -152,10 +211,11 @@ pub fn upgrade_launch_plan(target_version: &str) -> UpgradeLaunchPlan {
             args: vec![
                 "--unit".to_string(),
                 format!(
-                    "v2node-self-update-{}",
+                    "{}-self-update-{}",
+                    sanitize_systemd_unit_part(&spec.name),
                     sanitize_systemd_unit_part(&target_version)
                 ),
-                "--description=v2node self update".to_string(),
+                format!("--description={} self update", spec.name),
                 "/bin/sh".to_string(),
                 "-c".to_string(),
                 script,
@@ -171,57 +231,95 @@ pub fn upgrade_launch_plan(target_version: &str) -> UpgradeLaunchPlan {
         args: vec![
             "-c".to_string(),
             format!(
-                "nohup /bin/sh -c {} >/tmp/v2node-self-update.log 2>&1 &",
-                shell_quote(&detached)
+                "nohup /bin/sh -c {} >/tmp/{}-self-update.log 2>&1 &",
+                shell_quote(&detached),
+                sanitize_systemd_unit_part(&spec.name)
             ),
         ],
-        log_path: Some("/tmp/v2node-self-update.log".to_string()),
+        log_path: Some(format!(
+            "/tmp/{}-self-update.log",
+            sanitize_systemd_unit_part(&spec.name)
+        )),
     }
 }
 
-fn upgrade_shell_script(target_version: &str) -> String {
+fn release_upgrade_shell_script(target_version: &str, spec: &ReleaseUpgradeSpec) -> String {
+    let asset_prefix = spec.asset_prefix(target_version);
+    let manifest_url = spec.release_asset_url(target_version, ".manifest.json");
+    let archive_url = spec.release_asset_url(target_version, ".tar.gz");
     let mut lines = Vec::new();
     lines.push("set -eu".to_string());
     lines.push(format!("target_version={}", shell_quote(target_version)));
-    lines.push(format!(
-        "install_script_url={}",
-        shell_quote(INSTALL_SCRIPT_URL)
-    ));
-    lines.push("install_dir=/usr/local/v2node".to_string());
+    lines.push(format!("component={}", shell_quote(&spec.name)));
+    lines.push(format!("binary_name={}", shell_quote(&spec.binary)));
+    lines.push(format!("asset_prefix={}", shell_quote(&asset_prefix)));
+    lines.push(format!("manifest_url={}", shell_quote(&manifest_url)));
+    lines.push(format!("archive_url={}", shell_quote(&archive_url)));
+    lines.push(format!("install_dir={}", shell_quote(&spec.install_dir)));
+    lines.push(format!("service_name={}", shell_quote(&spec.service_name)));
+    lines.push("work_dir=$(mktemp -d \"/tmp/${component}.upgrade.XXXXXX\")".to_string());
+    lines.push("cleanup() { rm -rf \"$work_dir\"; }".to_string());
+    lines.push("trap cleanup EXIT".to_string());
     lines.push(
-        "backup_dir=\"/usr/local/v2node.backup.${target_version}.$(date +%Y%m%d%H%M%S)\""
+        "backup_dir=\"${install_dir}.backup.${component}.${target_version}.$(date +%Y%m%d%H%M%S)\""
             .to_string(),
     );
     lines.push("restore_backup() {".to_string());
     lines.push("  if [ -d \"$backup_dir\" ]; then".to_string());
     lines.push("    rm -rf \"$install_dir\"".to_string());
     lines.push("    mv \"$backup_dir\" \"$install_dir\"".to_string());
-    lines.push("    if command -v systemctl >/dev/null 2>&1; then".to_string());
-    lines.push("      systemctl restart v2node >/dev/null 2>&1 || true".to_string());
-    lines.push("    elif command -v service >/dev/null 2>&1; then".to_string());
-    lines.push("      service v2node restart >/dev/null 2>&1 || true".to_string());
-    lines.push("    fi".to_string());
+    lines.push("    restart_service || true".to_string());
     lines.push("  fi".to_string());
     lines.push("}".to_string());
+    lines.push("restart_service() {".to_string());
+    lines.push(
+        "  if [ -n \"$service_name\" ] && command -v systemctl >/dev/null 2>&1; then".to_string(),
+    );
+    lines.push("    systemctl restart \"$service_name\" >/dev/null 2>&1 && return 0".to_string());
+    lines.push("  fi".to_string());
+    lines.push(
+        "  if [ -n \"$service_name\" ] && command -v service >/dev/null 2>&1; then".to_string(),
+    );
+    lines.push("    service \"$service_name\" restart >/dev/null 2>&1 && return 0".to_string());
+    lines.push("  fi".to_string());
+    lines.push("  return 0".to_string());
+    lines.push("}".to_string());
+    lines.push("if ! command -v curl >/dev/null 2>&1; then exit 1; fi".to_string());
+    lines.push("if ! command -v tar >/dev/null 2>&1; then exit 1; fi".to_string());
+    lines.push("if ! command -v sha256sum >/dev/null 2>&1; then exit 1; fi".to_string());
     lines.push("if [ -d \"$install_dir\" ]; then".to_string());
     lines.push("  cp -a \"$install_dir\" \"$backup_dir\"".to_string());
     lines.push("fi".to_string());
+    lines.push("mkdir -p \"$install_dir\"".to_string());
+    lines.push("manifest_file=\"$work_dir/${asset_prefix}.manifest.json\"".to_string());
+    lines.push("archive_file=\"$work_dir/${asset_prefix}.tar.gz\"".to_string());
     lines.push(
-        "if ! curl -fsSL \"$install_script_url\" -o /tmp/v2node-install.sh; then".to_string(),
+        "if ! curl -fsSL \"$manifest_url\" -o \"$manifest_file\"; then restore_backup; exit 1; fi"
+            .to_string(),
     );
-    lines.push("  restore_backup".to_string());
-    lines.push("  exit 1".to_string());
-    lines.push("fi".to_string());
-    lines.push("if ! bash /tmp/v2node-install.sh \"$target_version\"; then".to_string());
-    lines.push("  restore_backup".to_string());
-    lines.push("  exit 1".to_string());
-    lines.push("fi".to_string());
+    lines.push("manifest_sha=$(sed -n 's/.*\"sha256\"[[:space:]]*:[[:space:]]*\"\\([0-9a-fA-F]\\{64\\}\\)\".*/\\1/p' \"$manifest_file\" | head -n 1)".to_string());
+    lines.push("manifest_binary=$(sed -n 's/.*\"binary\"[[:space:]]*:[[:space:]]*\"\\([^\"]*\\)\".*/\\1/p' \"$manifest_file\" | head -n 1)".to_string());
+    lines.push("if [ -z \"$manifest_sha\" ]; then restore_backup; exit 1; fi".to_string());
+    lines.push("if [ -n \"$manifest_binary\" ] && [ \"$manifest_binary\" != \"$binary_name\" ]; then restore_backup; exit 1; fi".to_string());
+    lines.push(
+        "if ! curl -fsSL \"$archive_url\" -o \"$archive_file\"; then restore_backup; exit 1; fi"
+            .to_string(),
+    );
+    lines.push("(cd \"$work_dir\" && printf '%s  %s\\n' \"$manifest_sha\" \"${asset_prefix}.tar.gz\" | sha256sum -c -) || { restore_backup; exit 1; }".to_string());
+    lines.push(
+        "if ! tar -xzf \"$archive_file\" -C \"$work_dir\"; then restore_backup; exit 1; fi"
+            .to_string(),
+    );
+    lines.push(
+        "extracted_binary=$(find \"$work_dir\" -type f -name \"$binary_name\" | head -n 1)"
+            .to_string(),
+    );
+    lines.push("if [ -z \"$extracted_binary\" ]; then restore_backup; exit 1; fi".to_string());
+    lines.push("cp \"$extracted_binary\" \"$install_dir/$binary_name\"".to_string());
+    lines.push("chmod 0755 \"$install_dir/$binary_name\"".to_string());
     lines.push("installed_version=\"\"".to_string());
-    lines.push("if [ -f \"$install_dir/.installed_version\" ]; then".to_string());
-    lines
-        .push("  installed_version=$(cat \"$install_dir/.installed_version\" || true)".to_string());
-    lines.push("elif [ -x \"$install_dir/v2node\" ]; then".to_string());
-    lines.push("  installed_version=$(\"$install_dir/v2node\" version 2>/dev/null | awk '{print $2}' | head -n 1 || true)".to_string());
+    lines.push("if [ -x \"$install_dir/$binary_name\" ]; then".to_string());
+    lines.push("  installed_version=$(\"$install_dir/$binary_name\" version 2>/dev/null | awk '{print $2}' | head -n 1 || true)".to_string());
     lines.push("fi".to_string());
     lines.push("normalize_version() {".to_string());
     lines.push("  printf '%s' \"$1\" | sed 's/^[vV]//'".to_string());
@@ -230,6 +328,13 @@ fn upgrade_shell_script(target_version: &str) -> String {
     lines.push("  restore_backup".to_string());
     lines.push("  exit 1".to_string());
     lines.push("fi".to_string());
+    lines.push(
+        "printf '%s\\n' \"$target_version\" > \"$install_dir/.installed_version\"".to_string(),
+    );
+    lines.push(
+        "printf '%s\\n' \"$target_version\" > \"$install_dir/.${component}_version\"".to_string(),
+    );
+    lines.push("restart_service".to_string());
     lines.push("rm -rf \"$backup_dir\"".to_string());
     lines.join("\n")
 }
@@ -328,8 +433,9 @@ mod tests {
     use crate::machine::MachineUpgradeCommand;
 
     use super::{
-        shell_quote, upgrade_shell_script, valid_kelinode_version, versions_equal,
-        MemoryUpgradeExecutor, UpgradeManager,
+        release_upgrade_launch_plan, release_upgrade_shell_script, shell_quote,
+        valid_kelinode_version, versions_equal, MemoryUpgradeExecutor, ReleaseUpgradeSpec,
+        UpgradeManager,
     };
 
     #[test]
@@ -416,14 +522,46 @@ mod tests {
     }
 
     #[test]
-    fn upgrade_shell_script_verifies_install_and_restores_backup() {
-        let script = upgrade_shell_script("v1.2.5");
+    fn upgrade_shell_script_downloads_manifest_and_verifies_sha256() {
+        let script = release_upgrade_shell_script("v1.2.5", &ReleaseUpgradeSpec::native_node());
 
         assert!(script.contains("restore_backup()"));
-        assert!(script.contains("/usr/local/v2node.backup.${target_version}."));
+        assert!(script.contains("kelinode-rs-v1.2.5-linux-x86_64.manifest.json"));
+        assert!(script.contains("kelinode-rs-v1.2.5-linux-x86_64.tar.gz"));
+        assert!(script.contains("manifest_sha=$(sed"));
+        assert!(script.contains("sha256sum -c -"));
+        assert!(script.contains("tar -xzf \"$archive_file\""));
+        assert!(script.contains("cp \"$extracted_binary\" \"$install_dir/$binary_name\""));
+        assert!(script.contains("${install_dir}.backup.${component}.${target_version}."));
         assert!(script.contains(".installed_version"));
+        assert!(script.contains(".${component}_version"));
         assert!(script.contains("normalize_version"));
-        assert!(script.contains("bash /tmp/v2node-install.sh \"$target_version\""));
         assert!(script.contains("rm -rf \"$backup_dir\""));
+    }
+
+    #[test]
+    fn release_upgrade_spec_can_target_native_core_assets() {
+        let spec = ReleaseUpgradeSpec::native_core();
+        let script = release_upgrade_shell_script("v0.1.1", &spec);
+
+        assert!(script.contains("component='keli-core-rs'"));
+        assert!(script.contains("binary_name='keli-core-rs'"));
+        assert!(script.contains("keli-core-rs-v0.1.1-linux-x86_64.manifest.json"));
+        assert!(script.contains("keli-core-rs-v0.1.1-linux-x86_64.tar.gz"));
+    }
+
+    #[test]
+    fn release_upgrade_launch_plan_uses_component_log_name() {
+        let plan = release_upgrade_launch_plan("v1.2.5", &ReleaseUpgradeSpec::native_node());
+
+        assert_eq!(plan.target_version, "v1.2.5");
+        if let Some(log_path) = plan.log_path {
+            assert!(log_path.contains("kelinode-rs-self-update.log"));
+        } else {
+            assert!(plan
+                .args
+                .iter()
+                .any(|arg| arg.contains("kelinode-rs-self-update-v1.2.5")));
+        }
     }
 }
