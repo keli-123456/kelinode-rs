@@ -131,6 +131,7 @@ fn version_value(version: String) -> Value {
 
 fn runtime_value(plan: &RuntimeBootstrapPlan) -> Value {
     json!({
+        "agent": "kelinode-rs",
         "mode": runtime_mode_label(&plan.bootstrap.mode),
         "nodes": plan.node_count,
         "configured_nodes": plan.resolved.nodes.len(),
@@ -444,6 +445,7 @@ mod tests {
         assert_eq!(payload.status["cpu"], json!(12.5));
         assert_eq!(payload.status["mem"]["total"], json!(1024));
         assert_eq!(payload.status["version"], json!("v0.4.0"));
+        assert_eq!(payload.status["runtime"]["agent"], json!("kelinode-rs"));
         assert_eq!(payload.status["runtime"]["mode"], json!("machine_binding"));
         assert_eq!(payload.status["core"]["status"]["state"], json!("running"));
         assert_eq!(
