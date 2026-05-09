@@ -580,7 +580,7 @@ fn keli_core_rs_route_outbound(
         _ => (None, None),
     };
 
-    let (address, port, username, password, method) =
+    let (address, port, username, password, method, alter_id) =
         keli_core_rs_route_outbound_endpoint(&outbound);
     if protocol == "vless" {
         if address
@@ -658,6 +658,7 @@ fn keli_core_rs_route_outbound(
             "tag": tag,
             "protocol": protocol,
             "method": method,
+            "alter_id": alter_id,
             "address": address,
             "port": port,
             "username": username,
@@ -816,6 +817,7 @@ fn keli_core_rs_route_outbound_endpoint(
     Option<String>,
     Option<String>,
     Option<String>,
+    Option<u16>,
 ) {
     let address = outbound
         .get("address")
@@ -834,6 +836,7 @@ fn keli_core_rs_route_outbound_endpoint(
             outbound_string(outbound, "username").or_else(|| outbound_string(outbound, "user")),
             outbound_string(outbound, "password").or_else(|| outbound_string(outbound, "pass")),
             outbound_string(outbound, "method").or_else(|| outbound_string(outbound, "cipher")),
+            outbound_u16(outbound, "alter_id").or_else(|| outbound_u16(outbound, "alterId")),
         );
     }
 
@@ -846,19 +849,22 @@ fn keli_core_rs_route_outbound_endpoint(
         .filter(|value| !value.is_empty());
     if let Some(redirect) = redirect {
         let (address, port) = parse_route_redirect_endpoint(redirect);
-        return (address, port, None, None, None);
+        return (address, port, None, None, None, None);
     }
 
     let settings_method = settings
         .and_then(|settings| outbound_string(settings, "method"))
         .or_else(|| settings.and_then(|settings| outbound_string(settings, "cipher")));
+    let settings_alter_id = settings
+        .and_then(|settings| outbound_u16(settings, "alter_id"))
+        .or_else(|| settings.and_then(|settings| outbound_u16(settings, "alterId")));
     if let Some(endpoint) = outbound
         .get("settings")
         .and_then(|settings| settings.get("servers"))
         .and_then(Value::as_array)
         .and_then(|servers| servers.first())
         .map(|server| {
-            let (address, port, username, password, method) =
+            let (address, port, username, password, method, alter_id) =
                 keli_core_rs_route_outbound_server_endpoint(server);
             (
                 address,
@@ -866,6 +872,7 @@ fn keli_core_rs_route_outbound_endpoint(
                 username,
                 password,
                 method.or_else(|| settings_method.clone()),
+                alter_id.or(settings_alter_id),
             )
         })
     {
@@ -878,7 +885,7 @@ fn keli_core_rs_route_outbound_endpoint(
         .and_then(Value::as_array)
         .and_then(|servers| servers.first())
         .map(|server| {
-            let (address, port, username, password, method) =
+            let (address, port, username, password, method, alter_id) =
                 keli_core_rs_route_outbound_server_endpoint(server);
             (
                 address,
@@ -886,9 +893,10 @@ fn keli_core_rs_route_outbound_endpoint(
                 username,
                 password,
                 method.or_else(|| settings_method.clone()),
+                alter_id.or(settings_alter_id),
             )
         })
-        .unwrap_or((None, None, None, None, settings_method))
+        .unwrap_or((None, None, None, None, settings_method, settings_alter_id))
 }
 
 fn outbound_string(value: &Value, key: &str) -> Option<String> {
@@ -911,6 +919,17 @@ fn outbound_string_or_first_array(value: &Value, key: &str) -> Option<String> {
             .filter(|value| !value.is_empty())
             .map(str::to_string)
     })
+}
+
+fn outbound_u16(value: &Value, key: &str) -> Option<u16> {
+    value
+        .get(key)
+        .and_then(|value| {
+            value
+                .as_u64()
+                .or_else(|| value.as_str().and_then(|value| value.trim().parse().ok()))
+        })
+        .and_then(|value| u16::try_from(value).ok())
 }
 
 fn outbound_string_array(value: &Value, key: &str) -> Vec<String> {
@@ -937,6 +956,7 @@ fn keli_core_rs_route_outbound_server_endpoint(
     Option<String>,
     Option<String>,
     Option<String>,
+    Option<u16>,
 ) {
     let address = outbound_string(server, "address");
     let port = server
@@ -963,7 +983,11 @@ fn keli_core_rs_route_outbound_server_endpoint(
         .or_else(|| user.and_then(|user| outbound_string(user, "cipher")))
         .or_else(|| user.and_then(|user| outbound_string(user, "security")))
         .or_else(|| user.and_then(|user| outbound_string(user, "flow")));
-    (address, port, username, password, method)
+    let alter_id = outbound_u16(server, "alter_id")
+        .or_else(|| outbound_u16(server, "alterId"))
+        .or_else(|| user.and_then(|user| outbound_u16(user, "alter_id")))
+        .or_else(|| user.and_then(|user| outbound_u16(user, "alterId")));
+    (address, port, username, password, method, alter_id)
 }
 
 fn parse_route_redirect_endpoint(value: &str) -> (Option<String>, Option<u16>) {
@@ -4258,6 +4282,34 @@ mod tests {
             "cdn.example.com"
         );
         assert_eq!(config["outbounds"][1]["transport"]["method"], "PUT");
+    }
+
+    #[test]
+    fn renders_keli_core_rs_vmess_alter_id_route_outbounds() {
+        let mut node = test_node("http", 101, "");
+        node.common.routes = vec![Route {
+            id: 1,
+            match_rules: vec!["domain:legacy.example.com".to_string()],
+            action: "route".to_string(),
+            action_value: Some(
+                r#"{"tag":"vmess-legacy","protocol":"vmess","settings":{"vnext":[{"address":"proxy.example.com","port":443,"users":[{"id":"11111111-1111-1111-1111-111111111111","security":"aes-128-gcm","alterId":8}]}]}}"#
+                    .to_string(),
+            ),
+        }];
+        let plan = CorePlan::from_nodes(
+            CoreKind::KeliCoreRs,
+            PathBuf::from("/srv/v2node/keli-core-rs.json"),
+            &[node],
+        )
+        .unwrap();
+
+        let config = render_core_config(&plan).unwrap();
+
+        assert_eq!(config["outbounds"][1]["tag"], "vmess-legacy");
+        assert_eq!(config["outbounds"][1]["protocol"], "vmess");
+        assert_eq!(config["outbounds"][1]["method"], "aes-128-gcm");
+        assert_eq!(config["outbounds"][1]["alter_id"], 8);
+        assert_eq!(config["routes"][0]["outbound"]["alter_id"], 8);
     }
 
     #[test]
