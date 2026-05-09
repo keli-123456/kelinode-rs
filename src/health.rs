@@ -1,4 +1,6 @@
-use serde_json::{json, Value};
+use std::{fs, path::Path};
+
+use serde_json::{json, Map, Value};
 
 use crate::config::AgentConfig;
 use crate::core::CoreKind;
@@ -8,6 +10,9 @@ use crate::port_forward::{HysteriaPortForwardStatus, HysteriaPortForwardToolStat
 use crate::process::{ProcessState, ProcessStatus};
 use crate::runtime::{RuntimeBootstrapPlan, RuntimeMode};
 use crate::subscription_proxy::SubscriptionProxyStatus;
+
+const DEFAULT_INSTALL_DIR: &str = "/usr/local/v2node";
+const INSTALLED_CORE_VERSION_FILES: &[(&str, &str)] = &[("keli-core-rs", ".keli-core-rs_version")];
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct UsageSnapshot {
@@ -167,9 +172,30 @@ fn core_value(
         "sidecars": plan.sidecar_core_plans.len(),
         "sidecar_inbounds": sidecar_inbounds,
         "sidecar_statuses": sidecar_statuses,
+        "versions": installed_core_versions_value(Path::new(DEFAULT_INSTALL_DIR)),
         "user_limits": user_limit_value(plan),
         "status": status
     })
+}
+
+fn installed_core_versions_value(install_dir: &Path) -> Value {
+    let mut versions = Map::new();
+    for (component, file_name) in INSTALLED_CORE_VERSION_FILES {
+        if let Some(version) = read_installed_version_marker(install_dir, file_name) {
+            versions.insert((*component).to_string(), Value::String(version));
+        }
+    }
+    Value::Object(versions)
+}
+
+fn read_installed_version_marker(install_dir: &Path, file_name: &str) -> Option<String> {
+    let version = fs::read_to_string(install_dir.join(file_name)).ok()?;
+    let version = version.trim();
+    if version.is_empty() {
+        None
+    } else {
+        Some(version.to_string())
+    }
 }
 
 fn user_limit_value(plan: &RuntimeBootstrapPlan) -> Value {
@@ -350,7 +376,12 @@ fn process_state_label(state: &ProcessState) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
+    use std::{
+        collections::BTreeMap,
+        fs,
+        path::PathBuf,
+        time::{SystemTime, UNIX_EPOCH},
+    };
 
     use serde_json::json;
 
@@ -365,8 +396,8 @@ mod tests {
     use crate::subscription_proxy::SubscriptionProxyStatus;
 
     use super::{
-        build_machine_status_payload, node_failure_payloads, HealthReportInput, ResourceSnapshot,
-        UsageSnapshot,
+        build_machine_status_payload, installed_core_versions_value, node_failure_payloads,
+        HealthReportInput, ResourceSnapshot, UsageSnapshot,
     };
 
     #[test]
@@ -593,6 +624,17 @@ mod tests {
     }
 
     #[test]
+    fn installed_core_versions_read_upgrade_markers() {
+        let dir = temp_test_dir("installed-core-versions");
+        fs::write(dir.join(".keli-core-rs_version"), " v0.2.0\n").unwrap();
+
+        let versions = installed_core_versions_value(&dir);
+
+        assert_eq!(versions["keli-core-rs"], json!("v0.2.0"));
+        fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
     fn node_failure_payloads_use_config_machine_id_when_present() {
         let failures = vec![NodeFailure {
             config: node_config("https://panel.example.test", 10, 22),
@@ -623,5 +665,18 @@ mod tests {
         .unwrap();
 
         NodeInfo::from_common("https://panel.example.test", node_id, common).unwrap()
+    }
+
+    fn temp_test_dir(name: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "kelinode-rs-health-{name}-{}-{nanos}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        dir
     }
 }
