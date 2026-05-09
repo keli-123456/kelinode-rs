@@ -565,20 +565,25 @@ fn keli_core_rs_route_outbound(
         .map(str::trim)
         .unwrap_or_default();
     let protocol = protocol.to_ascii_lowercase();
-    if !matches!(protocol.as_str(), "freedom" | "socks" | "socks5" | "http") {
+    if !matches!(
+        protocol.as_str(),
+        "freedom" | "socks" | "socks5" | "http" | "shadowsocks"
+    ) {
         return Err(CoreError::new(format!(
             "keli-core-rs route outbound {tag} protocol {protocol} on inbound {} is not supported yet",
             inbound.tag
         )));
     }
 
-    let (address, port, username, password) = keli_core_rs_route_outbound_endpoint(&outbound);
+    let (address, port, username, password, method) =
+        keli_core_rs_route_outbound_endpoint(&outbound);
 
     Ok(Some((
         tag.clone(),
         json!({
             "tag": tag,
             "protocol": protocol,
+            "method": method,
             "address": address,
             "port": port,
             "username": username,
@@ -589,7 +594,13 @@ fn keli_core_rs_route_outbound(
 
 fn keli_core_rs_route_outbound_endpoint(
     outbound: &Value,
-) -> (Option<String>, Option<u16>, Option<String>, Option<String>) {
+) -> (
+    Option<String>,
+    Option<u16>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+) {
     let address = outbound
         .get("address")
         .and_then(Value::as_str)
@@ -606,9 +617,11 @@ fn keli_core_rs_route_outbound_endpoint(
             port,
             outbound_string(outbound, "username").or_else(|| outbound_string(outbound, "user")),
             outbound_string(outbound, "password").or_else(|| outbound_string(outbound, "pass")),
+            outbound_string(outbound, "method").or_else(|| outbound_string(outbound, "cipher")),
         );
     }
 
+    let settings = outbound.get("settings");
     let redirect = outbound
         .get("settings")
         .and_then(|settings| settings.get("redirect"))
@@ -617,16 +630,29 @@ fn keli_core_rs_route_outbound_endpoint(
         .filter(|value| !value.is_empty());
     if let Some(redirect) = redirect {
         let (address, port) = parse_route_redirect_endpoint(redirect);
-        return (address, port, None, None);
+        return (address, port, None, None, None);
     }
 
+    let settings_method = settings
+        .and_then(|settings| outbound_string(settings, "method"))
+        .or_else(|| settings.and_then(|settings| outbound_string(settings, "cipher")));
     outbound
         .get("settings")
         .and_then(|settings| settings.get("servers"))
         .and_then(Value::as_array)
         .and_then(|servers| servers.first())
-        .map(keli_core_rs_route_outbound_server_endpoint)
-        .unwrap_or((None, None, None, None))
+        .map(|server| {
+            let (address, port, username, password, method) =
+                keli_core_rs_route_outbound_server_endpoint(server);
+            (
+                address,
+                port,
+                username,
+                password,
+                method.or_else(|| settings_method.clone()),
+            )
+        })
+        .unwrap_or((None, None, None, None, settings_method))
 }
 
 fn outbound_string(value: &Value, key: &str) -> Option<String> {
@@ -640,7 +666,13 @@ fn outbound_string(value: &Value, key: &str) -> Option<String> {
 
 fn keli_core_rs_route_outbound_server_endpoint(
     server: &Value,
-) -> (Option<String>, Option<u16>, Option<String>, Option<String>) {
+) -> (
+    Option<String>,
+    Option<u16>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+) {
     let address = outbound_string(server, "address");
     let port = server
         .get("port")
@@ -658,7 +690,11 @@ fn keli_core_rs_route_outbound_server_endpoint(
         .or_else(|| outbound_string(server, "pass"))
         .or_else(|| user.and_then(|user| outbound_string(user, "pass")))
         .or_else(|| user.and_then(|user| outbound_string(user, "password")));
-    (address, port, username, password)
+    let method = outbound_string(server, "method")
+        .or_else(|| outbound_string(server, "cipher"))
+        .or_else(|| user.and_then(|user| outbound_string(user, "method")))
+        .or_else(|| user.and_then(|user| outbound_string(user, "cipher")));
+    (address, port, username, password, method)
 }
 
 fn parse_route_redirect_endpoint(value: &str) -> (Option<String>, Option<u16>) {
@@ -3415,6 +3451,36 @@ mod tests {
         assert_eq!(config["outbounds"][1]["username"], "alice");
         assert_eq!(config["outbounds"][1]["password"], "secret");
         assert_eq!(config["routes"][0]["outbound"]["protocol"], "socks");
+    }
+
+    #[test]
+    fn renders_keli_core_rs_shadowsocks_route_outbounds() {
+        let mut node = test_node("http", 84, "");
+        node.common.routes = vec![Route {
+            id: 1,
+            match_rules: vec!["geosite:openai".to_string()],
+            action: "route".to_string(),
+            action_value: Some(
+                r#"{"tag":"ss-out","protocol":"shadowsocks","settings":{"servers":[{"address":"127.0.0.1","port":8388,"method":"aes-128-gcm","password":"secret"}]}}"#
+                    .to_string(),
+            ),
+        }];
+        let plan = CorePlan::from_nodes(
+            CoreKind::KeliCoreRs,
+            PathBuf::from("/srv/v2node/keli-core-rs.json"),
+            &[node],
+        )
+        .unwrap();
+
+        let config = render_core_config(&plan).unwrap();
+
+        assert_eq!(config["outbounds"][1]["tag"], "ss-out");
+        assert_eq!(config["outbounds"][1]["protocol"], "shadowsocks");
+        assert_eq!(config["outbounds"][1]["method"], "aes-128-gcm");
+        assert_eq!(config["outbounds"][1]["address"], "127.0.0.1");
+        assert_eq!(config["outbounds"][1]["port"], 8388);
+        assert_eq!(config["outbounds"][1]["password"], "secret");
+        assert_eq!(config["routes"][0]["outbound"]["method"], "aes-128-gcm");
     }
 
     #[test]
