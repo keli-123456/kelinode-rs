@@ -651,9 +651,9 @@ fn keli_core_rs_route_outbound_stream(
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .unwrap_or("tcp");
-    if !matches!(network, "tcp" | "ws" | "httpupgrade") {
+    if !matches!(network, "tcp" | "ws" | "httpupgrade" | "grpc") {
         return Err(CoreError::new(format!(
-            "keli-core-rs route outbound {tag} on inbound {} supports only tcp/ws/httpupgrade today; network {network} is not supported yet",
+            "keli-core-rs route outbound {tag} on inbound {} supports only tcp/ws/httpupgrade/grpc today; network {network} is not supported yet",
             inbound.tag
         )));
     }
@@ -675,6 +675,7 @@ fn keli_core_rs_route_outbound_stream(
                 || (security == "tls" && key == "tlsSettings")
                 || (network == "ws" && key == "wsSettings")
                 || (network == "httpupgrade" && key == "httpupgradeSettings")
+                || (network == "grpc" && key == "grpcSettings")
                 || is_empty_json(value)
             {
                 continue;
@@ -703,6 +704,7 @@ fn keli_core_rs_route_outbound_stream(
         "httpupgrade" => stream_settings
             .get("httpupgradeSettings")
             .unwrap_or(&Value::Null),
+        "grpc" => stream_settings.get("grpcSettings").unwrap_or(&Value::Null),
         _ => &Value::Null,
     };
     let transport_host = outbound_string(transport_settings, "host")
@@ -716,12 +718,26 @@ fn keli_core_rs_route_outbound_stream(
                 .get("headers")
                 .and_then(|headers| outbound_string(headers, "host"))
         });
-    let transport = if matches!(network, "ws" | "httpupgrade") {
+    let transport_service_name = outbound_string(transport_settings, "serviceName")
+        .or_else(|| outbound_string(transport_settings, "service_name"));
+    let transport = if matches!(network, "ws" | "httpupgrade" | "grpc") {
         Some(json!({
             "network": network,
-            "path": outbound_string(transport_settings, "path"),
-            "host": transport_host,
-            "service_name": null
+            "path": if matches!(network, "ws" | "httpupgrade") {
+                outbound_string(transport_settings, "path")
+            } else {
+                None
+            },
+            "host": if matches!(network, "ws" | "httpupgrade") {
+                transport_host
+            } else {
+                None
+            },
+            "service_name": if network == "grpc" {
+                transport_service_name
+            } else {
+                None
+            }
         }))
     } else {
         None
@@ -3815,6 +3831,38 @@ mod tests {
     }
 
     #[test]
+    fn renders_keli_core_rs_trojan_grpc_route_outbounds() {
+        let mut node = test_node("http", 95, "");
+        node.common.routes = vec![Route {
+            id: 1,
+            match_rules: vec!["domain:example.com".to_string()],
+            action: "route".to_string(),
+            action_value: Some(
+                r#"{"tag":"trojan-grpc","protocol":"trojan","settings":{"servers":[{"address":"proxy.example.com","port":443,"password":"secret"}]},"streamSettings":{"network":"grpc","security":"tls","tlsSettings":{"serverName":"sni.example.com","allowInsecure":true,"alpn":["h2"]},"grpcSettings":{"serviceName":"GunService"}}}"#
+                    .to_string(),
+            ),
+        }];
+        let plan = CorePlan::from_nodes(
+            CoreKind::KeliCoreRs,
+            PathBuf::from("/srv/v2node/keli-core-rs.json"),
+            &[node],
+        )
+        .unwrap();
+
+        let config = render_core_config(&plan).unwrap();
+
+        assert_eq!(config["outbounds"][1]["tag"], "trojan-grpc");
+        assert_eq!(config["outbounds"][1]["protocol"], "trojan");
+        assert_eq!(config["outbounds"][1]["transport"]["network"], "grpc");
+        assert_eq!(
+            config["outbounds"][1]["transport"]["service_name"],
+            "GunService"
+        );
+        assert!(config["outbounds"][1]["transport"]["path"].is_null());
+        assert!(config["outbounds"][1]["transport"]["host"].is_null());
+    }
+
+    #[test]
     fn renders_keli_core_rs_vless_route_outbounds() {
         let mut node = test_node("http", 87, "");
         node.common.routes = vec![Route {
@@ -3958,6 +4006,38 @@ mod tests {
     }
 
     #[test]
+    fn renders_keli_core_rs_vless_grpc_route_outbounds() {
+        let mut node = test_node("http", 96, "");
+        node.common.routes = vec![Route {
+            id: 1,
+            match_rules: vec!["geosite:openai".to_string()],
+            action: "route".to_string(),
+            action_value: Some(
+                r#"{"tag":"vless-grpc","protocol":"vless","settings":{"vnext":[{"address":"proxy.example.com","port":443,"users":[{"id":"11111111-1111-1111-1111-111111111111","encryption":"none"}]}]},"streamSettings":{"network":"grpc","security":"tls","tlsSettings":{"serverName":"sni.example.com","allowInsecure":true},"grpcSettings":{"serviceName":"GunService"}}}"#
+                    .to_string(),
+            ),
+        }];
+        let plan = CorePlan::from_nodes(
+            CoreKind::KeliCoreRs,
+            PathBuf::from("/srv/v2node/keli-core-rs.json"),
+            &[node],
+        )
+        .unwrap();
+
+        let config = render_core_config(&plan).unwrap();
+
+        assert_eq!(config["outbounds"][1]["tag"], "vless-grpc");
+        assert_eq!(config["outbounds"][1]["protocol"], "vless");
+        assert_eq!(config["outbounds"][1]["transport"]["network"], "grpc");
+        assert_eq!(
+            config["outbounds"][1]["transport"]["service_name"],
+            "GunService"
+        );
+        assert!(config["outbounds"][1]["transport"]["path"].is_null());
+        assert!(config["outbounds"][1]["transport"]["host"].is_null());
+    }
+
+    #[test]
     fn keli_core_rs_rejects_unsupported_route_outbound() {
         let mut node = test_node("http", 83, "");
         node.common.routes = vec![Route {
@@ -3986,7 +4066,7 @@ mod tests {
             match_rules: vec!["domain:example.com".to_string()],
             action: "route".to_string(),
             action_value: Some(
-                r#"{"tag":"vless-out","protocol":"vless","settings":{"vnext":[{"address":"proxy.example.com","port":443,"users":[{"id":"11111111-1111-1111-1111-111111111111","encryption":"none"}]}]},"streamSettings":{"network":"grpc","grpcSettings":{"serviceName":"GunService"}}}"#
+                r#"{"tag":"vless-out","protocol":"vless","settings":{"vnext":[{"address":"proxy.example.com","port":443,"users":[{"id":"11111111-1111-1111-1111-111111111111","encryption":"none"}]}]},"streamSettings":{"network":"h2","httpSettings":{"path":"/vless"}}}"#
                     .to_string(),
             ),
         }];
@@ -3997,7 +4077,9 @@ mod tests {
         )
         .unwrap();
         let err = render_core_config(&plan).unwrap_err();
-        assert!(err.message.contains("supports only tcp/ws/httpupgrade"));
+        assert!(err
+            .message
+            .contains("supports only tcp/ws/httpupgrade/grpc"));
 
         let mut node = test_node("http", 89, "");
         node.common.routes = vec![Route {
