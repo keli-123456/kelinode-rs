@@ -567,7 +567,7 @@ fn keli_core_rs_route_outbound(
     let protocol = protocol.to_ascii_lowercase();
     if !matches!(
         protocol.as_str(),
-        "freedom" | "socks" | "socks5" | "http" | "shadowsocks" | "trojan" | "vless"
+        "freedom" | "socks" | "socks5" | "http" | "shadowsocks" | "trojan" | "vless" | "vmess"
     ) {
         return Err(CoreError::new(format!(
             "keli-core-rs route outbound {tag} protocol {protocol} on inbound {} is not supported yet",
@@ -575,7 +575,7 @@ fn keli_core_rs_route_outbound(
         )));
     }
     let (tls, transport) = match protocol.as_str() {
-        "trojan" => keli_core_rs_route_outbound_stream(inbound, &tag, &outbound)?,
+        "trojan" | "vmess" => keli_core_rs_route_outbound_stream(inbound, &tag, &outbound)?,
         "vless" => keli_core_rs_route_outbound_vless_stream(inbound, &tag, &outbound)?,
         _ => (None, None),
     };
@@ -613,6 +613,31 @@ fn keli_core_rs_route_outbound(
         {
             return Err(CoreError::new(format!(
                 "keli-core-rs route outbound {tag} on inbound {} vless flow is not supported yet",
+                inbound.tag
+            )));
+        }
+    }
+    if protocol == "vmess" {
+        if address
+            .as_deref()
+            .map(str::trim)
+            .map(str::is_empty)
+            .unwrap_or(true)
+            || port.is_none()
+        {
+            return Err(CoreError::new(format!(
+                "keli-core-rs route outbound {tag} on inbound {} requires vmess address and port",
+                inbound.tag
+            )));
+        }
+        if username
+            .as_deref()
+            .map(str::trim)
+            .map(str::is_empty)
+            .unwrap_or(true)
+        {
+            return Err(CoreError::new(format!(
+                "keli-core-rs route outbound {tag} on inbound {} requires vmess users[0].id",
                 inbound.tag
             )));
         }
@@ -900,8 +925,10 @@ fn keli_core_rs_route_outbound_server_endpoint(
         .or_else(|| user.and_then(|user| outbound_string(user, "password")));
     let method = outbound_string(server, "method")
         .or_else(|| outbound_string(server, "cipher"))
+        .or_else(|| outbound_string(server, "security"))
         .or_else(|| user.and_then(|user| outbound_string(user, "method")))
         .or_else(|| user.and_then(|user| outbound_string(user, "cipher")))
+        .or_else(|| user.and_then(|user| outbound_string(user, "security")))
         .or_else(|| user.and_then(|user| outbound_string(user, "flow")));
     (address, port, username, password, method)
 }
@@ -4038,13 +4065,113 @@ mod tests {
     }
 
     #[test]
+    fn renders_keli_core_rs_vmess_websocket_route_outbounds() {
+        let mut node = test_node("http", 97, "");
+        node.common.routes = vec![Route {
+            id: 1,
+            match_rules: vec!["geosite:openai".to_string()],
+            action: "route".to_string(),
+            action_value: Some(
+                r#"{"tag":"vmess-ws","protocol":"vmess","settings":{"vnext":[{"address":"proxy.example.com","port":443,"users":[{"id":"11111111-1111-1111-1111-111111111111","security":"aes-128-gcm"}]}]},"streamSettings":{"network":"ws","security":"tls","tlsSettings":{"serverName":"sni.example.com","allowInsecure":true},"wsSettings":{"path":"/vmess","headers":{"Host":"cdn.example.com"}}}}"#
+                    .to_string(),
+            ),
+        }];
+        let plan = CorePlan::from_nodes(
+            CoreKind::KeliCoreRs,
+            PathBuf::from("/srv/v2node/keli-core-rs.json"),
+            &[node],
+        )
+        .unwrap();
+
+        let config = render_core_config(&plan).unwrap();
+
+        assert_eq!(config["outbounds"][1]["tag"], "vmess-ws");
+        assert_eq!(config["outbounds"][1]["protocol"], "vmess");
+        assert_eq!(config["outbounds"][1]["method"], "aes-128-gcm");
+        assert_eq!(config["outbounds"][1]["transport"]["network"], "ws");
+        assert_eq!(config["outbounds"][1]["transport"]["path"], "/vmess");
+        assert_eq!(
+            config["outbounds"][1]["transport"]["host"],
+            "cdn.example.com"
+        );
+    }
+
+    #[test]
+    fn renders_keli_core_rs_vmess_httpupgrade_route_outbounds() {
+        let mut node = test_node("http", 98, "");
+        node.common.routes = vec![Route {
+            id: 1,
+            match_rules: vec!["domain:example.com".to_string()],
+            action: "route".to_string(),
+            action_value: Some(
+                r#"{"tag":"vmess-httpupgrade","protocol":"vmess","settings":{"vnext":[{"address":"proxy.example.com","port":443,"users":[{"id":"11111111-1111-1111-1111-111111111111","security":"chacha20-poly1305"}]}]},"streamSettings":{"network":"httpupgrade","security":"tls","tlsSettings":{"serverName":"sni.example.com","allowInsecure":true},"httpupgradeSettings":{"path":"/vmess","host":"cdn.example.com"}}}"#
+                    .to_string(),
+            ),
+        }];
+        let plan = CorePlan::from_nodes(
+            CoreKind::KeliCoreRs,
+            PathBuf::from("/srv/v2node/keli-core-rs.json"),
+            &[node],
+        )
+        .unwrap();
+
+        let config = render_core_config(&plan).unwrap();
+
+        assert_eq!(config["outbounds"][1]["tag"], "vmess-httpupgrade");
+        assert_eq!(config["outbounds"][1]["protocol"], "vmess");
+        assert_eq!(config["outbounds"][1]["method"], "chacha20-poly1305");
+        assert_eq!(
+            config["outbounds"][1]["transport"]["network"],
+            "httpupgrade"
+        );
+        assert_eq!(config["outbounds"][1]["transport"]["path"], "/vmess");
+        assert_eq!(
+            config["outbounds"][1]["transport"]["host"],
+            "cdn.example.com"
+        );
+    }
+
+    #[test]
+    fn renders_keli_core_rs_vmess_grpc_route_outbounds() {
+        let mut node = test_node("http", 99, "");
+        node.common.routes = vec![Route {
+            id: 1,
+            match_rules: vec!["geosite:openai".to_string()],
+            action: "route".to_string(),
+            action_value: Some(
+                r#"{"tag":"vmess-grpc","protocol":"vmess","settings":{"vnext":[{"address":"proxy.example.com","port":443,"users":[{"id":"11111111-1111-1111-1111-111111111111","security":"auto"}]}]},"streamSettings":{"network":"grpc","security":"tls","tlsSettings":{"serverName":"sni.example.com","allowInsecure":true},"grpcSettings":{"serviceName":"GunService"}}}"#
+                    .to_string(),
+            ),
+        }];
+        let plan = CorePlan::from_nodes(
+            CoreKind::KeliCoreRs,
+            PathBuf::from("/srv/v2node/keli-core-rs.json"),
+            &[node],
+        )
+        .unwrap();
+
+        let config = render_core_config(&plan).unwrap();
+
+        assert_eq!(config["outbounds"][1]["tag"], "vmess-grpc");
+        assert_eq!(config["outbounds"][1]["protocol"], "vmess");
+        assert_eq!(config["outbounds"][1]["method"], "auto");
+        assert_eq!(config["outbounds"][1]["transport"]["network"], "grpc");
+        assert_eq!(
+            config["outbounds"][1]["transport"]["service_name"],
+            "GunService"
+        );
+        assert!(config["outbounds"][1]["transport"]["path"].is_null());
+        assert!(config["outbounds"][1]["transport"]["host"].is_null());
+    }
+
+    #[test]
     fn keli_core_rs_rejects_unsupported_route_outbound() {
         let mut node = test_node("http", 83, "");
         node.common.routes = vec![Route {
             id: 1,
             match_rules: vec!["domain:example.com".to_string()],
             action: "route".to_string(),
-            action_value: Some(r#"{"tag":"proxy","protocol":"vmess"}"#.to_string()),
+            action_value: Some(r#"{"tag":"proxy","protocol":"naive"}"#.to_string()),
         }];
         let plan = CorePlan::from_nodes(
             CoreKind::KeliCoreRs,
@@ -4055,7 +4182,7 @@ mod tests {
 
         let err = render_core_config(&plan).unwrap_err();
 
-        assert!(err.message.contains("protocol vmess"));
+        assert!(err.message.contains("protocol naive"));
     }
 
     #[test]
