@@ -132,6 +132,15 @@ kernel:
 
 Leave `core_command` empty when the binary name `keli-core-rs` resolves from `PATH`.
 
+For native `geoip:` and `geosite:` route rules, place optional text rule files next to the generated core config:
+
+```text
+/etc/v2node/geoip/<rule>.txt
+/etc/v2node/geosite/<rule>.txt
+```
+
+For example, `geosite:openai` reads `/etc/v2node/geosite/openai.txt` when that file exists. Multi-node deployments that use per-node config directories keep their rule files under each node's generated config directory.
+
 ## Sidecar Process Example
 
 Mieru sidecar nodes can run `mita` with the generated config path passed through an environment variable:
