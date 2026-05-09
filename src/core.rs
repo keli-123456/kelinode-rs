@@ -611,10 +611,19 @@ fn keli_core_rs_route_outbound(
             .map(str::trim)
             .is_some_and(|value| !value.is_empty())
         {
-            return Err(CoreError::new(format!(
-                "keli-core-rs route outbound {tag} on inbound {} vless flow is not supported yet",
-                inbound.tag
-            )));
+            let flow = method.as_deref().unwrap_or_default().trim();
+            if flow != "xtls-rprx-vision" {
+                return Err(CoreError::new(format!(
+                    "keli-core-rs route outbound {tag} on inbound {} supports only vless xtls-rprx-vision flow; flow {flow} is not supported yet",
+                    inbound.tag
+                )));
+            }
+            if tls.is_none() || transport.is_some() {
+                return Err(CoreError::new(format!(
+                    "keli-core-rs route outbound {tag} on inbound {} supports vless flow only on tcp tls",
+                    inbound.tag
+                )));
+            }
         }
     }
     if protocol == "vmess" {
@@ -3960,6 +3969,37 @@ mod tests {
     }
 
     #[test]
+    fn renders_keli_core_rs_vless_vision_route_outbounds() {
+        let mut node = test_node("http", 98, "");
+        node.common.routes = vec![Route {
+            id: 1,
+            match_rules: vec!["geosite:openai".to_string()],
+            action: "route".to_string(),
+            action_value: Some(
+                r#"{"tag":"vless-vision","protocol":"vless","settings":{"vnext":[{"address":"proxy.example.com","port":443,"users":[{"id":"11111111-1111-1111-1111-111111111111","flow":"xtls-rprx-vision","encryption":"none"}]}]},"streamSettings":{"network":"tcp","security":"tls","tlsSettings":{"serverName":"sni.example.com","allowInsecure":true}}}"#
+                    .to_string(),
+            ),
+        }];
+        let plan = CorePlan::from_nodes(
+            CoreKind::KeliCoreRs,
+            PathBuf::from("/srv/v2node/keli-core-rs.json"),
+            &[node],
+        )
+        .unwrap();
+
+        let config = render_core_config(&plan).unwrap();
+
+        assert_eq!(config["outbounds"][1]["tag"], "vless-vision");
+        assert_eq!(config["outbounds"][1]["protocol"], "vless");
+        assert_eq!(config["outbounds"][1]["method"], "xtls-rprx-vision");
+        assert_eq!(
+            config["outbounds"][1]["tls"]["server_name"],
+            "sni.example.com"
+        );
+        assert!(config["outbounds"][1]["transport"].is_null());
+    }
+
+    #[test]
     fn renders_keli_core_rs_vless_websocket_route_outbounds() {
         let mut node = test_node("http", 91, "");
         node.common.routes = vec![Route {
@@ -4225,7 +4265,7 @@ mod tests {
         )
         .unwrap();
         let err = render_core_config(&plan).unwrap_err();
-        assert!(err.message.contains("vless flow is not supported"));
+        assert!(err.message.contains("vless flow only on tcp tls"));
     }
 
     #[test]
