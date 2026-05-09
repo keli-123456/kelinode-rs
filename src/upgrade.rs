@@ -376,9 +376,11 @@ fn release_upgrade_shell_script(target_version: &str, spec: &ReleaseUpgradeSpec)
     lines.push("  restore_backup".to_string());
     lines.push("  exit 1".to_string());
     lines.push("fi".to_string());
+    lines.push("if [ \"$component\" = \"kelinode-rs\" ]; then".to_string());
     lines.push(
-        "printf '%s\\n' \"$target_version\" > \"$install_dir/.installed_version\"".to_string(),
+        "  printf '%s\\n' \"$target_version\" > \"$install_dir/.installed_version\"".to_string(),
     );
+    lines.push("fi".to_string());
     lines.push(
         "printf '%s\\n' \"$target_version\" > \"$install_dir/.${component}_version\"".to_string(),
     );
@@ -635,7 +637,8 @@ mod tests {
         assert!(script.contains("tar -xzf \"$archive_file\""));
         assert!(script.contains("cp \"$extracted_binary\" \"$install_dir/$binary_name\""));
         assert!(script.contains("${install_dir}.backup.${component}.${target_version}."));
-        assert!(script.contains(".installed_version"));
+        assert!(script.contains("if [ \"$component\" = \"kelinode-rs\" ]; then"));
+        assert!(script.contains("$install_dir/.installed_version"));
         assert!(script.contains(".${component}_version"));
         assert!(script.contains("normalize_version"));
         assert!(script.contains("rm -rf \"$backup_dir\""));
@@ -650,6 +653,8 @@ mod tests {
         assert!(script.contains("binary_name='keli-core-rs'"));
         assert!(script.contains("keli-core-rs-v0.1.1-linux-x86_64.manifest.json"));
         assert!(script.contains("keli-core-rs-v0.1.1-linux-x86_64.tar.gz"));
+        assert!(script.contains("if [ \"$component\" = \"kelinode-rs\" ]; then"));
+        assert!(script.contains("$install_dir/.${component}_version"));
     }
 
     #[test]
