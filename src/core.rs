@@ -651,9 +651,9 @@ fn keli_core_rs_route_outbound_stream(
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .unwrap_or("tcp");
-    if !matches!(network, "tcp" | "ws") {
+    if !matches!(network, "tcp" | "ws" | "httpupgrade") {
         return Err(CoreError::new(format!(
-            "keli-core-rs route outbound {tag} on inbound {} supports only tcp/ws today; network {network} is not supported yet",
+            "keli-core-rs route outbound {tag} on inbound {} supports only tcp/ws/httpupgrade today; network {network} is not supported yet",
             inbound.tag
         )));
     }
@@ -674,6 +674,7 @@ fn keli_core_rs_route_outbound_stream(
             if matches!(key.as_str(), "network" | "security")
                 || (security == "tls" && key == "tlsSettings")
                 || (network == "ws" && key == "wsSettings")
+                || (network == "httpupgrade" && key == "httpupgradeSettings")
                 || is_empty_json(value)
             {
                 continue;
@@ -697,23 +698,29 @@ fn keli_core_rs_route_outbound_stream(
     } else {
         None
     };
-    let ws_settings = stream_settings.get("wsSettings").unwrap_or(&Value::Null);
-    let ws_host = outbound_string(ws_settings, "host")
+    let transport_settings = match network {
+        "ws" => stream_settings.get("wsSettings").unwrap_or(&Value::Null),
+        "httpupgrade" => stream_settings
+            .get("httpupgradeSettings")
+            .unwrap_or(&Value::Null),
+        _ => &Value::Null,
+    };
+    let transport_host = outbound_string(transport_settings, "host")
         .or_else(|| {
-            ws_settings
+            transport_settings
                 .get("headers")
                 .and_then(|headers| outbound_string(headers, "Host"))
         })
         .or_else(|| {
-            ws_settings
+            transport_settings
                 .get("headers")
                 .and_then(|headers| outbound_string(headers, "host"))
         });
-    let transport = if network == "ws" {
+    let transport = if matches!(network, "ws" | "httpupgrade") {
         Some(json!({
-            "network": "ws",
-            "path": outbound_string(ws_settings, "path"),
-            "host": ws_host,
+            "network": network,
+            "path": outbound_string(transport_settings, "path"),
+            "host": transport_host,
             "service_name": null
         }))
     } else {
@@ -3770,6 +3777,44 @@ mod tests {
     }
 
     #[test]
+    fn renders_keli_core_rs_trojan_httpupgrade_route_outbounds() {
+        let mut node = test_node("http", 93, "");
+        node.common.routes = vec![Route {
+            id: 1,
+            match_rules: vec!["domain:example.com".to_string()],
+            action: "route".to_string(),
+            action_value: Some(
+                r#"{"tag":"trojan-httpupgrade","protocol":"trojan","settings":{"servers":[{"address":"proxy.example.com","port":443,"password":"secret"}]},"streamSettings":{"network":"httpupgrade","security":"tls","tlsSettings":{"serverName":"sni.example.com","allowInsecure":true},"httpupgradeSettings":{"path":"/trojan","host":"cdn.example.com"}}}"#
+                    .to_string(),
+            ),
+        }];
+        let plan = CorePlan::from_nodes(
+            CoreKind::KeliCoreRs,
+            PathBuf::from("/srv/v2node/keli-core-rs.json"),
+            &[node],
+        )
+        .unwrap();
+
+        let config = render_core_config(&plan).unwrap();
+
+        assert_eq!(config["outbounds"][1]["tag"], "trojan-httpupgrade");
+        assert_eq!(config["outbounds"][1]["protocol"], "trojan");
+        assert_eq!(
+            config["outbounds"][1]["tls"]["server_name"],
+            "sni.example.com"
+        );
+        assert_eq!(
+            config["outbounds"][1]["transport"]["network"],
+            "httpupgrade"
+        );
+        assert_eq!(config["outbounds"][1]["transport"]["path"], "/trojan");
+        assert_eq!(
+            config["outbounds"][1]["transport"]["host"],
+            "cdn.example.com"
+        );
+    }
+
+    #[test]
     fn renders_keli_core_rs_vless_route_outbounds() {
         let mut node = test_node("http", 87, "");
         node.common.routes = vec![Route {
@@ -3875,6 +3920,44 @@ mod tests {
     }
 
     #[test]
+    fn renders_keli_core_rs_vless_httpupgrade_route_outbounds() {
+        let mut node = test_node("http", 94, "");
+        node.common.routes = vec![Route {
+            id: 1,
+            match_rules: vec!["geosite:openai".to_string()],
+            action: "route".to_string(),
+            action_value: Some(
+                r#"{"tag":"vless-httpupgrade","protocol":"vless","settings":{"vnext":[{"address":"proxy.example.com","port":443,"users":[{"id":"11111111-1111-1111-1111-111111111111","encryption":"none"}]}]},"streamSettings":{"network":"httpupgrade","security":"tls","tlsSettings":{"serverName":"sni.example.com","allowInsecure":true},"httpupgradeSettings":{"path":"/vless","host":"cdn.example.com"}}}"#
+                    .to_string(),
+            ),
+        }];
+        let plan = CorePlan::from_nodes(
+            CoreKind::KeliCoreRs,
+            PathBuf::from("/srv/v2node/keli-core-rs.json"),
+            &[node],
+        )
+        .unwrap();
+
+        let config = render_core_config(&plan).unwrap();
+
+        assert_eq!(config["outbounds"][1]["tag"], "vless-httpupgrade");
+        assert_eq!(config["outbounds"][1]["protocol"], "vless");
+        assert_eq!(
+            config["outbounds"][1]["tls"]["server_name"],
+            "sni.example.com"
+        );
+        assert_eq!(
+            config["outbounds"][1]["transport"]["network"],
+            "httpupgrade"
+        );
+        assert_eq!(config["outbounds"][1]["transport"]["path"], "/vless");
+        assert_eq!(
+            config["outbounds"][1]["transport"]["host"],
+            "cdn.example.com"
+        );
+    }
+
+    #[test]
     fn keli_core_rs_rejects_unsupported_route_outbound() {
         let mut node = test_node("http", 83, "");
         node.common.routes = vec![Route {
@@ -3914,7 +3997,7 @@ mod tests {
         )
         .unwrap();
         let err = render_core_config(&plan).unwrap_err();
-        assert!(err.message.contains("supports only tcp/ws"));
+        assert!(err.message.contains("supports only tcp/ws/httpupgrade"));
 
         let mut node = test_node("http", 89, "");
         node.common.routes = vec![Route {
