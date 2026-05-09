@@ -4205,6 +4205,33 @@ mod tests {
     }
 
     #[test]
+    fn renders_keli_core_rs_vmess_udp_route_outbounds() {
+        let mut node = test_node("vmess", 76, "");
+        node.common.routes = vec![Route {
+            id: 1,
+            match_rules: vec!["network:udp".to_string()],
+            action: "route".to_string(),
+            action_value: Some(
+                r#"{"tag":"vmess-udp","protocol":"vmess","settings":{"vnext":[{"address":"proxy.example.com","port":443,"users":[{"id":"11111111-1111-1111-1111-111111111111","security":"auto"}]}]}}"#
+                    .to_string(),
+            ),
+        }];
+        let plan = CorePlan::from_nodes(
+            CoreKind::KeliCoreRs,
+            PathBuf::from("/srv/v2node/keli-core-rs.json"),
+            &[node],
+        )
+        .unwrap();
+
+        let config = render_core_config(&plan).unwrap();
+
+        assert_eq!(config["routes"][0]["targets"][0], "network:udp");
+        assert_eq!(config["routes"][0]["outbound"]["tag"], "vmess-udp");
+        assert_eq!(config["outbounds"][1]["protocol"], "vmess");
+        assert_eq!(config["outbounds"][1]["address"], "proxy.example.com");
+    }
+
+    #[test]
     fn keli_core_rs_rejects_unsupported_route_outbound() {
         let mut node = test_node("http", 83, "");
         node.common.routes = vec![Route {
