@@ -567,12 +567,15 @@ fn keli_core_rs_route_outbound(
     let protocol = protocol.to_ascii_lowercase();
     if !matches!(
         protocol.as_str(),
-        "freedom" | "socks" | "socks5" | "http" | "shadowsocks"
+        "freedom" | "socks" | "socks5" | "http" | "shadowsocks" | "trojan"
     ) {
         return Err(CoreError::new(format!(
             "keli-core-rs route outbound {tag} protocol {protocol} on inbound {} is not supported yet",
             inbound.tag
         )));
+    }
+    if protocol == "trojan" {
+        validate_plain_tcp_route_outbound_stream(inbound, &tag, &outbound)?;
     }
 
     let (address, port, username, password, method) =
@@ -590,6 +593,65 @@ fn keli_core_rs_route_outbound(
             "password": password
         }),
     )))
+}
+
+fn validate_plain_tcp_route_outbound_stream(
+    inbound: &InboundPlan,
+    tag: &str,
+    outbound: &Value,
+) -> Result<(), CoreError> {
+    let Some(stream_settings) = outbound
+        .get("streamSettings")
+        .filter(|value| !value.is_null())
+    else {
+        return Ok(());
+    };
+    let network = stream_settings
+        .get("network")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("tcp");
+    if network != "tcp" {
+        return Err(CoreError::new(format!(
+            "keli-core-rs route outbound {tag} on inbound {} supports only plain tcp today; network {network} is not supported yet",
+            inbound.tag
+        )));
+    }
+    let security = stream_settings
+        .get("security")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("none");
+    if security != "none" {
+        return Err(CoreError::new(format!(
+            "keli-core-rs route outbound {tag} on inbound {} supports only security none today; security {security} is not supported yet",
+            inbound.tag
+        )));
+    }
+    if let Some(object) = stream_settings.as_object() {
+        for (key, value) in object {
+            if matches!(key.as_str(), "network" | "security") || is_empty_json(value) {
+                continue;
+            }
+            return Err(CoreError::new(format!(
+                "keli-core-rs route outbound {tag} on inbound {} does not support streamSettings.{key} yet",
+                inbound.tag
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn is_empty_json(value: &Value) -> bool {
+    match value {
+        Value::Null => true,
+        Value::String(value) => value.trim().is_empty(),
+        Value::Array(value) => value.is_empty(),
+        Value::Object(value) => value.is_empty(),
+        _ => false,
+    }
 }
 
 fn keli_core_rs_route_outbound_endpoint(
@@ -3481,6 +3543,59 @@ mod tests {
         assert_eq!(config["outbounds"][1]["port"], 8388);
         assert_eq!(config["outbounds"][1]["password"], "secret");
         assert_eq!(config["routes"][0]["outbound"]["method"], "aes-128-gcm");
+    }
+
+    #[test]
+    fn renders_keli_core_rs_trojan_route_outbounds() {
+        let mut node = test_node("http", 85, "");
+        node.common.routes = vec![Route {
+            id: 1,
+            match_rules: vec!["domain:example.com".to_string()],
+            action: "route".to_string(),
+            action_value: Some(
+                r#"{"tag":"trojan-out","protocol":"trojan","settings":{"servers":[{"address":"proxy.example.com","port":443,"password":"secret"}]}}"#
+                    .to_string(),
+            ),
+        }];
+        let plan = CorePlan::from_nodes(
+            CoreKind::KeliCoreRs,
+            PathBuf::from("/srv/v2node/keli-core-rs.json"),
+            &[node],
+        )
+        .unwrap();
+
+        let config = render_core_config(&plan).unwrap();
+
+        assert_eq!(config["outbounds"][1]["tag"], "trojan-out");
+        assert_eq!(config["outbounds"][1]["protocol"], "trojan");
+        assert_eq!(config["outbounds"][1]["address"], "proxy.example.com");
+        assert_eq!(config["outbounds"][1]["port"], 443);
+        assert_eq!(config["outbounds"][1]["password"], "secret");
+        assert_eq!(config["routes"][0]["outbound"]["protocol"], "trojan");
+    }
+
+    #[test]
+    fn keli_core_rs_rejects_trojan_tls_route_outbound_until_core_supports_it() {
+        let mut node = test_node("http", 86, "");
+        node.common.routes = vec![Route {
+            id: 1,
+            match_rules: vec!["domain:example.com".to_string()],
+            action: "route".to_string(),
+            action_value: Some(
+                r#"{"tag":"trojan-out","protocol":"trojan","settings":{"servers":[{"address":"proxy.example.com","port":443,"password":"secret"}]},"streamSettings":{"security":"tls","tlsSettings":{"serverName":"proxy.example.com"}}}"#
+                    .to_string(),
+            ),
+        }];
+        let plan = CorePlan::from_nodes(
+            CoreKind::KeliCoreRs,
+            PathBuf::from("/srv/v2node/keli-core-rs.json"),
+            &[node],
+        )
+        .unwrap();
+
+        let err = render_core_config(&plan).unwrap_err();
+
+        assert!(err.message.contains("security tls"));
     }
 
     #[test]
