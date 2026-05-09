@@ -567,21 +567,59 @@ fn keli_core_rs_route_outbound(
     let protocol = protocol.to_ascii_lowercase();
     if !matches!(
         protocol.as_str(),
-        "freedom" | "socks" | "socks5" | "http" | "shadowsocks" | "trojan"
+        "freedom" | "socks" | "socks5" | "http" | "shadowsocks" | "trojan" | "vless"
     ) {
         return Err(CoreError::new(format!(
             "keli-core-rs route outbound {tag} protocol {protocol} on inbound {} is not supported yet",
             inbound.tag
         )));
     }
-    let tls = if protocol == "trojan" {
-        keli_core_rs_route_outbound_tls(inbound, &tag, &outbound)?
-    } else {
-        None
+    let tls = match protocol.as_str() {
+        "trojan" => keli_core_rs_route_outbound_tls(inbound, &tag, &outbound)?,
+        "vless" => {
+            keli_core_rs_route_outbound_vless_stream(inbound, &tag, &outbound)?;
+            None
+        }
+        _ => None,
     };
 
     let (address, port, username, password, method) =
         keli_core_rs_route_outbound_endpoint(&outbound);
+    if protocol == "vless" {
+        if address
+            .as_deref()
+            .map(str::trim)
+            .map(str::is_empty)
+            .unwrap_or(true)
+            || port.is_none()
+        {
+            return Err(CoreError::new(format!(
+                "keli-core-rs route outbound {tag} on inbound {} requires vless address and port",
+                inbound.tag
+            )));
+        }
+        if username
+            .as_deref()
+            .map(str::trim)
+            .map(str::is_empty)
+            .unwrap_or(true)
+        {
+            return Err(CoreError::new(format!(
+                "keli-core-rs route outbound {tag} on inbound {} requires vless users[0].id",
+                inbound.tag
+            )));
+        }
+        if method
+            .as_deref()
+            .map(str::trim)
+            .is_some_and(|value| !value.is_empty())
+        {
+            return Err(CoreError::new(format!(
+                "keli-core-rs route outbound {tag} on inbound {} vless flow is not supported yet",
+                inbound.tag
+            )));
+        }
+    }
 
     Ok(Some((
         tag.clone(),
@@ -662,6 +700,55 @@ fn keli_core_rs_route_outbound_tls(
     })))
 }
 
+fn keli_core_rs_route_outbound_vless_stream(
+    inbound: &InboundPlan,
+    tag: &str,
+    outbound: &Value,
+) -> Result<(), CoreError> {
+    let Some(stream_settings) = outbound
+        .get("streamSettings")
+        .filter(|value| !value.is_null())
+    else {
+        return Ok(());
+    };
+    let network = stream_settings
+        .get("network")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("tcp");
+    if network != "tcp" {
+        return Err(CoreError::new(format!(
+            "keli-core-rs route outbound {tag} on inbound {} supports only tcp today; network {network} is not supported yet",
+            inbound.tag
+        )));
+    }
+    let security = stream_settings
+        .get("security")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("none");
+    if security != "none" {
+        return Err(CoreError::new(format!(
+            "keli-core-rs route outbound {tag} on inbound {} supports only security none today; security {security} is not supported yet",
+            inbound.tag
+        )));
+    }
+    if let Some(object) = stream_settings.as_object() {
+        for (key, value) in object {
+            if matches!(key.as_str(), "network" | "security") || is_empty_json(value) {
+                continue;
+            }
+            return Err(CoreError::new(format!(
+                "keli-core-rs route outbound {tag} on inbound {} does not support streamSettings.{key} yet",
+                inbound.tag
+            )));
+        }
+    }
+    Ok(())
+}
+
 fn is_empty_json(value: &Value) -> bool {
     match value {
         Value::Null => true,
@@ -716,9 +803,29 @@ fn keli_core_rs_route_outbound_endpoint(
     let settings_method = settings
         .and_then(|settings| outbound_string(settings, "method"))
         .or_else(|| settings.and_then(|settings| outbound_string(settings, "cipher")));
-    outbound
+    if let Some(endpoint) = outbound
         .get("settings")
         .and_then(|settings| settings.get("servers"))
+        .and_then(Value::as_array)
+        .and_then(|servers| servers.first())
+        .map(|server| {
+            let (address, port, username, password, method) =
+                keli_core_rs_route_outbound_server_endpoint(server);
+            (
+                address,
+                port,
+                username,
+                password,
+                method.or_else(|| settings_method.clone()),
+            )
+        })
+    {
+        return endpoint;
+    }
+
+    outbound
+        .get("settings")
+        .and_then(|settings| settings.get("vnext"))
         .and_then(Value::as_array)
         .and_then(|servers| servers.first())
         .map(|server| {
@@ -781,7 +888,8 @@ fn keli_core_rs_route_outbound_server_endpoint(
     let username = outbound_string(server, "username")
         .or_else(|| outbound_string(server, "user"))
         .or_else(|| user.and_then(|user| outbound_string(user, "user")))
-        .or_else(|| user.and_then(|user| outbound_string(user, "username")));
+        .or_else(|| user.and_then(|user| outbound_string(user, "username")))
+        .or_else(|| user.and_then(|user| outbound_string(user, "id")));
     let password = outbound_string(server, "password")
         .or_else(|| outbound_string(server, "pass"))
         .or_else(|| user.and_then(|user| outbound_string(user, "pass")))
@@ -789,7 +897,8 @@ fn keli_core_rs_route_outbound_server_endpoint(
     let method = outbound_string(server, "method")
         .or_else(|| outbound_string(server, "cipher"))
         .or_else(|| user.and_then(|user| outbound_string(user, "method")))
-        .or_else(|| user.and_then(|user| outbound_string(user, "cipher")));
+        .or_else(|| user.and_then(|user| outbound_string(user, "cipher")))
+        .or_else(|| user.and_then(|user| outbound_string(user, "flow")));
     (address, port, username, password, method)
 }
 
@@ -3644,13 +3753,45 @@ mod tests {
     }
 
     #[test]
+    fn renders_keli_core_rs_vless_route_outbounds() {
+        let mut node = test_node("http", 87, "");
+        node.common.routes = vec![Route {
+            id: 1,
+            match_rules: vec!["geosite:openai".to_string()],
+            action: "route".to_string(),
+            action_value: Some(
+                r#"{"tag":"vless-out","protocol":"vless","settings":{"vnext":[{"address":"proxy.example.com","port":443,"users":[{"id":"11111111-1111-1111-1111-111111111111","encryption":"none"}]}]}}"#
+                    .to_string(),
+            ),
+        }];
+        let plan = CorePlan::from_nodes(
+            CoreKind::KeliCoreRs,
+            PathBuf::from("/srv/v2node/keli-core-rs.json"),
+            &[node],
+        )
+        .unwrap();
+
+        let config = render_core_config(&plan).unwrap();
+
+        assert_eq!(config["outbounds"][1]["tag"], "vless-out");
+        assert_eq!(config["outbounds"][1]["protocol"], "vless");
+        assert_eq!(config["outbounds"][1]["address"], "proxy.example.com");
+        assert_eq!(config["outbounds"][1]["port"], 443);
+        assert_eq!(
+            config["outbounds"][1]["username"],
+            "11111111-1111-1111-1111-111111111111"
+        );
+        assert_eq!(config["routes"][0]["outbound"]["protocol"], "vless");
+    }
+
+    #[test]
     fn keli_core_rs_rejects_unsupported_route_outbound() {
         let mut node = test_node("http", 83, "");
         node.common.routes = vec![Route {
             id: 1,
             match_rules: vec!["domain:example.com".to_string()],
             action: "route".to_string(),
-            action_value: Some(r#"{"tag":"proxy","protocol":"vless"}"#.to_string()),
+            action_value: Some(r#"{"tag":"proxy","protocol":"vmess"}"#.to_string()),
         }];
         let plan = CorePlan::from_nodes(
             CoreKind::KeliCoreRs,
@@ -3661,7 +3802,48 @@ mod tests {
 
         let err = render_core_config(&plan).unwrap_err();
 
-        assert!(err.message.contains("protocol vless"));
+        assert!(err.message.contains("protocol vmess"));
+    }
+
+    #[test]
+    fn keli_core_rs_rejects_unsupported_vless_route_outbound_options() {
+        let mut node = test_node("http", 88, "");
+        node.common.routes = vec![Route {
+            id: 1,
+            match_rules: vec!["domain:example.com".to_string()],
+            action: "route".to_string(),
+            action_value: Some(
+                r#"{"tag":"vless-out","protocol":"vless","settings":{"vnext":[{"address":"proxy.example.com","port":443,"users":[{"id":"11111111-1111-1111-1111-111111111111","encryption":"none"}]}]},"streamSettings":{"security":"tls"}}"#
+                    .to_string(),
+            ),
+        }];
+        let plan = CorePlan::from_nodes(
+            CoreKind::KeliCoreRs,
+            PathBuf::from("/srv/v2node/keli-core-rs.json"),
+            &[node],
+        )
+        .unwrap();
+        let err = render_core_config(&plan).unwrap_err();
+        assert!(err.message.contains("supports only security none"));
+
+        let mut node = test_node("http", 89, "");
+        node.common.routes = vec![Route {
+            id: 1,
+            match_rules: vec!["domain:example.com".to_string()],
+            action: "route".to_string(),
+            action_value: Some(
+                r#"{"tag":"vless-out","protocol":"vless","settings":{"vnext":[{"address":"proxy.example.com","port":443,"users":[{"id":"11111111-1111-1111-1111-111111111111","flow":"xtls-rprx-vision","encryption":"none"}]}]}}"#
+                    .to_string(),
+            ),
+        }];
+        let plan = CorePlan::from_nodes(
+            CoreKind::KeliCoreRs,
+            PathBuf::from("/srv/v2node/keli-core-rs.json"),
+            &[node],
+        )
+        .unwrap();
+        let err = render_core_config(&plan).unwrap_err();
+        assert!(err.message.contains("vless flow is not supported"));
     }
 
     #[test]
