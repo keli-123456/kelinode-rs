@@ -688,10 +688,10 @@ fn keli_core_rs_route_outbound_stream(
         .unwrap_or("tcp");
     if !matches!(
         network,
-        "tcp" | "ws" | "httpupgrade" | "grpc" | "h2" | "http"
+        "tcp" | "ws" | "httpupgrade" | "grpc" | "h2" | "http" | "xhttp" | "splithttp"
     ) {
         return Err(CoreError::new(format!(
-            "keli-core-rs route outbound {tag} on inbound {} supports only tcp/ws/httpupgrade/grpc/h2 today; network {network} is not supported yet",
+            "keli-core-rs route outbound {tag} on inbound {} supports only tcp/ws/httpupgrade/grpc/h2/xhttp stream-one today; network {network} is not supported yet",
             inbound.tag
         )));
     }
@@ -715,6 +715,8 @@ fn keli_core_rs_route_outbound_stream(
                 || (network == "httpupgrade" && key == "httpupgradeSettings")
                 || (network == "grpc" && key == "grpcSettings")
                 || (matches!(network, "h2" | "http") && key == "httpSettings")
+                || (network == "xhttp" && key == "xhttpSettings")
+                || (network == "splithttp" && key == "splithttpSettings")
                 || is_empty_json(value)
             {
                 continue;
@@ -745,7 +747,30 @@ fn keli_core_rs_route_outbound_stream(
             .unwrap_or(&Value::Null),
         "grpc" => stream_settings.get("grpcSettings").unwrap_or(&Value::Null),
         "h2" | "http" => stream_settings.get("httpSettings").unwrap_or(&Value::Null),
+        "xhttp" => stream_settings.get("xhttpSettings").unwrap_or(&Value::Null),
+        "splithttp" => stream_settings
+            .get("splithttpSettings")
+            .unwrap_or(&Value::Null),
         _ => &Value::Null,
+    };
+    let xhttp_stream_one = if matches!(network, "xhttp" | "splithttp") {
+        validate_xhttp_stream_one_settings(inbound, tag, network, transport_settings)?;
+        let mode = outbound_string(transport_settings, "mode").unwrap_or_default();
+        if !mode.eq_ignore_ascii_case("stream-one") {
+            return Err(CoreError::new(format!(
+                "keli-core-rs route outbound {tag} on inbound {} supports xhttp only in stream-one mode today",
+                inbound.tag
+            )));
+        }
+        if security != "tls" {
+            return Err(CoreError::new(format!(
+                "keli-core-rs route outbound {tag} on inbound {} supports xhttp stream-one only with tls/h2 today",
+                inbound.tag
+            )));
+        }
+        true
+    } else {
+        false
     };
     let transport_host = outbound_string_or_first_array(transport_settings, "host")
         .or_else(|| {
@@ -760,16 +785,44 @@ fn keli_core_rs_route_outbound_stream(
         });
     let transport_service_name = outbound_string(transport_settings, "serviceName")
         .or_else(|| outbound_string(transport_settings, "service_name"));
-    let transport_method = outbound_string(transport_settings, "method");
-    let transport = if matches!(network, "ws" | "httpupgrade" | "grpc" | "h2" | "http") {
+    let transport_method = outbound_string(transport_settings, "method")
+        .or_else(|| outbound_string(transport_settings, "uplinkHTTPMethod"));
+    let transport_network = if xhttp_stream_one { "h2" } else { network };
+    let transport_path = if matches!(
+        network,
+        "ws" | "httpupgrade" | "h2" | "http" | "xhttp" | "splithttp"
+    ) {
+        outbound_string(transport_settings, "path").map(|path| {
+            if xhttp_stream_one {
+                normalize_xhttp_stream_one_path(&path)
+            } else {
+                path
+            }
+        })
+    } else {
+        None
+    };
+    let transport_headers = if xhttp_stream_one {
+        xhttp_stream_one_headers(
+            transport_settings,
+            transport_host.as_deref(),
+            transport_path.as_deref(),
+        )?
+    } else {
+        BTreeMap::new()
+    };
+    let transport = if matches!(
+        network,
+        "ws" | "httpupgrade" | "grpc" | "h2" | "http" | "xhttp" | "splithttp"
+    ) {
         Some(json!({
-            "network": network,
-            "path": if matches!(network, "ws" | "httpupgrade" | "h2" | "http") {
-                outbound_string(transport_settings, "path")
+            "network": transport_network,
+            "path": if matches!(network, "ws" | "httpupgrade" | "h2" | "http" | "xhttp" | "splithttp") {
+                transport_path
             } else {
                 None
             },
-            "host": if matches!(network, "ws" | "httpupgrade" | "h2" | "http") {
+            "host": if matches!(network, "ws" | "httpupgrade" | "h2" | "http" | "xhttp" | "splithttp") {
                 transport_host
             } else {
                 None
@@ -779,11 +832,14 @@ fn keli_core_rs_route_outbound_stream(
             } else {
                 None
             },
-            "method": if matches!(network, "h2" | "http") {
+            "method": if xhttp_stream_one {
+                Some(transport_method.unwrap_or_else(|| "POST".to_string()))
+            } else if matches!(network, "h2" | "http") {
                 transport_method
             } else {
                 None
-            }
+            },
+            "headers": transport_headers
         }))
     } else {
         None
@@ -946,6 +1002,140 @@ fn outbound_string_array(value: &Value, key: &str) -> Vec<String> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+fn validate_xhttp_stream_one_settings(
+    inbound: &InboundPlan,
+    tag: &str,
+    network: &str,
+    settings: &Value,
+) -> Result<(), CoreError> {
+    let Some(object) = settings.as_object() else {
+        if settings.is_null() {
+            return Ok(());
+        }
+        return Err(CoreError::new(format!(
+            "keli-core-rs route outbound {tag} on inbound {} {network} settings must be an object",
+            inbound.tag
+        )));
+    };
+    for (key, value) in object {
+        if matches!(
+            key.as_str(),
+            "path"
+                | "host"
+                | "mode"
+                | "headers"
+                | "noGRPCHeader"
+                | "noGrpcHeader"
+                | "method"
+                | "uplinkHTTPMethod"
+        ) || is_empty_json(value)
+        {
+            continue;
+        }
+        return Err(CoreError::new(format!(
+            "keli-core-rs route outbound {tag} on inbound {} does not support {network}Settings.{key} yet",
+            inbound.tag
+        )));
+    }
+    if let Some(value) = settings
+        .get("headers")
+        .filter(|value| !is_empty_json(value))
+    {
+        let Some(headers) = value.as_object() else {
+            return Err(CoreError::new(format!(
+                "keli-core-rs route outbound {tag} on inbound {} {network}Settings.headers must be an object",
+                inbound.tag
+            )));
+        };
+        for (name, value) in headers {
+            if name.trim().is_empty() {
+                return Err(CoreError::new(format!(
+                    "keli-core-rs route outbound {tag} on inbound {} {network}Settings.headers contains an empty header name",
+                    inbound.tag
+                )));
+            }
+            if !value.is_string() && !is_empty_json(value) {
+                return Err(CoreError::new(format!(
+                    "keli-core-rs route outbound {tag} on inbound {} {network}Settings.headers.{name} must be a string",
+                    inbound.tag
+                )));
+            }
+        }
+    }
+    for key in ["noGRPCHeader", "noGrpcHeader"] {
+        if let Some(value) = settings.get(key).filter(|value| !is_empty_json(value)) {
+            if !value.is_boolean() {
+                return Err(CoreError::new(format!(
+                    "keli-core-rs route outbound {tag} on inbound {} {network}Settings.{key} must be a boolean",
+                    inbound.tag
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn normalize_xhttp_stream_one_path(value: &str) -> String {
+    let value = value.trim();
+    let (path, query) = value.split_once('?').unwrap_or((value, ""));
+    let mut path = path.trim().to_string();
+    if path.is_empty() {
+        path = "/".to_string();
+    } else if !path.starts_with('/') {
+        path.insert(0, '/');
+    }
+    if !path.ends_with('/') {
+        path.push('/');
+    }
+    if query.is_empty() {
+        path
+    } else {
+        format!("{path}?{query}")
+    }
+}
+
+fn xhttp_stream_one_headers(
+    settings: &Value,
+    _host: Option<&str>,
+    path: Option<&str>,
+) -> Result<BTreeMap<String, String>, CoreError> {
+    let mut headers = BTreeMap::new();
+    if let Some(object) = settings
+        .get("headers")
+        .filter(|value| !is_empty_json(value))
+        .and_then(Value::as_object)
+    {
+        for (name, value) in object {
+            if name.eq_ignore_ascii_case("host") || is_empty_json(value) {
+                continue;
+            }
+            let Some(value) = value.as_str() else {
+                continue;
+            };
+            headers.insert(name.trim().to_ascii_lowercase(), value.trim().to_string());
+        }
+    }
+
+    let path = path.unwrap_or("/");
+    let separator = if path.contains('?') { '&' } else { '?' };
+    headers.insert(
+        "referer".to_string(),
+        format!(
+            "https://keli.local{path}{separator}x_padding={}",
+            "X".repeat(128)
+        ),
+    );
+    let no_grpc_header = settings
+        .get("noGRPCHeader")
+        .or_else(|| settings.get("noGrpcHeader"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    if !no_grpc_header {
+        headers.insert("content-type".to_string(), "application/grpc".to_string());
+    }
+    Ok(headers)
 }
 
 fn keli_core_rs_route_outbound_server_endpoint(
@@ -4285,6 +4475,53 @@ mod tests {
     }
 
     #[test]
+    fn renders_keli_core_rs_vless_xhttp_stream_one_route_outbounds() {
+        let mut node = test_node("http", 104, "");
+        node.common.routes = vec![Route {
+            id: 1,
+            match_rules: vec!["geosite:openai".to_string()],
+            action: "route".to_string(),
+            action_value: Some(
+                r#"{"tag":"vless-xhttp","protocol":"vless","settings":{"vnext":[{"address":"proxy.example.com","port":443,"users":[{"id":"11111111-1111-1111-1111-111111111111","encryption":"none"}]}]},"streamSettings":{"network":"xhttp","security":"tls","tlsSettings":{"serverName":"sni.example.com","allowInsecure":true,"alpn":["h2"]},"xhttpSettings":{"path":"/xhttp?ed=2048","host":"cdn.example.com","mode":"stream-one","headers":{"X-Keli":"ok"}}}}"#
+                    .to_string(),
+            ),
+        }];
+        let plan = CorePlan::from_nodes(
+            CoreKind::KeliCoreRs,
+            PathBuf::from("/srv/v2node/keli-core-rs.json"),
+            &[node],
+        )
+        .unwrap();
+
+        let config = render_core_config(&plan).unwrap();
+
+        assert_eq!(config["outbounds"][1]["tag"], "vless-xhttp");
+        assert_eq!(config["outbounds"][1]["protocol"], "vless");
+        assert_eq!(config["outbounds"][1]["transport"]["network"], "h2");
+        assert_eq!(
+            config["outbounds"][1]["transport"]["path"],
+            "/xhttp/?ed=2048"
+        );
+        assert_eq!(
+            config["outbounds"][1]["transport"]["host"],
+            "cdn.example.com"
+        );
+        assert_eq!(config["outbounds"][1]["transport"]["method"], "POST");
+        assert_eq!(
+            config["outbounds"][1]["transport"]["headers"]["content-type"],
+            "application/grpc"
+        );
+        assert_eq!(
+            config["outbounds"][1]["transport"]["headers"]["x-keli"],
+            "ok"
+        );
+        assert!(config["outbounds"][1]["transport"]["headers"]["referer"]
+            .as_str()
+            .unwrap()
+            .contains("/xhttp/?ed=2048&x_padding="));
+    }
+
+    #[test]
     fn renders_keli_core_rs_vmess_alter_id_route_outbounds() {
         let mut node = test_node("http", 101, "");
         node.common.routes = vec![Route {
@@ -4381,7 +4618,7 @@ mod tests {
         let err = render_core_config(&plan).unwrap_err();
         assert!(err
             .message
-            .contains("supports only tcp/ws/httpupgrade/grpc/h2"));
+            .contains("supports xhttp only in stream-one mode today"));
 
         let mut node = test_node("http", 89, "");
         node.common.routes = vec![Route {
