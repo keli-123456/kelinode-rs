@@ -6,6 +6,8 @@ use std::process::{Child, Command};
 
 use crate::core::{CoreKind, CorePlan};
 
+const DEFAULT_NATIVE_INSTALL_DIR: &str = "/usr/local/v2node";
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProcessSpec {
     pub name: String,
@@ -226,7 +228,7 @@ pub fn core_process_spec(
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_string)
-        .or_else(|| default_core_command(&plan.kind).map(str::to_string))
+        .or_else(|| default_core_command(&plan.kind))
         .ok_or_else(|| ProcessError::new("core command is not configured"))?;
 
     let config_path = absolute_process_path(&plan.config_path);
@@ -279,13 +281,25 @@ pub fn sidecar_process_spec(
     })
 }
 
-fn default_core_command(kind: &CoreKind) -> Option<&'static str> {
+fn default_core_command(kind: &CoreKind) -> Option<String> {
     match kind {
-        CoreKind::Xray => Some("xray"),
-        CoreKind::SingBox => Some("sing-box"),
-        CoreKind::Mihomo => Some("mihomo"),
-        CoreKind::KeliCoreRs => Some("keli-core-rs"),
+        CoreKind::Xray => Some("xray".to_string()),
+        CoreKind::SingBox => Some("sing-box".to_string()),
+        CoreKind::Mihomo => Some("mihomo".to_string()),
+        CoreKind::KeliCoreRs => Some(default_binary_command(
+            "keli-core-rs",
+            Path::new(DEFAULT_NATIVE_INSTALL_DIR),
+        )),
         CoreKind::Sidecar(_) => None,
+    }
+}
+
+fn default_binary_command(binary_name: &str, install_dir: &Path) -> String {
+    let installed = install_dir.join(binary_name);
+    if installed.is_file() {
+        installed.display().to_string()
+    } else {
+        binary_name.to_string()
     }
 }
 
@@ -344,12 +358,14 @@ fn core_kind_label(kind: &CoreKind) -> String {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
+    use std::fs;
     use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     use crate::core::{CoreKind, CorePlan};
 
     use super::{
-        core_process_spec, keli_core_rs_control_addr, sidecar_process_spec,
+        core_process_spec, default_binary_command, keli_core_rs_control_addr, sidecar_process_spec,
         MemoryProcessSupervisor, ProcessState, ProcessStatus, ProcessSupervisor,
     };
 
@@ -409,6 +425,28 @@ mod tests {
 
         assert_eq!(spec.command, "/usr/local/bin/sing-box");
         assert_eq!(spec.args, vec!["run", "-c", "/etc/v2node/sing-box.json"]);
+    }
+
+    #[test]
+    fn default_binary_command_prefers_installed_native_binary() {
+        let dir = temp_test_dir("installed-binary");
+        let binary = dir.join("keli-core-rs");
+        fs::write(&binary, "binary").unwrap();
+
+        let command = default_binary_command("keli-core-rs", &dir);
+
+        assert_eq!(command, binary.display().to_string());
+        fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn default_binary_command_falls_back_to_path_lookup() {
+        let dir = temp_test_dir("missing-binary");
+
+        let command = default_binary_command("keli-core-rs", &dir);
+
+        assert_eq!(command, "keli-core-rs");
+        fs::remove_dir_all(dir).ok();
     }
 
     #[test]
@@ -533,5 +571,18 @@ mod tests {
             status,
             ProcessStatus::stopped("core:xray", "process was never started")
         );
+    }
+
+    fn temp_test_dir(name: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "kelinode-rs-process-{name}-{}-{nanos}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        dir
     }
 }
