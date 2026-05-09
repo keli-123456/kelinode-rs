@@ -103,10 +103,12 @@ pub struct MachineStatusResponse {
     pub upgrade: Option<MachineUpgradeCommand>,
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
 pub struct MachineUpgradeCommand {
     pub id: String,
     pub target_version: String,
+    #[serde(default)]
+    pub component: String,
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
@@ -595,7 +597,7 @@ mod tests {
         machine_profile_node_config_dir, resolve_machine_profile_result, resolve_machine_profiles,
         sanitize_machine_profile_name, MachineNodesEnvelope, MachineNodesResponse,
         MachinePanelNode, MachineProfileBaseConfig, MachineProfileInput, MachineStatusPayload,
-        NodeFailurePayload, SubscriptionProxyConfig,
+        MachineStatusResponse, NodeFailurePayload, SubscriptionProxyConfig,
     };
     use crate::config::{MachineProfileConfig, SubscriptionProxyZeroSslConfig};
     use crate::panel::types::RealtimeBaseConfig;
@@ -656,6 +658,29 @@ mod tests {
         assert_eq!(payload.machine_id, 7);
         assert_eq!(payload.status["version"], json!("v0.1.0"));
         assert_eq!(payload.status["cpu"], json!(12.5));
+    }
+
+    #[test]
+    fn machine_status_response_accepts_legacy_and_component_upgrade_commands() {
+        let legacy: MachineStatusResponse = serde_json::from_value(json!({
+            "reload": false,
+            "upgrade": {
+                "id": "upgrade-node",
+                "target_version": "v0.1.3"
+            }
+        }))
+        .unwrap();
+        let core: MachineStatusResponse = serde_json::from_value(json!({
+            "upgrade": {
+                "id": "upgrade-core",
+                "target_version": "v0.1.1",
+                "component": "core"
+            }
+        }))
+        .unwrap();
+
+        assert_eq!(legacy.upgrade.unwrap().component, "");
+        assert_eq!(core.upgrade.unwrap().component, "core");
     }
 
     #[test]

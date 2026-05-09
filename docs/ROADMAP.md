@@ -67,7 +67,7 @@
 - `run` command realtime worker startup with queued reload and user-refresh events.
 - Realtime event replies for applied/failed receipts after runtime user-refresh handling.
 - Realtime reload event replies marked as queued while the runtime exits for config rebuild.
-- Self-upgrade wrapper with install-dir backup, GitHub Release manifest download, sha256 verification, post-install version verification, and rollback.
+- Node/core self-upgrade wrapper with install-dir backup, GitHub Release manifest download, sha256 verification, post-install version verification, and rollback.
 - External IPv4/IPv6 probes for machine status when local public candidates are missing.
 - Go-compatible `node_tag|uuid` user emails in generated core clients.
 - Linux root disk usage and network byte counter collection for machine status payloads.

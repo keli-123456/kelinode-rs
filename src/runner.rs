@@ -998,6 +998,7 @@ mod tests {
             signal: RuntimeLoopSignal::Upgrade(MachineUpgradeCommand {
                 id: "upgrade-1".to_string(),
                 target_version: "v0.4.0".to_string(),
+                component: String::new(),
             }),
             ..FakeCallbacks::default()
         };
@@ -1018,6 +1019,7 @@ mod tests {
             RuntimeLoopExitReason::Signal(RuntimeLoopSignal::Upgrade(MachineUpgradeCommand {
                 id: "upgrade-1".to_string(),
                 target_version: "v0.4.0".to_string(),
+                component: String::new(),
             }))
         );
     }

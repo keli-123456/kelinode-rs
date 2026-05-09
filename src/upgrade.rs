@@ -14,6 +14,7 @@ const DEFAULT_RELEASE_PLATFORM: &str = "linux-x86_64";
 pub struct UpgradeStatus {
     pub id: String,
     pub status: String,
+    pub component: String,
     pub target_version: String,
     #[serde(skip_serializing_if = "String::is_empty")]
     pub error: String,
@@ -41,6 +42,12 @@ pub struct ReleaseUpgradeSpec {
     pub install_dir: String,
     pub service_name: String,
     pub platform: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UpgradeComponent {
+    Node,
+    Core,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -81,6 +88,7 @@ impl UpgradeManager {
     ) -> Result<Option<UpgradeStatus>, String> {
         let id = command.id.trim().to_string();
         let target_version = command.target_version.trim().to_string();
+        let component = UpgradeComponent::from_command_value(&command.component)?;
         if id.is_empty() || !valid_kelinode_version(&target_version) {
             return Err("invalid upgrade command".to_string());
         }
@@ -94,6 +102,7 @@ impl UpgradeManager {
         let mut status = UpgradeStatus {
             id,
             status: "running".to_string(),
+            component: component.status_name().to_string(),
             target_version: target_version.clone(),
             error: String::new(),
             started_at: now,
@@ -101,14 +110,14 @@ impl UpgradeManager {
             updated_at: now,
         };
 
-        if versions_equal(current_version, &target_version) {
+        if component == UpgradeComponent::Node && versions_equal(current_version, &target_version) {
             status.status = "succeeded".to_string();
             status.finished_at = now;
             self.status = Some(status.clone());
             return Ok(Some(status));
         }
 
-        let plan = upgrade_launch_plan(&target_version);
+        let plan = upgrade_launch_plan_for_component(&target_version, component);
         if let Err(error) = executor.launch(&plan) {
             status.status = "failed".to_string();
             status.error = truncate_upgrade_error(&error);
@@ -154,6 +163,45 @@ impl UpgradeExecutor for MemoryUpgradeExecutor {
 
 pub fn upgrade_launch_plan(target_version: &str) -> UpgradeLaunchPlan {
     release_upgrade_launch_plan(target_version, &ReleaseUpgradeSpec::native_node())
+}
+
+pub fn upgrade_launch_plan_for_component(
+    target_version: &str,
+    component: UpgradeComponent,
+) -> UpgradeLaunchPlan {
+    release_upgrade_launch_plan(target_version, &component.release_spec())
+}
+
+impl UpgradeComponent {
+    fn from_command_value(value: &str) -> Result<Self, String> {
+        let value = value.trim().to_ascii_lowercase();
+        if value.is_empty()
+            || matches!(
+                value.as_str(),
+                "node" | "agent" | "v2node" | "kelinode" | "kelinode-rs"
+            )
+        {
+            return Ok(Self::Node);
+        }
+        if matches!(value.as_str(), "core" | "keli-core" | "keli-core-rs") {
+            return Ok(Self::Core);
+        }
+        Err("invalid upgrade component".to_string())
+    }
+
+    fn status_name(self) -> &'static str {
+        match self {
+            Self::Node => "node",
+            Self::Core => "core",
+        }
+    }
+
+    fn release_spec(self) -> ReleaseUpgradeSpec {
+        match self {
+            Self::Node => ReleaseUpgradeSpec::native_node(),
+            Self::Core => ReleaseUpgradeSpec::native_core(),
+        }
+    }
 }
 
 impl ReleaseUpgradeSpec {
@@ -456,6 +504,7 @@ mod tests {
                 MachineUpgradeCommand {
                     id: "upgrade-1".to_string(),
                     target_version: "v1.2.3".to_string(),
+                    component: String::new(),
                 },
                 "1.2.3",
                 100,
@@ -465,6 +514,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(status.status, "succeeded");
+        assert_eq!(status.component, "node");
         assert_eq!(status.finished_at, 100);
         assert!(executor.launches.is_empty());
     }
@@ -482,6 +532,7 @@ mod tests {
                 MachineUpgradeCommand {
                     id: "upgrade-1".to_string(),
                     target_version: "v1.2.4".to_string(),
+                    component: String::new(),
                 },
                 "v1.2.3",
                 200,
@@ -502,6 +553,7 @@ mod tests {
         let command = MachineUpgradeCommand {
             id: "upgrade-1".to_string(),
             target_version: "v1.2.4".to_string(),
+            component: String::new(),
         };
 
         manager
@@ -513,6 +565,56 @@ mod tests {
 
         assert_eq!(executor.launches.len(), 1);
         assert_eq!(manager.current_status().unwrap().started_at, 200);
+    }
+
+    #[test]
+    fn core_upgrade_targets_core_release_even_when_node_version_matches() {
+        let mut manager = UpgradeManager::default();
+        let mut executor = MemoryUpgradeExecutor::default();
+
+        let status = manager
+            .request(
+                MachineUpgradeCommand {
+                    id: "upgrade-core-1".to_string(),
+                    target_version: "v1.2.4".to_string(),
+                    component: "core".to_string(),
+                },
+                "v1.2.4",
+                210,
+                &mut executor,
+            )
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(status.status, "running");
+        assert_eq!(status.component, "core");
+        assert_eq!(executor.launches.len(), 1);
+        assert!(executor.launches[0]
+            .args
+            .iter()
+            .any(|arg| arg.contains("keli-core-rs-v1.2.4-linux-x86_64.tar.gz")));
+    }
+
+    #[test]
+    fn rejects_unknown_upgrade_component() {
+        let mut manager = UpgradeManager::default();
+        let mut executor = MemoryUpgradeExecutor::default();
+
+        let error = manager
+            .request(
+                MachineUpgradeCommand {
+                    id: "upgrade-bad".to_string(),
+                    target_version: "v1.2.4".to_string(),
+                    component: "browser".to_string(),
+                },
+                "v1.2.3",
+                210,
+                &mut executor,
+            )
+            .unwrap_err();
+
+        assert_eq!(error, "invalid upgrade component");
+        assert!(executor.launches.is_empty());
     }
 
     #[test]

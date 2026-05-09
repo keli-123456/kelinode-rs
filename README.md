@@ -21,7 +21,7 @@ First cut:
 - Apply a runtime plan by writing core config, reconciling HY2 forwarding state, starting/reloading core, and building the machine status payload.
 - Report machine status to `keliboard` and normalize returned reload/upgrade commands for the runtime loop.
 - Run a single runtime tick that applies local state, optionally reports to the panel, and returns a continue/reload/upgrade signal.
-- Track machine self-upgrade status and launch the existing installer through a systemd-run or detached-shell boundary.
+- Track machine self-upgrade status and launch verified GitHub Release upgrades through a systemd-run or detached-shell boundary.
 - Feed upgrade signals into the self-upgrade state machine so the next status report can include running/failed/succeeded state.
 - Collect basic host resource snapshots for system metadata, Linux memory/swap, and uptime.
 - Render panel users into Xray client entries for UUID/password based protocols.
@@ -64,7 +64,7 @@ First cut:
 - Start realtime workers from the `run` command and queue reload/user-refresh runtime events.
 - Tie realtime receipts to runtime event replies so user refresh can report applied or failed.
 - Mark realtime reload receipts as queued instead of applied because the runtime exits for rebuild.
-- Wrap self-upgrade execution with install-dir backup, GitHub Release manifest download, sha256 verification, post-install version verification, and rollback.
+- Wrap node/core self-upgrade execution with install-dir backup, GitHub Release manifest download, sha256 verification, post-install version verification, and rollback.
 - Probe external IPv4/IPv6 addresses for machine status when local interface candidates are missing.
 - Collect Linux root disk usage and network byte counters for machine status payloads.
 - Compute Linux CPU usage from `/proc/stat` samples, with `/proc/loadavg` as a fallback.
