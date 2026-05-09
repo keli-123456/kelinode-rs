@@ -574,10 +574,10 @@ fn keli_core_rs_route_outbound(
             inbound.tag
         )));
     }
-    let tls = match protocol.as_str() {
-        "trojan" => keli_core_rs_route_outbound_tls(inbound, &tag, &outbound)?,
+    let (tls, transport) = match protocol.as_str() {
+        "trojan" => keli_core_rs_route_outbound_stream(inbound, &tag, &outbound)?,
         "vless" => keli_core_rs_route_outbound_vless_stream(inbound, &tag, &outbound)?,
-        _ => None,
+        _ => (None, None),
     };
 
     let (address, port, username, password, method) =
@@ -628,21 +628,22 @@ fn keli_core_rs_route_outbound(
             "port": port,
             "username": username,
             "password": password,
-            "tls": tls
+            "tls": tls,
+            "transport": transport
         }),
     )))
 }
 
-fn keli_core_rs_route_outbound_tls(
+fn keli_core_rs_route_outbound_stream(
     inbound: &InboundPlan,
     tag: &str,
     outbound: &Value,
-) -> Result<Option<Value>, CoreError> {
+) -> Result<(Option<Value>, Option<Value>), CoreError> {
     let Some(stream_settings) = outbound
         .get("streamSettings")
         .filter(|value| !value.is_null())
     else {
-        return Ok(None);
+        return Ok((None, None));
     };
     let network = stream_settings
         .get("network")
@@ -650,9 +651,9 @@ fn keli_core_rs_route_outbound_tls(
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .unwrap_or("tcp");
-    if network != "tcp" {
+    if !matches!(network, "tcp" | "ws") {
         return Err(CoreError::new(format!(
-            "keli-core-rs route outbound {tag} on inbound {} supports only tcp today; network {network} is not supported yet",
+            "keli-core-rs route outbound {tag} on inbound {} supports only tcp/ws today; network {network} is not supported yet",
             inbound.tag
         )));
     }
@@ -672,6 +673,7 @@ fn keli_core_rs_route_outbound_tls(
         for (key, value) in object {
             if matches!(key.as_str(), "network" | "security")
                 || (security == "tls" && key == "tlsSettings")
+                || (network == "ws" && key == "wsSettings")
                 || is_empty_json(value)
             {
                 continue;
@@ -682,27 +684,50 @@ fn keli_core_rs_route_outbound_tls(
             )));
         }
     }
-    if security == "none" {
-        return Ok(None);
-    }
-
     let tls_settings = stream_settings.get("tlsSettings").unwrap_or(&Value::Null);
-    Ok(Some(json!({
-        "server_name": outbound_string(tls_settings, "serverName"),
-        "allow_insecure": tls_settings
-            .get("allowInsecure")
-            .and_then(Value::as_bool)
-            .unwrap_or(false),
-        "alpn": outbound_string_array(tls_settings, "alpn")
-    })))
+    let tls = if security == "tls" {
+        Some(json!({
+            "server_name": outbound_string(tls_settings, "serverName"),
+            "allow_insecure": tls_settings
+                .get("allowInsecure")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+            "alpn": outbound_string_array(tls_settings, "alpn")
+        }))
+    } else {
+        None
+    };
+    let ws_settings = stream_settings.get("wsSettings").unwrap_or(&Value::Null);
+    let ws_host = outbound_string(ws_settings, "host")
+        .or_else(|| {
+            ws_settings
+                .get("headers")
+                .and_then(|headers| outbound_string(headers, "Host"))
+        })
+        .or_else(|| {
+            ws_settings
+                .get("headers")
+                .and_then(|headers| outbound_string(headers, "host"))
+        });
+    let transport = if network == "ws" {
+        Some(json!({
+            "network": "ws",
+            "path": outbound_string(ws_settings, "path"),
+            "host": ws_host,
+            "service_name": null
+        }))
+    } else {
+        None
+    };
+    Ok((tls, transport))
 }
 
 fn keli_core_rs_route_outbound_vless_stream(
     inbound: &InboundPlan,
     tag: &str,
     outbound: &Value,
-) -> Result<Option<Value>, CoreError> {
-    keli_core_rs_route_outbound_tls(inbound, tag, outbound)
+) -> Result<(Option<Value>, Option<Value>), CoreError> {
+    keli_core_rs_route_outbound_stream(inbound, tag, outbound)
 }
 
 fn is_empty_json(value: &Value) -> bool {
@@ -3709,6 +3734,42 @@ mod tests {
     }
 
     #[test]
+    fn renders_keli_core_rs_trojan_websocket_route_outbounds() {
+        let mut node = test_node("http", 92, "");
+        node.common.routes = vec![Route {
+            id: 1,
+            match_rules: vec!["domain:example.com".to_string()],
+            action: "route".to_string(),
+            action_value: Some(
+                r#"{"tag":"trojan-ws","protocol":"trojan","settings":{"servers":[{"address":"proxy.example.com","port":443,"password":"secret"}]},"streamSettings":{"network":"ws","security":"tls","tlsSettings":{"serverName":"sni.example.com","allowInsecure":true},"wsSettings":{"path":"/trojan","headers":{"Host":"cdn.example.com"}}}}"#
+                    .to_string(),
+            ),
+        }];
+        let plan = CorePlan::from_nodes(
+            CoreKind::KeliCoreRs,
+            PathBuf::from("/srv/v2node/keli-core-rs.json"),
+            &[node],
+        )
+        .unwrap();
+
+        let config = render_core_config(&plan).unwrap();
+
+        assert_eq!(config["outbounds"][1]["tag"], "trojan-ws");
+        assert_eq!(config["outbounds"][1]["protocol"], "trojan");
+        assert_eq!(config["outbounds"][1]["password"], "secret");
+        assert_eq!(
+            config["outbounds"][1]["tls"]["server_name"],
+            "sni.example.com"
+        );
+        assert_eq!(config["outbounds"][1]["transport"]["network"], "ws");
+        assert_eq!(config["outbounds"][1]["transport"]["path"], "/trojan");
+        assert_eq!(
+            config["outbounds"][1]["transport"]["host"],
+            "cdn.example.com"
+        );
+    }
+
+    #[test]
     fn renders_keli_core_rs_vless_route_outbounds() {
         let mut node = test_node("http", 87, "");
         node.common.routes = vec![Route {
@@ -3779,6 +3840,41 @@ mod tests {
     }
 
     #[test]
+    fn renders_keli_core_rs_vless_websocket_route_outbounds() {
+        let mut node = test_node("http", 91, "");
+        node.common.routes = vec![Route {
+            id: 1,
+            match_rules: vec!["geosite:openai".to_string()],
+            action: "route".to_string(),
+            action_value: Some(
+                r#"{"tag":"vless-ws","protocol":"vless","settings":{"vnext":[{"address":"proxy.example.com","port":443,"users":[{"id":"11111111-1111-1111-1111-111111111111","encryption":"none"}]}]},"streamSettings":{"network":"ws","security":"tls","tlsSettings":{"serverName":"sni.example.com","allowInsecure":true},"wsSettings":{"path":"/vless","headers":{"Host":"cdn.example.com"}}}}"#
+                    .to_string(),
+            ),
+        }];
+        let plan = CorePlan::from_nodes(
+            CoreKind::KeliCoreRs,
+            PathBuf::from("/srv/v2node/keli-core-rs.json"),
+            &[node],
+        )
+        .unwrap();
+
+        let config = render_core_config(&plan).unwrap();
+
+        assert_eq!(config["outbounds"][1]["tag"], "vless-ws");
+        assert_eq!(config["outbounds"][1]["protocol"], "vless");
+        assert_eq!(
+            config["outbounds"][1]["tls"]["server_name"],
+            "sni.example.com"
+        );
+        assert_eq!(config["outbounds"][1]["transport"]["network"], "ws");
+        assert_eq!(config["outbounds"][1]["transport"]["path"], "/vless");
+        assert_eq!(
+            config["outbounds"][1]["transport"]["host"],
+            "cdn.example.com"
+        );
+    }
+
+    #[test]
     fn keli_core_rs_rejects_unsupported_route_outbound() {
         let mut node = test_node("http", 83, "");
         node.common.routes = vec![Route {
@@ -3807,7 +3903,7 @@ mod tests {
             match_rules: vec!["domain:example.com".to_string()],
             action: "route".to_string(),
             action_value: Some(
-                r#"{"tag":"vless-out","protocol":"vless","settings":{"vnext":[{"address":"proxy.example.com","port":443,"users":[{"id":"11111111-1111-1111-1111-111111111111","encryption":"none"}]}]},"streamSettings":{"network":"ws","security":"tls","wsSettings":{"path":"/vless"}}}"#
+                r#"{"tag":"vless-out","protocol":"vless","settings":{"vnext":[{"address":"proxy.example.com","port":443,"users":[{"id":"11111111-1111-1111-1111-111111111111","encryption":"none"}]}]},"streamSettings":{"network":"grpc","grpcSettings":{"serviceName":"GunService"}}}"#
                     .to_string(),
             ),
         }];
@@ -3818,7 +3914,7 @@ mod tests {
         )
         .unwrap();
         let err = render_core_config(&plan).unwrap_err();
-        assert!(err.message.contains("supports only tcp"));
+        assert!(err.message.contains("supports only tcp/ws"));
 
         let mut node = test_node("http", 89, "");
         node.common.routes = vec![Route {
