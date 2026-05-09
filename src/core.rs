@@ -574,9 +574,11 @@ fn keli_core_rs_route_outbound(
             inbound.tag
         )));
     }
-    if protocol == "trojan" {
-        validate_plain_tcp_route_outbound_stream(inbound, &tag, &outbound)?;
-    }
+    let tls = if protocol == "trojan" {
+        keli_core_rs_route_outbound_tls(inbound, &tag, &outbound)?
+    } else {
+        None
+    };
 
     let (address, port, username, password, method) =
         keli_core_rs_route_outbound_endpoint(&outbound);
@@ -590,21 +592,22 @@ fn keli_core_rs_route_outbound(
             "address": address,
             "port": port,
             "username": username,
-            "password": password
+            "password": password,
+            "tls": tls
         }),
     )))
 }
 
-fn validate_plain_tcp_route_outbound_stream(
+fn keli_core_rs_route_outbound_tls(
     inbound: &InboundPlan,
     tag: &str,
     outbound: &Value,
-) -> Result<(), CoreError> {
+) -> Result<Option<Value>, CoreError> {
     let Some(stream_settings) = outbound
         .get("streamSettings")
         .filter(|value| !value.is_null())
     else {
-        return Ok(());
+        return Ok(None);
     };
     let network = stream_settings
         .get("network")
@@ -614,7 +617,7 @@ fn validate_plain_tcp_route_outbound_stream(
         .unwrap_or("tcp");
     if network != "tcp" {
         return Err(CoreError::new(format!(
-            "keli-core-rs route outbound {tag} on inbound {} supports only plain tcp today; network {network} is not supported yet",
+            "keli-core-rs route outbound {tag} on inbound {} supports only tcp today; network {network} is not supported yet",
             inbound.tag
         )));
     }
@@ -624,15 +627,18 @@ fn validate_plain_tcp_route_outbound_stream(
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .unwrap_or("none");
-    if security != "none" {
+    if !matches!(security, "none" | "tls") {
         return Err(CoreError::new(format!(
-            "keli-core-rs route outbound {tag} on inbound {} supports only security none today; security {security} is not supported yet",
+            "keli-core-rs route outbound {tag} on inbound {} supports only security none/tls today; security {security} is not supported yet",
             inbound.tag
         )));
     }
     if let Some(object) = stream_settings.as_object() {
         for (key, value) in object {
-            if matches!(key.as_str(), "network" | "security") || is_empty_json(value) {
+            if matches!(key.as_str(), "network" | "security")
+                || (security == "tls" && key == "tlsSettings")
+                || is_empty_json(value)
+            {
                 continue;
             }
             return Err(CoreError::new(format!(
@@ -641,7 +647,19 @@ fn validate_plain_tcp_route_outbound_stream(
             )));
         }
     }
-    Ok(())
+    if security == "none" {
+        return Ok(None);
+    }
+
+    let tls_settings = stream_settings.get("tlsSettings").unwrap_or(&Value::Null);
+    Ok(Some(json!({
+        "server_name": outbound_string(tls_settings, "serverName"),
+        "allow_insecure": tls_settings
+            .get("allowInsecure")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        "alpn": outbound_string_array(tls_settings, "alpn")
+    })))
 }
 
 fn is_empty_json(value: &Value) -> bool {
@@ -724,6 +742,22 @@ fn outbound_string(value: &Value, key: &str) -> Option<String> {
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_string)
+}
+
+fn outbound_string_array(value: &Value, key: &str) -> Vec<String> {
+    value
+        .get(key)
+        .and_then(Value::as_array)
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn keli_core_rs_route_outbound_server_endpoint(
@@ -3575,14 +3609,14 @@ mod tests {
     }
 
     #[test]
-    fn keli_core_rs_rejects_trojan_tls_route_outbound_until_core_supports_it() {
+    fn renders_keli_core_rs_trojan_tls_route_outbounds() {
         let mut node = test_node("http", 86, "");
         node.common.routes = vec![Route {
             id: 1,
             match_rules: vec!["domain:example.com".to_string()],
             action: "route".to_string(),
             action_value: Some(
-                r#"{"tag":"trojan-out","protocol":"trojan","settings":{"servers":[{"address":"proxy.example.com","port":443,"password":"secret"}]},"streamSettings":{"security":"tls","tlsSettings":{"serverName":"proxy.example.com"}}}"#
+                r#"{"tag":"trojan-out","protocol":"trojan","settings":{"servers":[{"address":"proxy.example.com","port":443,"password":"secret"}]},"streamSettings":{"security":"tls","tlsSettings":{"serverName":"sni.example.com","allowInsecure":true,"alpn":["h2","http/1.1"]}}}"#
                     .to_string(),
             ),
         }];
@@ -3593,9 +3627,20 @@ mod tests {
         )
         .unwrap();
 
-        let err = render_core_config(&plan).unwrap_err();
+        let config = render_core_config(&plan).unwrap();
 
-        assert!(err.message.contains("security tls"));
+        assert_eq!(config["outbounds"][1]["tag"], "trojan-out");
+        assert_eq!(config["outbounds"][1]["protocol"], "trojan");
+        assert_eq!(config["outbounds"][1]["address"], "proxy.example.com");
+        assert_eq!(config["outbounds"][1]["port"], 443);
+        assert_eq!(config["outbounds"][1]["password"], "secret");
+        assert_eq!(
+            config["outbounds"][1]["tls"]["server_name"],
+            "sni.example.com"
+        );
+        assert_eq!(config["outbounds"][1]["tls"]["allow_insecure"], true);
+        assert_eq!(config["outbounds"][1]["tls"]["alpn"][0], "h2");
+        assert_eq!(config["outbounds"][1]["tls"]["alpn"][1], "http/1.1");
     }
 
     #[test]
