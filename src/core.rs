@@ -691,7 +691,7 @@ fn keli_core_rs_route_outbound_stream(
         "tcp" | "ws" | "httpupgrade" | "grpc" | "h2" | "http" | "xhttp" | "splithttp" | "quic"
     ) {
         return Err(CoreError::new(format!(
-            "keli-core-rs route outbound {tag} on inbound {} supports only tcp/ws/httpupgrade/grpc/h2/xhttp stream-one/plain quic today; network {network} is not supported yet",
+            "keli-core-rs route outbound {tag} on inbound {} supports only tcp/ws/httpupgrade/grpc/h2/xhttp stream-one/quic today; network {network} is not supported yet",
             inbound.tag
         )));
     }
@@ -774,8 +774,8 @@ fn keli_core_rs_route_outbound_stream(
     } else {
         false
     };
-    let quic_plain = if network == "quic" {
-        validate_plain_quic_settings(inbound, tag, transport_settings)?;
+    let quic_supported = if network == "quic" {
+        validate_quic_settings(inbound, tag, transport_settings)?;
         true
     } else {
         false
@@ -819,17 +819,17 @@ fn keli_core_rs_route_outbound_stream(
     } else {
         BTreeMap::new()
     };
-    let quic_security = if quic_plain {
+    let quic_security = if quic_supported {
         outbound_string(transport_settings, "security").or_else(|| Some("none".to_string()))
     } else {
         None
     };
-    let quic_key = if quic_plain {
+    let quic_key = if quic_supported {
         outbound_string(transport_settings, "key")
     } else {
         None
     };
-    let quic_header_type = if quic_plain {
+    let quic_header_type = if quic_supported {
         transport_settings
             .get("header")
             .and_then(|header| outbound_string(header, "type"))
@@ -1106,7 +1106,7 @@ fn validate_xhttp_stream_one_settings(
     Ok(())
 }
 
-fn validate_plain_quic_settings(
+fn validate_quic_settings(
     inbound: &InboundPlan,
     tag: &str,
     settings: &Value,
@@ -1130,15 +1130,20 @@ fn validate_plain_quic_settings(
         )));
     }
     let security = outbound_string(settings, "security").unwrap_or_else(|| "none".to_string());
-    if !security.eq_ignore_ascii_case("none") {
+    let security_lc = security.to_ascii_lowercase();
+    if !matches!(
+        security_lc.as_str(),
+        "none" | "aes-128-gcm" | "aes128-gcm" | "chacha20-poly1305" | "chacha20-ietf-poly1305"
+    ) {
         return Err(CoreError::new(format!(
-            "keli-core-rs route outbound {tag} on inbound {} supports quicSettings.security none only today",
+            "keli-core-rs route outbound {tag} on inbound {} supports only quicSettings.security none/aes-128-gcm/chacha20-poly1305 today",
             inbound.tag
         )));
     }
-    if outbound_string(settings, "key")
-        .map(|value| !value.trim().is_empty())
-        .unwrap_or(false)
+    if security_lc == "none"
+        && outbound_string(settings, "key")
+            .map(|value| !value.trim().is_empty())
+            .unwrap_or(false)
     {
         return Err(CoreError::new(format!(
             "keli-core-rs route outbound {tag} on inbound {} supports quicSettings.key only with encrypted quic security",
@@ -4654,6 +4659,40 @@ mod tests {
     }
 
     #[test]
+    fn renders_keli_core_rs_vless_encrypted_quic_route_outbounds() {
+        let mut node = test_node("http", 106, "");
+        node.common.routes = vec![Route {
+            id: 1,
+            match_rules: vec!["domain:example.com".to_string()],
+            action: "route".to_string(),
+            action_value: Some(
+                r#"{"tag":"vless-quic","protocol":"vless","settings":{"vnext":[{"address":"proxy.example.com","port":443,"users":[{"id":"11111111-1111-1111-1111-111111111111","encryption":"none"}]}]},"streamSettings":{"network":"quic","security":"tls","tlsSettings":{"serverName":"sni.example.com","allowInsecure":true},"quicSettings":{"security":"aes-128-gcm","key":"secret","header":{"type":"none"}}}}"#
+                    .to_string(),
+            ),
+        }];
+        let plan = CorePlan::from_nodes(
+            CoreKind::KeliCoreRs,
+            PathBuf::from("/srv/v2node/keli-core-rs.json"),
+            &[node],
+        )
+        .unwrap();
+
+        let config = render_core_config(&plan).unwrap();
+
+        assert_eq!(config["outbounds"][1]["tag"], "vless-quic");
+        assert_eq!(config["outbounds"][1]["transport"]["network"], "quic");
+        assert_eq!(
+            config["outbounds"][1]["transport"]["quic_security"],
+            "aes-128-gcm"
+        );
+        assert_eq!(config["outbounds"][1]["transport"]["quic_key"], "secret");
+        assert_eq!(
+            config["outbounds"][1]["transport"]["quic_header_type"],
+            "none"
+        );
+    }
+
+    #[test]
     fn renders_keli_core_rs_vmess_alter_id_route_outbounds() {
         let mut node = test_node("http", 101, "");
         node.common.routes = vec![Route {
@@ -4787,10 +4826,26 @@ mod tests {
             &[node],
         )
         .unwrap();
+        assert!(render_core_config(&plan).is_ok());
+
+        let mut node = test_node("http", 91, "");
+        node.common.routes = vec![Route {
+            id: 1,
+            match_rules: vec!["domain:example.com".to_string()],
+            action: "route".to_string(),
+            action_value: Some(
+                r#"{"tag":"vless-quic","protocol":"vless","settings":{"vnext":[{"address":"proxy.example.com","port":443,"users":[{"id":"11111111-1111-1111-1111-111111111111","encryption":"none"}]}]},"streamSettings":{"network":"quic","quicSettings":{"security":"aes-128-gcm","key":"secret","header":{"type":"srtp"}}}}"#
+                    .to_string(),
+            ),
+        }];
+        let plan = CorePlan::from_nodes(
+            CoreKind::KeliCoreRs,
+            PathBuf::from("/srv/v2node/keli-core-rs.json"),
+            &[node],
+        )
+        .unwrap();
         let err = render_core_config(&plan).unwrap_err();
-        assert!(err
-            .message
-            .contains("supports quicSettings.security none only today"));
+        assert!(err.message.contains("quicSettings.header.type none"));
     }
 
     #[test]
