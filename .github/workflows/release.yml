@@ -1,22 +1,33 @@
 name: Build Release
 
 on:
+  push:
+    tags:
+      - "v*"
   workflow_dispatch:
     inputs:
       version:
         description: Version label for artifact names, for example v0.1.0
         required: true
         default: v0.1.0
+      create_release:
+        description: Publish the packaged files as GitHub Release assets
+        required: true
+        type: boolean
+        default: true
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: false
 
+permissions:
+  contents: write
+
 jobs:
   linux-x86_64:
     name: Linux x86_64
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 35
 
     steps:
       - name: Checkout
@@ -26,6 +37,23 @@ jobs:
         run: |
           rustup toolchain install stable --profile minimal
           rustup default stable
+
+      - name: Resolve release metadata
+        id: meta
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            version="${{ inputs.version }}"
+          else
+            version="${GITHUB_REF_NAME}"
+          fi
+          if [[ ! "${version}" =~ ^v[0-9]+ ]]; then
+            echo "release version must start with v, got ${version}" >&2
+            exit 1
+          fi
+          echo "version=${version}" >> "${GITHUB_OUTPUT}"
+          echo "asset_prefix=kelinode-rs-${version}-linux-x86_64" >> "${GITHUB_OUTPUT}"
 
       - name: Cache cargo
         uses: actions/cache@v4
@@ -39,6 +67,9 @@ jobs:
             ${{ runner.os }}-release-cargo-
             ${{ runner.os }}-cargo-
 
+      - name: Run tests
+        run: cargo test --locked --all-targets -- --test-threads=1
+
       - name: Build release binary
         run: cargo build --release --locked
 
@@ -46,18 +77,47 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          name="kelinode-rs-${{ inputs.version }}-linux-x86_64"
+          version="${{ steps.meta.outputs.version }}"
+          name="${{ steps.meta.outputs.asset_prefix }}"
           mkdir -p "dist/${name}"
           cp target/release/kelinode-rs "dist/${name}/"
           cp README.md "dist/${name}/"
+          cp docs/CONTRACT.md "dist/${name}/CONTRACT.md"
+          cp docs/NATIVE_CORE_PARITY.md "dist/${name}/NATIVE_CORE_PARITY.md"
           tar -C dist -czf "dist/${name}.tar.gz" "${name}"
           (cd dist && sha256sum "${name}.tar.gz" > "${name}.tar.gz.sha256")
+          sha256="$(cut -d ' ' -f 1 "dist/${name}.tar.gz.sha256")"
+          cat > "dist/${name}.manifest.json" <<JSON
+          {
+            "name": "kelinode-rs",
+            "version": "${version}",
+            "platform": "linux-x86_64",
+            "archive": "${name}.tar.gz",
+            "sha256": "${sha256}",
+            "binary": "kelinode-rs",
+            "run_args": ["run", "<config.yml>"]
+          }
+          JSON
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: kelinode-rs-${{ inputs.version }}-linux-x86_64
+          name: ${{ steps.meta.outputs.asset_prefix }}
           path: |
             dist/*.tar.gz
             dist/*.sha256
+            dist/*.manifest.json
           if-no-files-found: error
+
+      - name: Upload GitHub release assets
+        if: ${{ github.event_name == 'push' || inputs.create_release == true }}
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.meta.outputs.version }}
+          name: kelinode-rs ${{ steps.meta.outputs.version }}
+          prerelease: true
+          files: |
+            dist/*.tar.gz
+            dist/*.sha256
+            dist/*.manifest.json
+          fail_on_unmatched_files: true
