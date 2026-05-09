@@ -238,7 +238,7 @@ pub fn core_process_spec(
         command,
         args: core_process_args(&plan.kind, &config_path)?,
         working_dir: config_path.parent().map(|path| path.to_path_buf()),
-        env: BTreeMap::new(),
+        env: core_process_env(&plan.kind, &config_path),
     })
 }
 
@@ -321,6 +321,35 @@ fn core_process_args(kind: &CoreKind, config_path: &PathBuf) -> Result<Vec<Strin
     }
 }
 
+fn core_process_env(kind: &CoreKind, config_path: &Path) -> BTreeMap<String, String> {
+    let mut env = BTreeMap::new();
+    let CoreKind::KeliCoreRs = kind else {
+        return env;
+    };
+
+    let Some(config_dir) = config_path.parent() else {
+        return env;
+    };
+
+    env.insert(
+        "KELI_CORE_GEOIP_DIR".to_string(),
+        join_process_path(config_dir, "geoip"),
+    );
+    env.insert(
+        "KELI_CORE_GEOSITE_DIR".to_string(),
+        join_process_path(config_dir, "geosite"),
+    );
+    env
+}
+
+fn join_process_path(base: &Path, segment: &str) -> String {
+    let base = base.display().to_string();
+    if base.starts_with('/') {
+        return format!("{}/{}", base.trim_end_matches('/'), segment);
+    }
+    Path::new(&base).join(segment).display().to_string()
+}
+
 pub fn keli_core_rs_control_addr(config_path: &PathBuf) -> String {
     let config_path = absolute_process_path(config_path);
     let hash = fnv1a64(config_path.display().to_string().as_bytes());
@@ -384,6 +413,7 @@ mod tests {
         assert_eq!(spec.command, "xray");
         assert_eq!(spec.args, vec!["run", "-config", "/srv/v2node/config.json"]);
         assert_eq!(spec.working_dir, Some(PathBuf::from("/srv/v2node")));
+        assert!(spec.env.is_empty());
     }
 
     #[test]
@@ -410,6 +440,14 @@ mod tests {
             ]
         );
         assert_eq!(spec.working_dir, Some(PathBuf::from("/srv/v2node")));
+        assert_eq!(
+            spec.env["KELI_CORE_GEOIP_DIR"],
+            "/srv/v2node/geoip".to_string()
+        );
+        assert_eq!(
+            spec.env["KELI_CORE_GEOSITE_DIR"],
+            "/srv/v2node/geosite".to_string()
+        );
     }
 
     #[test]
@@ -462,6 +500,8 @@ mod tests {
 
         assert!(PathBuf::from(&spec.args[1]).is_absolute());
         assert!(spec.working_dir.as_ref().unwrap().is_absolute());
+        assert!(PathBuf::from(&spec.env["KELI_CORE_GEOIP_DIR"]).is_absolute());
+        assert!(PathBuf::from(&spec.env["KELI_CORE_GEOSITE_DIR"]).is_absolute());
         assert_eq!(spec.args[3], keli_core_rs_control_addr(&plan.config_path));
     }
 
