@@ -193,6 +193,21 @@ pub fn split_core_plans_for_nodes_with_kind(
     let core_nodes = nodes
         .iter()
         .filter(|node| sidecar_protocol_name_for_kind(&core_kind, node.protocol).is_none())
+        .filter(|node| {
+            if core_kind != CoreKind::KeliCoreRs {
+                return true;
+            }
+            match node_supported_by_keli_core_rs(&config_path, node, users_by_node_tag) {
+                Ok(()) => true,
+                Err(error) => {
+                    eprintln!(
+                        "skipping unsupported keli-core-rs inbound {}: {}",
+                        node.tag, error.message
+                    );
+                    false
+                }
+            }
+        })
         .cloned()
         .collect::<Vec<_>>();
     let xray = if core_nodes.is_empty() {
@@ -220,6 +235,23 @@ pub fn split_core_plans_for_nodes_with_kind(
     }
 
     Ok(CorePlanBundle { xray, sidecars })
+}
+
+fn node_supported_by_keli_core_rs(
+    config_path: &Path,
+    node: &NodeInfo,
+    users_by_node_tag: &BTreeMap<String, Vec<UserInfo>>,
+) -> Result<(), CoreError> {
+    let probe = CorePlan::from_nodes_with_users(
+        CoreKind::KeliCoreRs,
+        config_path.to_path_buf(),
+        std::slice::from_ref(node),
+        users_by_node_tag,
+    )?;
+    for inbound in &probe.inbounds {
+        validate_keli_core_rs_inbound(inbound)?;
+    }
+    Ok(())
 }
 
 pub fn sidecar_protocol_name(protocol: Protocol) -> Option<&'static str> {
@@ -3547,6 +3579,28 @@ mod tests {
             bundle.sidecars[0].kind,
             CoreKind::Sidecar("naive".to_string())
         );
+    }
+
+    #[test]
+    fn keli_core_rs_skips_unsupported_native_inbounds_without_dropping_supported_nodes() {
+        let supported = test_node("vless", 41, "");
+        let mut unsupported = test_node("anytls", 42, "");
+        unsupported.security = Security::Tls;
+        unsupported.common.tls = 1;
+
+        let nodes = vec![supported, unsupported];
+        let bundle = split_core_plans_for_nodes_with_kind(
+            CoreKind::KeliCoreRs,
+            PathBuf::from("/srv/v2node/config.json"),
+            &nodes,
+            &std::collections::BTreeMap::new(),
+        )
+        .unwrap();
+
+        let core = bundle.xray.unwrap();
+        assert_eq!(core.kind, CoreKind::KeliCoreRs);
+        assert_eq!(core.inbounds.len(), 1);
+        assert_eq!(core.inbounds[0].protocol, "vless");
     }
 
     #[test]
