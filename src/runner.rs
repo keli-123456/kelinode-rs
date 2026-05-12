@@ -14,13 +14,13 @@ use crate::health::ResourceSnapshot;
 use crate::panel::client::{PanelClient, PanelClientOptions};
 use crate::panel::types::UserInfo;
 use crate::port_forward::PortForwardExecutor;
-use crate::process::{keli_core_rs_control_addr, ProcessSupervisor};
+use crate::process::{core_process_spec, keli_core_rs_control_addr, ProcessSupervisor};
 use crate::realtime::{
     build_realtime_receipt, realtime_runtime_task, RealtimeMessage, RealtimeOptions,
     RealtimeRuntimeTask,
 };
 use crate::realtime_client::{connect_realtime_transport, RealtimeTransport};
-use crate::report::report_keli_core_activity_to_panel;
+use crate::report::{report_keli_core_activity_to_panel_with_user_lookup, KeliCoreUserIdLookup};
 use crate::runtime::{
     node_config_for_info as runtime_node_config_for_info, rebuild_runtime_plan_with_users,
     RuntimeBootstrapPlan,
@@ -189,6 +189,7 @@ pub struct PanelRuntimeLoop<'a, P, F> {
     pub upgrade_status: Option<Value>,
     pub resource_sampler: ResourceSampler,
     pub subscription_proxy_manager: Option<SubscriptionProxyRuntimeManager>,
+    user_id_lookup: KeliCoreUserIdLookup,
     user_sync: BTreeMap<String, RuntimeUserSyncEntry>,
 }
 
@@ -219,6 +220,7 @@ where
         port_forward_executor: &'a mut F,
         panel_client: Option<PanelClient>,
     ) -> Self {
+        let user_id_lookup = runtime_user_id_lookup_from_plan(&plan);
         Self {
             plan,
             process_supervisor,
@@ -230,6 +232,7 @@ where
             upgrade_status: None,
             resource_sampler: ResourceSampler::default(),
             subscription_proxy_manager: None,
+            user_id_lookup,
             user_sync: BTreeMap::new(),
         }
     }
@@ -283,6 +286,11 @@ where
     ) -> RuntimeLoopFuture<'a, Result<RuntimeLoopSignal, String>> {
         Box::pin(async move {
             if !options.users_by_node_tag.is_empty() {
+                let user_change_tags = options
+                    .users_by_node_tag
+                    .keys()
+                    .cloned()
+                    .collect::<Vec<_>>();
                 let applied_user_delta = try_apply_keli_core_rs_user_deltas(
                     &self.plan,
                     &self.user_sync,
@@ -290,9 +298,15 @@ where
                 );
                 if applied_user_delta {
                     options.control.keli_core_rs_user_delta_applied = true;
+                    sync_runtime_user_id_lookup_from_state(
+                        &mut self.user_id_lookup,
+                        &self.user_sync,
+                        &user_change_tags,
+                    );
                 } else {
                     self.plan =
                         rebuild_runtime_plan_with_users(&self.plan, &options.users_by_node_tag)?;
+                    self.user_id_lookup = runtime_user_id_lookup_from_plan(&self.plan);
                 }
                 options.users_by_node_tag.clear();
             }
@@ -316,6 +330,16 @@ where
             if let Some(manager) = &self.subscription_proxy_manager {
                 refresh_subscription_proxy_health(&mut options, manager);
             }
+            if options.control.start_core
+                && ensure_keli_core_rs_restart_uses_latest_users(
+                    &mut self.plan,
+                    &self.user_sync,
+                    &mut *self.process_supervisor,
+                    options.control.core_command.as_deref(),
+                )?
+            {
+                self.user_id_lookup = runtime_user_id_lookup_from_plan(&self.plan);
+            }
             let report_to_panel = options.report_to_panel;
             if report_to_panel && self.panel_clients.is_empty() {
                 return Err("runtime tick requested panel report without panel client".to_string());
@@ -333,7 +357,11 @@ where
                 let action =
                     report_runtime_apply_result_to_panels(&self.panel_clients, &result.apply)
                         .await?;
-                report_keli_core_activity_to_panel(&self.plan).await?;
+                report_keli_core_activity_to_panel_with_user_lookup(
+                    &self.plan,
+                    &self.user_id_lookup,
+                )
+                .await?;
                 return Ok(runtime_loop_signal(&action));
             }
             Ok(result.signal)
@@ -420,6 +448,111 @@ fn keli_core_user_delta_user(node_tag: &str, user: &UserInfo) -> Value {
         "speed_limit": user.speed_limit,
         "device_limit": user.device_limit
     })
+}
+
+fn ensure_keli_core_rs_restart_uses_latest_users<P>(
+    plan: &mut RuntimeBootstrapPlan,
+    sync_state: &BTreeMap<String, RuntimeUserSyncEntry>,
+    process_supervisor: &mut P,
+    core_command: Option<&str>,
+) -> Result<bool, String>
+where
+    P: ProcessSupervisor,
+{
+    let Some(core_plan) = plan.core_plan.as_ref() else {
+        return Ok(false);
+    };
+    if core_plan.kind != CoreKind::KeliCoreRs {
+        return Ok(false);
+    }
+    let spec = core_process_spec(core_plan, core_command).map_err(|err| err.message)?;
+    if process_supervisor
+        .status(&spec.name)
+        .map_err(|err| err.message)?
+        .is_running()
+    {
+        return Ok(false);
+    }
+    let users_by_node_tag = latest_users_by_node_tag_for_core_plan(plan, sync_state);
+    if users_by_node_tag.is_empty() {
+        return Ok(false);
+    }
+    *plan = rebuild_runtime_plan_with_users(plan, &users_by_node_tag)?;
+    Ok(true)
+}
+
+fn latest_users_by_node_tag_for_core_plan(
+    plan: &RuntimeBootstrapPlan,
+    sync_state: &BTreeMap<String, RuntimeUserSyncEntry>,
+) -> BTreeMap<String, Vec<UserInfo>> {
+    let Some(core_plan) = plan.core_plan.as_ref() else {
+        return BTreeMap::new();
+    };
+    core_plan
+        .inbounds
+        .iter()
+        .filter_map(|inbound| {
+            let users = sync_state
+                .get(&inbound.tag)
+                .filter(|entry| !entry.state.users.is_empty())
+                .map(|entry| entry.state.users.clone())
+                .unwrap_or_else(|| {
+                    inbound
+                        .users
+                        .iter()
+                        .map(|user| UserInfo {
+                            id: user.id,
+                            uuid: user.uuid.clone(),
+                            speed_limit: user.speed_limit,
+                            device_limit: user.device_limit,
+                        })
+                        .collect()
+                });
+            if users.is_empty() {
+                None
+            } else {
+                Some((inbound.tag.clone(), users))
+            }
+        })
+        .collect()
+}
+
+fn runtime_user_id_lookup_from_plan(plan: &RuntimeBootstrapPlan) -> KeliCoreUserIdLookup {
+    plan.core_plan
+        .iter()
+        .flat_map(|core_plan| core_plan.inbounds.iter())
+        .map(|inbound| {
+            (
+                inbound.tag.clone(),
+                inbound
+                    .users
+                    .iter()
+                    .map(|user| (user.uuid.clone(), user.id))
+                    .collect(),
+            )
+        })
+        .collect()
+}
+
+fn sync_runtime_user_id_lookup_from_state(
+    lookup: &mut KeliCoreUserIdLookup,
+    sync_state: &BTreeMap<String, RuntimeUserSyncEntry>,
+    node_tags: &[String],
+) {
+    for node_tag in node_tags {
+        let Some(entry) = sync_state.get(node_tag) else {
+            continue;
+        };
+        lookup.insert(
+            node_tag.clone(),
+            entry
+                .state
+                .users
+                .iter()
+                .map(|user| (user.uuid.clone(), user.id))
+                .collect(),
+        );
+    }
 }
 
 fn refresh_runtime_health(
@@ -964,7 +1097,7 @@ mod tests {
     use crate::machine::MachineUpgradeCommand;
     use crate::panel::types::{CommonNode, NodeInfo, UserInfo};
     use crate::port_forward::{PortForwardCommand, PortForwardExecutor};
-    use crate::process::{keli_core_rs_control_addr, MemoryProcessSupervisor};
+    use crate::process::{keli_core_rs_control_addr, MemoryProcessSupervisor, ProcessSupervisor};
     use crate::realtime::RealtimeRuntimeTask;
     use crate::runtime::build_runtime_bootstrap_plan;
     use crate::subscription_proxy::SubscriptionProxyRuntimeManager;
@@ -1616,6 +1749,112 @@ mod tests {
             .iter()
             .flat_map(|inbound| inbound.users.iter())
             .all(|user| user.uuid != new_user.uuid));
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn panel_runtime_loop_restores_latest_users_when_native_core_restarts() {
+        let dir = temp_test_dir("panel-runtime-loop-user-delta-restart");
+        let mut resolved = ResolvedConfig {
+            kernel: Default::default(),
+            realtime: Default::default(),
+            machine: ResolvedMachineConfig {
+                enabled: true,
+                continue_on_error: true,
+                profiles: Vec::new(),
+            },
+            agent: Default::default(),
+            nodes: vec![NodeConfig {
+                url: "https://panel.example.test".to_string(),
+                token: "token".to_string(),
+                node_id: 10,
+                machine_id: 10,
+                ..NodeConfig::default()
+            }],
+        };
+        resolved.kernel.r#type = "keli-core-rs".to_string();
+        resolved.kernel.config_dir = dir.join("v2node").display().to_string();
+        let node = test_node_with_host("https://panel.example.test", "vless", 10);
+        let tag = node.tag.clone();
+        let plan = build_runtime_bootstrap_plan(resolved, vec![node], Vec::new()).unwrap();
+        let mut process = MemoryProcessSupervisor::default();
+        let mut port_forward = FakePortForwardExecutor::default();
+        let mut runner = PanelRuntimeLoop::new(plan, &mut process, &mut port_forward, None);
+        let old_user = UserInfo {
+            id: 10,
+            uuid: "11111111-1111-1111-1111-111111111111".to_string(),
+            speed_limit: 0,
+            device_limit: 0,
+        };
+        let new_user = UserInfo {
+            id: 11,
+            uuid: "22222222-2222-2222-2222-222222222222".to_string(),
+            speed_limit: 20,
+            device_limit: 2,
+        };
+        let mut initial_users_by_tag = BTreeMap::new();
+        initial_users_by_tag.insert(tag.clone(), vec![old_user.clone()]);
+
+        AsyncRuntimeLoopCallbacks::run_tick(
+            &mut runner,
+            RuntimeTickOptions {
+                control: RuntimeControlOptions {
+                    machine_id: 10,
+                    start_core: true,
+                    ..RuntimeControlOptions::default()
+                },
+                report_to_panel: false,
+                users_by_node_tag: initial_users_by_tag,
+            },
+        )
+        .await
+        .unwrap();
+        let config_path = runner.plan.core_plan.as_ref().unwrap().config_path.clone();
+        let saved_before = fs::read_to_string(&config_path).unwrap();
+        assert!(saved_before.contains(&old_user.uuid));
+        assert!(!saved_before.contains(&new_user.uuid));
+
+        runner.user_sync.insert(
+            tag.clone(),
+            RuntimeUserSyncEntry {
+                state: UserSyncState {
+                    revision: 43,
+                    users: vec![old_user, new_user.clone()],
+                    updated_at: None,
+                },
+                delta_supported: true,
+                path: String::new(),
+                last_change: None,
+            },
+        );
+        runner
+            .process_supervisor
+            .stop("core:keli-core-rs")
+            .expect("stop native core");
+        let starts_before = runner.process_supervisor.starts.len();
+
+        let signal = AsyncRuntimeLoopCallbacks::run_tick(
+            &mut runner,
+            RuntimeTickOptions {
+                control: RuntimeControlOptions {
+                    machine_id: 10,
+                    start_core: true,
+                    hot_apply_keli_core_rs: true,
+                    ..RuntimeControlOptions::default()
+                },
+                report_to_panel: false,
+                users_by_node_tag: BTreeMap::new(),
+            },
+        )
+        .await
+        .unwrap();
+        let saved_after = fs::read_to_string(&config_path).unwrap();
+
+        assert_eq!(signal, RuntimeLoopSignal::Continue);
+        assert!(saved_after.contains(&new_user.uuid));
+        assert_eq!(runner.process_supervisor.starts.len(), starts_before + 1);
+        assert_eq!(runner.user_id_lookup[&tag][&new_user.uuid], new_user.id);
 
         let _ = fs::remove_dir_all(dir);
     }

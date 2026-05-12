@@ -10,6 +10,8 @@ use crate::panel::types::UserTraffic;
 use crate::process::keli_core_rs_control_addr;
 use crate::runtime::{node_config_for_info, RuntimeBootstrapPlan};
 
+pub type KeliCoreUserIdLookup = BTreeMap<String, BTreeMap<String, u32>>;
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct NodeActivitySnapshot {
     pub traffic: Vec<UserTraffic>,
@@ -134,9 +136,18 @@ pub fn keli_core_traffic_snapshots(
     core_plan: &CorePlan,
     records: &[KeliCoreTrafficRecord],
 ) -> BTreeMap<String, NodeActivitySnapshot> {
+    keli_core_traffic_snapshots_with_user_lookup(core_plan, records, &KeliCoreUserIdLookup::new())
+}
+
+pub fn keli_core_traffic_snapshots_with_user_lookup(
+    core_plan: &CorePlan,
+    records: &[KeliCoreTrafficRecord],
+    user_lookup: &KeliCoreUserIdLookup,
+) -> BTreeMap<String, NodeActivitySnapshot> {
     let mut snapshots = BTreeMap::new();
     for record in records {
-        let Some((node_tag, uid)) = keli_core_record_report_target(core_plan, record) else {
+        let Some((node_tag, uid)) = keli_core_record_report_target(core_plan, record, user_lookup)
+        else {
             continue;
         };
 
@@ -157,12 +168,19 @@ pub fn keli_core_traffic_snapshots(
 fn keli_core_record_report_target<'a>(
     core_plan: &'a CorePlan,
     record: &KeliCoreTrafficRecord,
+    user_lookup: &KeliCoreUserIdLookup,
 ) -> Option<(&'a str, u32)> {
     core_plan.inbounds.iter().find_map(|inbound| {
         let node_tag = normalize_keli_core_record_tag(&record.node_tag, &inbound.tag)?;
         let uid = record
             .user_id
             .and_then(|id| u32::try_from(id).ok())
+            .or_else(|| {
+                user_lookup
+                    .get(node_tag)
+                    .and_then(|users| users.get(&record.user_uuid))
+                    .copied()
+            })
             .or_else(|| {
                 inbound
                     .users
@@ -351,6 +369,13 @@ pub async fn report_activity_batch_to_panel(
 pub async fn report_keli_core_activity_to_panel(
     plan: &RuntimeBootstrapPlan,
 ) -> Result<NodeActivityBatchReport, String> {
+    report_keli_core_activity_to_panel_with_user_lookup(plan, &KeliCoreUserIdLookup::new()).await
+}
+
+pub async fn report_keli_core_activity_to_panel_with_user_lookup(
+    plan: &RuntimeBootstrapPlan,
+    user_lookup: &KeliCoreUserIdLookup,
+) -> Result<NodeActivityBatchReport, String> {
     let Some(core_plan) = &plan.core_plan else {
         return Ok(NodeActivityBatchReport::default());
     };
@@ -373,7 +398,7 @@ pub async fn report_keli_core_activity_to_panel(
         return Err(error);
     }
 
-    let snapshots = keli_core_traffic_snapshots(core_plan, &records);
+    let snapshots = keli_core_traffic_snapshots_with_user_lookup(core_plan, &records, user_lookup);
     let targets = runtime_activity_targets(plan);
     let batch = report_activity_batch_to_panel(&targets, &snapshots).await;
     let failed = failed_keli_core_records(core_plan, &records, &batch);
@@ -474,11 +499,12 @@ mod tests {
 
     use super::{
         drain_keli_core_activity_snapshots, keli_core_traffic_snapshots,
-        keli_core_traffic_spool_path, load_pending_keli_core_traffic, minimum_report_bytes,
-        report_activity_batch_with, report_activity_with_fallback,
-        requeue_failed_keli_core_records, runtime_activity_targets, save_pending_keli_core_traffic,
-        KeliCoreTrafficDrainer, NodeActivityBatchReport, NodeActivityFailure, NodeActivityReport,
-        NodeActivitySender, NodeActivitySnapshot, NodeActivityTarget,
+        keli_core_traffic_snapshots_with_user_lookup, keli_core_traffic_spool_path,
+        load_pending_keli_core_traffic, minimum_report_bytes, report_activity_batch_with,
+        report_activity_with_fallback, requeue_failed_keli_core_records, runtime_activity_targets,
+        save_pending_keli_core_traffic, KeliCoreTrafficDrainer, KeliCoreUserIdLookup,
+        NodeActivityBatchReport, NodeActivityFailure, NodeActivityReport, NodeActivitySender,
+        NodeActivitySnapshot, NodeActivityTarget,
     };
     use crate::config::{AgentConfig, NodeConfig, ResolvedConfig, ResolvedMachineConfig};
     use crate::core::{CoreKind, CorePlan, InboundPlan, InboundUserPlan};
@@ -609,6 +635,33 @@ mod tests {
         assert_eq!(
             snapshots["node-a"].online[&99],
             vec!["198.51.100.9".to_string()]
+        );
+    }
+
+    #[test]
+    fn maps_keli_core_traffic_records_by_runtime_user_lookup() {
+        let records = vec![KeliCoreTrafficRecord {
+            node_tag: "node-a".to_string(),
+            user_uuid: "delta-uuid".to_string(),
+            user_id: None,
+            upload: 10,
+            download: 20,
+            online_ips: vec!["198.51.100.10".to_string()],
+        }];
+        let mut lookup = KeliCoreUserIdLookup::new();
+        lookup.insert(
+            "node-a".to_string(),
+            BTreeMap::from([("delta-uuid".to_string(), 42)]),
+        );
+
+        let snapshots =
+            keli_core_traffic_snapshots_with_user_lookup(&core_plan(), &records, &lookup);
+
+        assert_eq!(snapshots["node-a"].traffic[0].uid, 42);
+        assert_eq!(snapshots["node-a"].traffic[0].upload, 10);
+        assert_eq!(
+            snapshots["node-a"].online[&42],
+            vec!["198.51.100.10".to_string()]
         );
     }
 
