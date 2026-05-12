@@ -474,11 +474,11 @@ mod tests {
 
     use super::{
         drain_keli_core_activity_snapshots, keli_core_traffic_snapshots,
-        keli_core_traffic_spool_path, load_pending_keli_core_traffic, report_activity_batch_with,
-        report_activity_with_fallback, requeue_failed_keli_core_records, runtime_activity_targets,
-        save_pending_keli_core_traffic, KeliCoreTrafficDrainer, NodeActivityBatchReport,
-        NodeActivityFailure, NodeActivityReport, NodeActivitySender, NodeActivitySnapshot,
-        NodeActivityTarget,
+        keli_core_traffic_spool_path, load_pending_keli_core_traffic, minimum_report_bytes,
+        report_activity_batch_with, report_activity_with_fallback,
+        requeue_failed_keli_core_records, runtime_activity_targets, save_pending_keli_core_traffic,
+        KeliCoreTrafficDrainer, NodeActivityBatchReport, NodeActivityFailure, NodeActivityReport,
+        NodeActivitySender, NodeActivitySnapshot, NodeActivityTarget,
     };
     use crate::config::{AgentConfig, NodeConfig, ResolvedConfig, ResolvedMachineConfig};
     use crate::core::{CoreKind, CorePlan, InboundPlan, InboundUserPlan};
@@ -613,6 +613,41 @@ mod tests {
     }
 
     #[test]
+    fn merges_online_ips_without_duplicates() {
+        let records = vec![
+            traffic_record_with_ips(
+                "node-a",
+                "uuid-a",
+                1,
+                1,
+                vec![
+                    "198.51.100.9".to_string(),
+                    "198.51.100.7".to_string(),
+                    "198.51.100.9".to_string(),
+                ],
+            ),
+            traffic_record_with_ips(
+                "node-a|port:2100",
+                "uuid-a",
+                1,
+                1,
+                vec!["198.51.100.8".to_string(), "198.51.100.7".to_string()],
+            ),
+        ];
+
+        let snapshots = keli_core_traffic_snapshots(&core_plan(), &records);
+
+        assert_eq!(
+            snapshots["node-a"].online[&7],
+            vec![
+                "198.51.100.7".to_string(),
+                "198.51.100.8".to_string(),
+                "198.51.100.9".to_string()
+            ]
+        );
+    }
+
+    #[test]
     fn drains_keli_core_traffic_through_injected_client() {
         let mut drainer = FakeKeliCoreDrainer {
             records: vec![traffic_record("node-a", "uuid-b", 30, 40)],
@@ -692,6 +727,44 @@ mod tests {
     }
 
     #[test]
+    fn pending_keli_core_records_survive_until_failed_node_reports_successfully() {
+        let dir = temp_test_dir("traffic-spool-retry");
+        let path = dir.join("config.traffic.pending.json");
+        let pending = traffic_record("node-a", "uuid-a", 10, 20);
+        let drained = traffic_record("node-a|port:2100", "uuid-a", 1, 2);
+        save_pending_keli_core_traffic(&path, &[pending.clone()]).unwrap();
+
+        let mut records = load_pending_keli_core_traffic(&path).unwrap();
+        records.push(drained.clone());
+        save_pending_keli_core_traffic(&path, &records).unwrap();
+
+        let failed_batch = NodeActivityBatchReport {
+            reported: 0,
+            skipped: 0,
+            failures: vec![NodeActivityFailure {
+                tag: "node-a".to_string(),
+                error: "panel unavailable".to_string(),
+            }],
+        };
+        let failed = super::failed_keli_core_records(&core_plan(), &records, &failed_batch);
+        save_pending_keli_core_traffic(&path, &failed).unwrap();
+
+        assert_eq!(load_pending_keli_core_traffic(&path).unwrap(), records);
+
+        let successful_batch = NodeActivityBatchReport {
+            reported: 1,
+            skipped: 0,
+            failures: Vec::new(),
+        };
+        let failed = super::failed_keli_core_records(&core_plan(), &records, &successful_batch);
+        save_pending_keli_core_traffic(&path, &failed).unwrap();
+
+        assert!(load_pending_keli_core_traffic(&path).unwrap().is_empty());
+        assert!(!path.exists());
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn folds_keli_core_expanded_port_tags_back_to_node_tag() {
         let records = vec![traffic_record("node-a|port:2100", "uuid-a", 12, 34)];
 
@@ -737,6 +810,28 @@ mod tests {
         assert_eq!(targets[0].config.token, "token");
     }
 
+    #[test]
+    fn uses_largest_node_report_minimum_for_keli_core_drain() {
+        let resolved = ResolvedConfig {
+            kernel: Default::default(),
+            realtime: Default::default(),
+            machine: ResolvedMachineConfig {
+                enabled: false,
+                continue_on_error: false,
+                profiles: Vec::new(),
+            },
+            agent: AgentConfig::default(),
+            nodes: vec![node_config(1), node_config(2)],
+        };
+        let nodes = vec![
+            node_with_report_minimum(1, 64),
+            node_with_report_minimum(2, 1024),
+        ];
+        let plan = build_runtime_bootstrap_plan(resolved, nodes, Vec::new()).unwrap();
+
+        assert_eq!(minimum_report_bytes(&plan), 1024);
+    }
+
     fn sample_snapshot() -> NodeActivitySnapshot {
         let mut online = BTreeMap::new();
         online.insert(7, vec!["198.51.100.7".to_string()]);
@@ -755,6 +850,27 @@ mod tests {
             tag: tag.to_string(),
             config: NodeConfig::default(),
         }
+    }
+
+    fn node_config(node_id: u32) -> NodeConfig {
+        NodeConfig {
+            url: "https://panel.example.test".to_string(),
+            token: format!("token-{node_id}"),
+            node_id,
+            ..NodeConfig::default()
+        }
+    }
+
+    fn node_with_report_minimum(node_id: u32, minimum: u64) -> NodeInfo {
+        let common: CommonNode = serde_json::from_value(serde_json::json!({
+            "protocol": "socks",
+            "server_port": 10000 + node_id,
+            "base_config": {
+                "node_report_min_traffic": minimum
+            }
+        }))
+        .unwrap();
+        NodeInfo::from_common("https://panel.example.test", node_id, common).unwrap()
     }
 
     fn core_plan() -> CorePlan {
