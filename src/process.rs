@@ -1,10 +1,12 @@
 use std::collections::BTreeMap;
 use std::env;
+use std::fs;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::{Child, Command};
 
 use crate::core::{CoreKind, CorePlan};
+use crate::core_control::{KeliCoreControlClient, KELI_CORE_CONTROL_TOKEN_ENV};
 
 const DEFAULT_NATIVE_INSTALL_DIR: &str = "/usr/local/v2node";
 
@@ -238,7 +240,7 @@ pub fn core_process_spec(
         command,
         args: core_process_args(&plan.kind, &config_path)?,
         working_dir: config_path.parent().map(|path| path.to_path_buf()),
-        env: core_process_env(&plan.kind, &config_path),
+        env: core_process_env(&plan.kind, &config_path)?,
     })
 }
 
@@ -321,14 +323,17 @@ fn core_process_args(kind: &CoreKind, config_path: &PathBuf) -> Result<Vec<Strin
     }
 }
 
-fn core_process_env(kind: &CoreKind, config_path: &Path) -> BTreeMap<String, String> {
+fn core_process_env(
+    kind: &CoreKind,
+    config_path: &Path,
+) -> Result<BTreeMap<String, String>, ProcessError> {
     let mut env = BTreeMap::new();
     let CoreKind::KeliCoreRs = kind else {
-        return env;
+        return Ok(env);
     };
 
     let Some(config_dir) = config_path.parent() else {
-        return env;
+        return Ok(env);
     };
 
     env.insert(
@@ -339,7 +344,11 @@ fn core_process_env(kind: &CoreKind, config_path: &Path) -> BTreeMap<String, Str
         "KELI_CORE_GEOSITE_DIR".to_string(),
         join_process_path(config_dir, "geosite"),
     );
-    env
+    env.insert(
+        KELI_CORE_CONTROL_TOKEN_ENV.to_string(),
+        keli_core_rs_control_token(config_path)?,
+    );
+    Ok(env)
 }
 
 fn join_process_path(base: &Path, segment: &str) -> String {
@@ -354,6 +363,66 @@ pub fn keli_core_rs_control_addr(config_path: &PathBuf) -> String {
     let config_path = absolute_process_path(config_path);
     let hash = fnv1a64(config_path.display().to_string().as_bytes());
     format!("127.0.0.1:{}", 18080 + (hash % 1000))
+}
+
+pub fn keli_core_rs_control_client(
+    config_path: &Path,
+) -> Result<KeliCoreControlClient, ProcessError> {
+    let config_path = absolute_process_path(config_path);
+    let token = keli_core_rs_control_token(&config_path)?;
+    Ok(KeliCoreControlClient::new(keli_core_rs_control_addr(&config_path)).with_token(token))
+}
+
+pub fn keli_core_rs_control_token_path(config_path: &Path) -> PathBuf {
+    let config_path = absolute_process_path(config_path);
+    config_path.with_extension("control.token")
+}
+
+pub fn keli_core_rs_control_token(config_path: &Path) -> Result<String, ProcessError> {
+    let token_path = keli_core_rs_control_token_path(config_path);
+    if let Ok(contents) = fs::read_to_string(&token_path) {
+        let token = contents.trim();
+        if !token.is_empty() {
+            return Ok(token.to_string());
+        }
+    }
+
+    let token = generate_keli_core_rs_control_token()?;
+    if let Some(parent) = token_path.parent() {
+        fs::create_dir_all(parent).map_err(|err| {
+            ProcessError::new(format!(
+                "create keli-core-rs control token directory {}: {err}",
+                parent.display()
+            ))
+        })?;
+    }
+    fs::write(&token_path, format!("{token}\n")).map_err(|err| {
+        ProcessError::new(format!(
+            "write keli-core-rs control token {}: {err}",
+            token_path.display()
+        ))
+    })?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&token_path, fs::Permissions::from_mode(0o600)).map_err(|err| {
+            ProcessError::new(format!(
+                "secure keli-core-rs control token {}: {err}",
+                token_path.display()
+            ))
+        })?;
+    }
+    Ok(token)
+}
+
+fn generate_keli_core_rs_control_token() -> Result<String, ProcessError> {
+    let mut bytes = [0_u8; 32];
+    getrandom::getrandom(&mut bytes)
+        .map_err(|err| ProcessError::new(format!("generate keli-core-rs control token: {err}")))?;
+    Ok(bytes
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>())
 }
 
 fn absolute_process_path(path: &Path) -> PathBuf {
@@ -388,14 +457,22 @@ fn core_kind_label(kind: &CoreKind) -> String {
 mod tests {
     use std::collections::BTreeMap;
     use std::fs;
+    use std::io::{BufRead, BufReader, Write};
+    use std::net::TcpListener;
     use std::path::PathBuf;
+    use std::thread;
     use std::time::{SystemTime, UNIX_EPOCH};
 
+    use serde_json::json;
+
     use crate::core::{CoreKind, CorePlan};
+    use crate::core_control::{KeliCoreResponse, KELI_CORE_CONTROL_TOKEN_ENV};
 
     use super::{
-        core_process_spec, default_binary_command, keli_core_rs_control_addr, sidecar_process_spec,
-        MemoryProcessSupervisor, ProcessState, ProcessStatus, ProcessSupervisor,
+        core_process_spec, default_binary_command, keli_core_rs_control_addr,
+        keli_core_rs_control_client, keli_core_rs_control_token, keli_core_rs_control_token_path,
+        sidecar_process_spec, MemoryProcessSupervisor, ProcessState, ProcessStatus,
+        ProcessSupervisor,
     };
 
     #[test]
@@ -418,15 +495,18 @@ mod tests {
 
     #[test]
     fn builds_keli_core_rs_process_spec_from_core_plan() {
+        let dir = temp_test_dir("keli-core-rs-spec");
+        let config_path = dir.join("keli-core-rs.json");
         let plan = CorePlan {
             kind: CoreKind::KeliCoreRs,
-            config_path: PathBuf::from("/srv/v2node/keli-core-rs.json"),
+            config_path: config_path.clone(),
             listen_tags: Vec::new(),
             inbounds: Vec::new(),
         };
 
         let spec = core_process_spec(&plan, None).unwrap();
         let control_addr = keli_core_rs_control_addr(&plan.config_path);
+        let config = config_path.display().to_string();
 
         assert_eq!(spec.name, "core:keli-core-rs");
         assert_eq!(spec.command, "keli-core-rs");
@@ -434,20 +514,23 @@ mod tests {
             spec.args,
             vec![
                 "run-config".to_string(),
-                "/srv/v2node/keli-core-rs.json".to_string(),
+                config.clone(),
                 "--control".to_string(),
                 control_addr
             ]
         );
-        assert_eq!(spec.working_dir, Some(PathBuf::from("/srv/v2node")));
+        assert_eq!(spec.working_dir, Some(dir.clone()));
         assert_eq!(
             spec.env["KELI_CORE_GEOIP_DIR"],
-            "/srv/v2node/geoip".to_string()
+            dir.join("geoip").display().to_string()
         );
         assert_eq!(
             spec.env["KELI_CORE_GEOSITE_DIR"],
-            "/srv/v2node/geosite".to_string()
+            dir.join("geosite").display().to_string()
         );
+        assert!(!spec.env[KELI_CORE_CONTROL_TOKEN_ENV].is_empty());
+        assert!(!config.contains(&spec.env[KELI_CORE_CONTROL_TOKEN_ENV]));
+        fs::remove_dir_all(dir).ok();
     }
 
     #[test]
@@ -489,9 +572,18 @@ mod tests {
 
     #[test]
     fn core_process_spec_absolutizes_relative_config_path() {
+        let rel_root = PathBuf::from(format!(
+            "kelinode-rs-relative-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let rel_config = rel_root.join("v2node/config.json");
         let plan = CorePlan {
             kind: CoreKind::KeliCoreRs,
-            config_path: PathBuf::from("runtime/v2node/config.json"),
+            config_path: rel_config.clone(),
             listen_tags: Vec::new(),
             inbounds: Vec::new(),
         };
@@ -502,7 +594,65 @@ mod tests {
         assert!(spec.working_dir.as_ref().unwrap().is_absolute());
         assert!(PathBuf::from(&spec.env["KELI_CORE_GEOIP_DIR"]).is_absolute());
         assert!(PathBuf::from(&spec.env["KELI_CORE_GEOSITE_DIR"]).is_absolute());
+        assert!(!spec.env[KELI_CORE_CONTROL_TOKEN_ENV].is_empty());
         assert_eq!(spec.args[3], keli_core_rs_control_addr(&plan.config_path));
+        fs::remove_dir_all(rel_root).ok();
+    }
+
+    #[test]
+    fn keli_core_rs_control_token_is_persisted_and_reused() {
+        let dir = temp_test_dir("control-token");
+        let config_path = dir.join("config.json");
+
+        let first = keli_core_rs_control_token(&config_path).unwrap();
+        let second = keli_core_rs_control_token(&config_path).unwrap();
+        let token_path = keli_core_rs_control_token_path(&config_path);
+
+        assert_eq!(first, second);
+        assert_eq!(fs::read_to_string(token_path).unwrap().trim(), first);
+        fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn keli_core_rs_control_client_sends_generated_token() {
+        let dir = temp_test_dir("control-client-token");
+        let config_path = dir.join("config.json");
+        let token = keli_core_rs_control_token(&config_path).unwrap();
+        let addr = keli_core_rs_control_addr(&config_path);
+        let listener = TcpListener::bind(&addr).unwrap();
+        let join = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut command = String::new();
+            BufReader::new(stream.try_clone().unwrap())
+                .read_line(&mut command)
+                .unwrap();
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(command.trim()).unwrap(),
+                json!({
+                    "type": "status",
+                    "token": token
+                })
+            );
+            writeln!(
+                stream,
+                "{}",
+                json!({
+                    "type": "status",
+                    "status": "running",
+                    "listeners": []
+                })
+            )
+            .unwrap();
+        });
+
+        let response = keli_core_rs_control_client(&config_path)
+            .unwrap()
+            .status()
+            .unwrap();
+
+        assert!(matches!(response, KeliCoreResponse::Status { .. }));
+        join.join().unwrap();
+        fs::remove_dir_all(dir).ok();
     }
 
     #[test]

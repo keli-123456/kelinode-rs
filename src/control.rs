@@ -4,7 +4,7 @@ use crate::config::SidecarProcessConfig;
 use crate::core::{
     render_core_config, write_core_config, CoreConfigWriteResult, CoreKind, CorePlan,
 };
-use crate::core_control::{KeliCoreControlClient, KeliCoreResponse};
+use crate::core_control::KeliCoreResponse;
 use crate::health::{build_machine_status_payload, HealthReportInput};
 use crate::machine::{MachineStatusPayload, MachineStatusResponse, MachineUpgradeCommand};
 use crate::panel::types::UserInfo;
@@ -14,8 +14,8 @@ use crate::port_forward::{
     PortForwardExecutor,
 };
 use crate::process::{
-    core_process_spec, keli_core_rs_control_addr, sidecar_process_spec, ProcessSpec, ProcessStatus,
-    ProcessSupervisor,
+    core_process_spec, keli_core_rs_control_client, sidecar_process_spec, ProcessSpec,
+    ProcessStatus, ProcessSupervisor,
 };
 use crate::runtime::{rebuild_runtime_plan_with_users, RuntimeBootstrapPlan};
 use crate::upgrade::{UpgradeExecutor, UpgradeManager, UpgradeStatus};
@@ -210,7 +210,8 @@ where
     }
 
     let config = render_core_config(core_plan).map_err(|err| HotApplyError::fatal(err.message))?;
-    let client = KeliCoreControlClient::new(keli_core_rs_control_addr(&core_plan.config_path));
+    let client = keli_core_rs_control_client(&core_plan.config_path)
+        .map_err(|err| HotApplyError::fallback(err.message))?;
     match client.apply_config_response(config) {
         Ok(KeliCoreResponse::Applied { decision, .. }) => {
             let mut status = current;

@@ -114,6 +114,7 @@ Not implemented yet:
 - Set `kernel.type: keli-core-rs` to select the experimental Rust-native core plan; `xray` remains the default.
 - Set `kernel.core_command` when the native core binary is installed outside `PATH`, such as from a `keli-core-rs` release tarball.
 - When `keli-core-rs` is already running, `kelinode-rs` hot-applies changed native configs through the local `ApplyConfig` control socket and falls back to a process reload if that control path is unavailable.
+- For native core control, `kelinode-rs` generates a per-config local token, injects it into the `keli-core-rs` process as `KELI_CORE_CONTROL_TOKEN`, and uses the same token for `ApplyConfig`, `ApplyUserDelta`, metrics, traffic drain, and requeue commands. The token is stored beside the generated config as a local control secret and is not written into the core config or machine status payload.
 - Real-client interop and production soak testing are still required before making `keli-core-rs` the default.
 - Subscription reverse proxy.
 

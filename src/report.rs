@@ -7,7 +7,7 @@ use crate::core::{CoreKind, CorePlan};
 use crate::core_control::{KeliCoreControlClient, KeliCoreTrafficRecord};
 use crate::panel::client::{PanelClient, PanelClientOptions};
 use crate::panel::types::UserTraffic;
-use crate::process::keli_core_rs_control_addr;
+use crate::process::keli_core_rs_control_client;
 use crate::runtime::{node_config_for_info, RuntimeBootstrapPlan};
 
 pub type KeliCoreUserIdLookup = BTreeMap<String, BTreeMap<String, u32>>;
@@ -383,7 +383,8 @@ pub async fn report_keli_core_activity_to_panel_with_user_lookup(
         return Ok(NodeActivityBatchReport::default());
     }
 
-    let mut client = KeliCoreControlClient::new(keli_core_rs_control_addr(&core_plan.config_path));
+    let mut client =
+        keli_core_rs_control_client(&core_plan.config_path).map_err(|err| err.message)?;
     let spool_path = keli_core_traffic_spool_path(&core_plan.config_path);
     let mut records = load_pending_keli_core_traffic(&spool_path)?;
     let drained = KeliCoreTrafficDrainer::drain_traffic(&mut client, minimum_report_bytes(plan))?;

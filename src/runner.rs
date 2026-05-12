@@ -9,12 +9,11 @@ use crate::control::{
     RuntimeControlOptions, RuntimeLoopSignal, RuntimeTickOptions,
 };
 use crate::core::CoreKind;
-use crate::core_control::KeliCoreControlClient;
 use crate::health::ResourceSnapshot;
 use crate::panel::client::{PanelClient, PanelClientOptions};
 use crate::panel::types::UserInfo;
 use crate::port_forward::PortForwardExecutor;
-use crate::process::{core_process_spec, keli_core_rs_control_addr, ProcessSupervisor};
+use crate::process::{core_process_spec, keli_core_rs_control_client, ProcessSupervisor};
 use crate::realtime::{
     build_realtime_receipt, realtime_runtime_task, RealtimeMessage, RealtimeOptions,
     RealtimeRuntimeTask,
@@ -466,7 +465,10 @@ fn try_apply_keli_core_rs_user_deltas(
         return false;
     }
 
-    let client = KeliCoreControlClient::new(keli_core_rs_control_addr(&core_plan.config_path));
+    let client = match keli_core_rs_control_client(&core_plan.config_path) {
+        Ok(client) => client,
+        Err(_) => return false,
+    };
     for node_tag in users_by_node_tag.keys() {
         let Some(entry) = sync_state.get(node_tag) else {
             return false;
@@ -660,7 +662,8 @@ fn keli_core_rs_metrics_snapshot(plan: &RuntimeBootstrapPlan) -> Option<Value> {
     if core_plan.kind != CoreKind::KeliCoreRs {
         return None;
     }
-    KeliCoreControlClient::new(keli_core_rs_control_addr(&core_plan.config_path))
+    keli_core_rs_control_client(&core_plan.config_path)
+        .ok()?
         .metrics()
         .ok()
 }
