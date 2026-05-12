@@ -37,6 +37,7 @@ impl std::error::Error for KeliCoreControlError {}
 #[serde(tag = "type", rename_all = "snake_case")]
 enum KeliCoreCommand {
     ApplyConfig { config: Value },
+    ApplyUserDelta { node_tag: String, delta: Value },
     DrainTraffic { minimum_bytes: u64 },
     RequeueTraffic { records: Vec<KeliCoreTrafficRecord> },
     Status,
@@ -48,6 +49,12 @@ enum KeliCoreCommand {
 pub enum KeliCoreResponse {
     Applied {
         decision: String,
+        status: Value,
+        listeners: Vec<Value>,
+    },
+    UserDeltaApplied {
+        node_tag: String,
+        result: KeliCoreUserDeltaResult,
         status: Value,
         listeners: Vec<Value>,
     },
@@ -82,6 +89,25 @@ pub struct KeliCoreTrafficRecord {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct KeliCoreApplyResult {
     pub decision: String,
+    pub status: Value,
+    pub listeners: Vec<Value>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
+pub struct KeliCoreUserDeltaResult {
+    pub added: usize,
+    pub updated: usize,
+    pub deleted: usize,
+    pub missing_updated: usize,
+    pub missing_deleted: usize,
+    pub active_users: usize,
+    pub full_applied: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct KeliCoreUserDeltaApplyResult {
+    pub node_tag: String,
+    pub result: KeliCoreUserDeltaResult,
     pub status: Value,
     pub listeners: Vec<Value>,
 }
@@ -128,6 +154,30 @@ impl KeliCoreControlClient {
             KeliCoreResponse::Error { message } => Err(KeliCoreControlError::new(message)),
             response => Err(KeliCoreControlError::new(format!(
                 "unexpected keli-core-rs apply response: {response:?}"
+            ))),
+        }
+    }
+
+    pub fn apply_user_delta(
+        &self,
+        node_tag: String,
+        delta: Value,
+    ) -> Result<KeliCoreUserDeltaApplyResult, KeliCoreControlError> {
+        match self.send(&KeliCoreCommand::ApplyUserDelta { node_tag, delta })? {
+            KeliCoreResponse::UserDeltaApplied {
+                node_tag,
+                result,
+                status,
+                listeners,
+            } => Ok(KeliCoreUserDeltaApplyResult {
+                node_tag,
+                result,
+                status,
+                listeners,
+            }),
+            KeliCoreResponse::Error { message } => Err(KeliCoreControlError::new(message)),
+            response => Err(KeliCoreControlError::new(format!(
+                "unexpected keli-core-rs user delta response: {response:?}"
             ))),
         }
     }
@@ -380,6 +430,83 @@ mod tests {
 
         assert_eq!(applied.decision, "updated");
         assert_eq!(applied.status, json!("running"));
+        join.join().unwrap();
+    }
+
+    #[test]
+    fn applies_user_delta_over_json_line_control_socket() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let join = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut command = String::new();
+            BufReader::new(stream.try_clone().unwrap())
+                .read_line(&mut command)
+                .unwrap();
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(command.trim()).unwrap(),
+                json!({
+                    "type": "apply_user_delta",
+                    "node_tag": "panel|vless|1",
+                    "delta": {
+                        "added": [{
+                            "id": 7,
+                            "uuid": "uuid-a",
+                            "password": null,
+                            "email": "panel|vless|1|uuid-a",
+                            "speed_limit": 10,
+                            "device_limit": 2
+                        }],
+                        "updated": [],
+                        "deleted": [],
+                        "revision": "42"
+                    }
+                })
+            );
+            writeln!(
+                stream,
+                "{}",
+                json!({
+                    "type": "user_delta_applied",
+                    "node_tag": "panel|vless|1",
+                    "result": {
+                        "added": 1,
+                        "updated": 0,
+                        "deleted": 0,
+                        "missing_updated": 0,
+                        "missing_deleted": 0,
+                        "active_users": 1,
+                        "full_applied": false
+                    },
+                    "status": "running",
+                    "listeners": []
+                })
+            )
+            .unwrap();
+        });
+
+        let applied = KeliCoreControlClient::new(addr.to_string())
+            .apply_user_delta(
+                "panel|vless|1".to_string(),
+                json!({
+                    "added": [{
+                        "id": 7,
+                        "uuid": "uuid-a",
+                        "password": null,
+                        "email": "panel|vless|1|uuid-a",
+                        "speed_limit": 10,
+                        "device_limit": 2
+                    }],
+                    "updated": [],
+                    "deleted": [],
+                    "revision": "42"
+                }),
+            )
+            .unwrap();
+
+        assert_eq!(applied.node_tag, "panel|vless|1");
+        assert_eq!(applied.result.added, 1);
+        assert_eq!(applied.result.active_users, 1);
         join.join().unwrap();
     }
 }

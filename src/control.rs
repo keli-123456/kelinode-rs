@@ -28,6 +28,7 @@ pub struct RuntimeControlOptions {
     pub sidecar_processes: BTreeMap<String, SidecarProcessConfig>,
     pub start_core: bool,
     pub hot_apply_keli_core_rs: bool,
+    pub keli_core_rs_user_delta_applied: bool,
     pub repair_port_forward: bool,
     pub health: HealthReportInput,
 }
@@ -158,6 +159,14 @@ where
     let spec =
         core_process_spec(core_plan, options.core_command.as_deref()).map_err(|err| err.message)?;
     if write_result.changed {
+        if options.keli_core_rs_user_delta_applied && core_plan.kind == CoreKind::KeliCoreRs {
+            if let Ok(mut status) = process_supervisor.status(&spec.name) {
+                if status.is_running() {
+                    status.message = "kept running after keli-core-rs user delta apply".to_string();
+                    return Ok(status);
+                }
+            }
+        }
         if options.hot_apply_keli_core_rs {
             match try_hot_apply_keli_core_rs_config(core_plan, process_supervisor, &spec) {
                 Ok(Some(status)) => return Ok(status),
@@ -586,6 +595,52 @@ mod tests {
             .message
             .contains("updated"));
         join.join().unwrap();
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn user_delta_applied_keli_core_rs_config_write_does_not_full_apply_again() {
+        let dir = temp_test_dir("keli-core-user-delta-applied");
+        let initial_plan =
+            keli_core_rs_plan_with_user(&dir, "11111111-1111-1111-1111-111111111111");
+        let mut process = MemoryProcessSupervisor::default();
+        let mut port_forward = FakePortForwardExecutor::default();
+
+        apply_runtime_plan(
+            &initial_plan,
+            &mut process,
+            &mut port_forward,
+            RuntimeControlOptions {
+                machine_id: 3,
+                start_core: true,
+                ..RuntimeControlOptions::default()
+            },
+        )
+        .unwrap();
+
+        let updated_plan =
+            keli_core_rs_plan_with_user(&dir, "22222222-2222-2222-2222-222222222222");
+        let result = apply_runtime_plan(
+            &updated_plan,
+            &mut process,
+            &mut port_forward,
+            RuntimeControlOptions {
+                machine_id: 3,
+                start_core: true,
+                hot_apply_keli_core_rs: true,
+                keli_core_rs_user_delta_applied: true,
+                ..RuntimeControlOptions::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(process.starts.len(), 1);
+        assert_eq!(process.stops.len(), 1);
+        assert_eq!(
+            result.core_process.as_ref().unwrap().message,
+            "kept running after keli-core-rs user delta apply"
+        );
 
         let _ = fs::remove_dir_all(dir);
     }

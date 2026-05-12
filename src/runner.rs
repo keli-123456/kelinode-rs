@@ -8,11 +8,13 @@ use crate::control::{
     report_runtime_apply_result_to_panels, run_runtime_tick, runtime_loop_signal,
     RuntimeControlOptions, RuntimeLoopSignal, RuntimeTickOptions,
 };
+use crate::core::CoreKind;
+use crate::core_control::KeliCoreControlClient;
 use crate::health::ResourceSnapshot;
 use crate::panel::client::{PanelClient, PanelClientOptions};
 use crate::panel::types::UserInfo;
 use crate::port_forward::PortForwardExecutor;
-use crate::process::ProcessSupervisor;
+use crate::process::{keli_core_rs_control_addr, ProcessSupervisor};
 use crate::realtime::{
     build_realtime_receipt, realtime_runtime_task, RealtimeMessage, RealtimeOptions,
     RealtimeRuntimeTask,
@@ -27,9 +29,9 @@ use crate::subscription_proxy::SubscriptionProxyRuntimeManager;
 use crate::system::{ResourceSampler, SystemPublicIpProbe};
 use crate::user::{
     apply_full_user_list, apply_user_delta_body, load_user_sync_state, save_user_sync_state,
-    user_sync_state_path, UserSyncState,
+    user_sync_state_path, UserListDiff, UserSyncState,
 };
-use serde_json::Value;
+use serde_json::{json, Value};
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct RuntimeLoopOptions {
@@ -195,6 +197,14 @@ struct RuntimeUserSyncEntry {
     state: UserSyncState,
     delta_supported: bool,
     path: String,
+    last_change: Option<RuntimeUserDeltaChange>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct RuntimeUserDeltaChange {
+    full: bool,
+    revision: i64,
+    diff: UserListDiff,
 }
 
 impl<'a, P, F> PanelRuntimeLoop<'a, P, F>
@@ -272,9 +282,17 @@ where
     ) -> RuntimeLoopFuture<'a, Result<RuntimeLoopSignal, String>> {
         Box::pin(async move {
             if !options.users_by_node_tag.is_empty() {
+                let applied_user_delta = try_apply_keli_core_rs_user_deltas(
+                    &self.plan,
+                    &self.user_sync,
+                    &options.users_by_node_tag,
+                );
                 self.plan =
                     rebuild_runtime_plan_with_users(&self.plan, &options.users_by_node_tag)?;
-                options.users_by_node_tag.clear();
+                if applied_user_delta {
+                    options.control.keli_core_rs_user_delta_applied = true;
+                    options.users_by_node_tag.clear();
+                }
             }
             if self.refresh_health {
                 let resources = if self.public_ip_probe {
@@ -319,6 +337,92 @@ where
             Ok(result.signal)
         })
     }
+}
+
+fn try_apply_keli_core_rs_user_deltas(
+    plan: &RuntimeBootstrapPlan,
+    sync_state: &BTreeMap<String, RuntimeUserSyncEntry>,
+    users_by_node_tag: &BTreeMap<String, Vec<UserInfo>>,
+) -> bool {
+    let Some(core_plan) = plan.core_plan.as_ref() else {
+        return false;
+    };
+    if core_plan.kind != CoreKind::KeliCoreRs {
+        return false;
+    }
+    if users_by_node_tag.keys().any(|node_tag| {
+        core_plan
+            .inbounds
+            .iter()
+            .any(|inbound| inbound.tag == *node_tag && !inbound.port_range.trim().is_empty())
+    }) {
+        return false;
+    }
+    if users_by_node_tag.keys().any(|node_tag| {
+        sync_state
+            .get(node_tag)
+            .and_then(|entry| entry.last_change.as_ref())
+            .map(|change| change.full)
+            .unwrap_or(true)
+    }) {
+        return false;
+    }
+
+    let client = KeliCoreControlClient::new(keli_core_rs_control_addr(&core_plan.config_path));
+    for node_tag in users_by_node_tag.keys() {
+        let Some(change) = sync_state
+            .get(node_tag)
+            .and_then(|entry| entry.last_change.as_ref())
+        else {
+            return false;
+        };
+        if change.diff.deleted.is_empty()
+            && change.diff.added.is_empty()
+            && change.diff.updated.is_empty()
+        {
+            continue;
+        }
+        let delta = keli_core_user_delta_payload(node_tag, change);
+        if client.apply_user_delta(node_tag.clone(), delta).is_err() {
+            return false;
+        }
+    }
+    true
+}
+
+fn keli_core_user_delta_payload(node_tag: &str, change: &RuntimeUserDeltaChange) -> Value {
+    json!({
+        "added": change
+            .diff
+            .added
+            .iter()
+            .map(|user| keli_core_user_delta_user(node_tag, user))
+            .collect::<Vec<_>>(),
+        "updated": change
+            .diff
+            .updated
+            .iter()
+            .map(|user| keli_core_user_delta_user(node_tag, user))
+            .collect::<Vec<_>>(),
+        "deleted": change
+            .diff
+            .deleted
+            .iter()
+            .map(|user| user.uuid.clone())
+            .collect::<Vec<_>>(),
+        "revision": change.revision.to_string()
+    })
+}
+
+fn keli_core_user_delta_user(node_tag: &str, user: &UserInfo) -> Value {
+    json!({
+        "id": user.id,
+        "uuid": user.uuid,
+        "password": null,
+        "email": format!("{}|{}", node_tag, user.uuid),
+        "speed_limit": user.speed_limit,
+        "device_limit": user.device_limit
+    })
 }
 
 fn refresh_runtime_health(
@@ -743,6 +847,11 @@ async fn load_users_for_node(
         match client.get_user_delta(entry.state.revision).await {
             Ok(delta) => {
                 let result = apply_user_delta_body(&entry.state, &delta);
+                entry.last_change = Some(RuntimeUserDeltaChange {
+                    full: delta.full,
+                    revision: delta.revision,
+                    diff: result.diff.clone(),
+                });
                 entry.state = result.state;
                 save_runtime_user_sync_entry(entry);
                 return Ok(entry.state.users.clone());
@@ -774,6 +883,11 @@ async fn load_users_for_node(
         })?
         .unwrap_or_else(|| entry.state.users.clone());
     let result = apply_full_user_list(&entry.state, &users);
+    entry.last_change = Some(RuntimeUserDeltaChange {
+        full: true,
+        revision: entry.state.revision,
+        diff: result.diff.clone(),
+    });
     entry.state = result.state;
     save_runtime_user_sync_entry(entry);
     Ok(entry.state.users.clone())
@@ -786,6 +900,7 @@ fn load_runtime_user_sync_entry(config: &NodeConfig) -> RuntimeUserSyncEntry {
         state,
         delta_supported: true,
         path,
+        last_change: None,
     }
 }
 
@@ -831,12 +946,12 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::{
-        handle_runtime_loop_event, node_config_for_info, refresh_runtime_health,
-        refresh_subscription_proxy_health, run_runtime_loop, run_runtime_loop_async,
-        run_runtime_loop_async_with_events, runtime_loop_event_for_task, should_run,
-        user_delta_not_supported, AsyncRuntimeLoopCallbacks, PanelRuntimeLoop,
+        handle_runtime_loop_event, keli_core_user_delta_payload, node_config_for_info,
+        refresh_runtime_health, refresh_subscription_proxy_health, run_runtime_loop,
+        run_runtime_loop_async, run_runtime_loop_async_with_events, runtime_loop_event_for_task,
+        should_run, user_delta_not_supported, AsyncRuntimeLoopCallbacks, PanelRuntimeLoop,
         RuntimeLoopCallbacks, RuntimeLoopEvent, RuntimeLoopEventKind, RuntimeLoopExit,
-        RuntimeLoopExitReason, RuntimeLoopFuture, RuntimeLoopOptions,
+        RuntimeLoopExitReason, RuntimeLoopFuture, RuntimeLoopOptions, RuntimeUserDeltaChange,
     };
     use crate::config::{NodeConfig, ResolvedConfig, ResolvedMachineConfig};
     use crate::control::RuntimeControlOptions;
@@ -849,6 +964,7 @@ mod tests {
     use crate::realtime::RealtimeRuntimeTask;
     use crate::runtime::build_runtime_bootstrap_plan;
     use crate::subscription_proxy::SubscriptionProxyRuntimeManager;
+    use crate::user::UserListDiff;
     use serde_json::json;
 
     #[test]
@@ -918,6 +1034,60 @@ mod tests {
         ));
         assert!(user_delta_not_supported("405 Method Not Allowed"));
         assert!(!user_delta_not_supported("403 Forbidden"));
+    }
+
+    #[test]
+    fn keli_core_user_delta_payload_maps_panel_diff() {
+        let change = RuntimeUserDeltaChange {
+            full: false,
+            revision: 42,
+            diff: UserListDiff {
+                deleted: vec![UserInfo {
+                    id: 1,
+                    uuid: "deleted-user".to_string(),
+                    speed_limit: 0,
+                    device_limit: 0,
+                }],
+                added: vec![UserInfo {
+                    id: 2,
+                    uuid: "added-user".to_string(),
+                    speed_limit: 10,
+                    device_limit: 2,
+                }],
+                updated: vec![UserInfo {
+                    id: 3,
+                    uuid: "updated-user".to_string(),
+                    speed_limit: 20,
+                    device_limit: 3,
+                }],
+            },
+        };
+
+        let payload = keli_core_user_delta_payload("panel|vless|1", &change);
+
+        assert_eq!(
+            payload,
+            json!({
+                "added": [{
+                    "id": 2,
+                    "uuid": "added-user",
+                    "password": null,
+                    "email": "panel|vless|1|added-user",
+                    "speed_limit": 10,
+                    "device_limit": 2
+                }],
+                "updated": [{
+                    "id": 3,
+                    "uuid": "updated-user",
+                    "password": null,
+                    "email": "panel|vless|1|updated-user",
+                    "speed_limit": 20,
+                    "device_limit": 3
+                }],
+                "deleted": ["deleted-user"],
+                "revision": "42"
+            })
+        );
     }
 
     #[test]
