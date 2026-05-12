@@ -400,18 +400,44 @@ fn try_apply_keli_core_rs_user_deltas(
 
     let client = KeliCoreControlClient::new(keli_core_rs_control_addr(&core_plan.config_path));
     for node_tag in users_by_node_tag.keys() {
-        let Some(change) = sync_state
-            .get(node_tag)
-            .and_then(|entry| entry.last_change.as_ref())
-        else {
+        let Some(entry) = sync_state.get(node_tag) else {
+            return false;
+        };
+        let Some(change) = entry.last_change.as_ref() else {
             return false;
         };
         let delta = keli_core_user_delta_payload(node_tag, change);
-        if client.apply_user_delta(node_tag.clone(), delta).is_err() {
-            return false;
+        if let Err(error) = client.apply_user_delta(node_tag.clone(), delta) {
+            if !keli_core_user_delta_requires_full_snapshot(&error.message) {
+                return false;
+            }
+            let full_delta = keli_core_user_full_snapshot_payload(node_tag, entry);
+            if client
+                .apply_user_delta(node_tag.clone(), full_delta)
+                .is_err()
+            {
+                return false;
+            }
         }
     }
     true
+}
+
+fn keli_core_user_delta_requires_full_snapshot(error: &str) -> bool {
+    let error = error.to_ascii_lowercase();
+    error.contains("revision mismatch") || error.contains("full snapshot required")
+}
+
+fn keli_core_user_full_snapshot_payload(node_tag: &str, entry: &RuntimeUserSyncEntry) -> Value {
+    json!({
+        "full": entry
+            .state
+            .users
+            .iter()
+            .map(|user| keli_core_user_delta_user(node_tag, user))
+            .collect::<Vec<_>>(),
+        "revision": entry.state.revision.to_string()
+    })
 }
 
 fn keli_core_user_delta_payload(node_tag: &str, change: &RuntimeUserDeltaChange) -> Value {
@@ -1082,10 +1108,12 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::{
-        handle_runtime_loop_event, keli_core_user_delta_payload, node_config_for_info,
-        refresh_runtime_health, refresh_subscription_proxy_health, run_runtime_loop,
-        run_runtime_loop_async, run_runtime_loop_async_with_events, runtime_loop_event_for_task,
-        should_run, user_delta_not_supported, AsyncRuntimeLoopCallbacks, PanelRuntimeLoop,
+        handle_runtime_loop_event, keli_core_user_delta_payload,
+        keli_core_user_delta_requires_full_snapshot, keli_core_user_full_snapshot_payload,
+        node_config_for_info, refresh_runtime_health, refresh_subscription_proxy_health,
+        run_runtime_loop, run_runtime_loop_async, run_runtime_loop_async_with_events,
+        runtime_loop_event_for_task, should_run, try_apply_keli_core_rs_user_deltas,
+        user_delta_not_supported, AsyncRuntimeLoopCallbacks, PanelRuntimeLoop,
         RuntimeLoopCallbacks, RuntimeLoopEvent, RuntimeLoopEventKind, RuntimeLoopExit,
         RuntimeLoopExitReason, RuntimeLoopFuture, RuntimeLoopOptions, RuntimeUserDeltaChange,
         RuntimeUserSyncEntry,
@@ -1227,6 +1255,196 @@ mod tests {
                 "revision": "42"
             })
         );
+    }
+
+    #[test]
+    fn keli_core_user_delta_revision_errors_require_full_snapshot() {
+        assert!(keli_core_user_delta_requires_full_snapshot(
+            "revision mismatch for inbound node-a"
+        ));
+        assert!(keli_core_user_delta_requires_full_snapshot(
+            "current <missing>, base 42; full snapshot required"
+        ));
+        assert!(!keli_core_user_delta_requires_full_snapshot(
+            "connect keli-core-rs control 127.0.0.1:18080: connection refused"
+        ));
+    }
+
+    #[test]
+    fn keli_core_user_full_snapshot_payload_maps_revision_and_users() {
+        let entry = RuntimeUserSyncEntry {
+            state: UserSyncState {
+                revision: 88,
+                users: vec![UserInfo {
+                    id: 7,
+                    uuid: "11111111-1111-1111-1111-111111111111".to_string(),
+                    speed_limit: 1024,
+                    device_limit: 3,
+                }],
+                updated_at: None,
+            },
+            delta_supported: true,
+            path: String::new(),
+            last_change: None,
+        };
+
+        let payload = keli_core_user_full_snapshot_payload("panel|vless|1", &entry);
+
+        assert_eq!(payload["revision"], "88");
+        assert_eq!(
+            payload["full"][0],
+            json!({
+                "id": 7,
+                "uuid": "11111111-1111-1111-1111-111111111111",
+                "password": null,
+                "email": "panel|vless|1|11111111-1111-1111-1111-111111111111",
+                "speed_limit": 1024,
+                "device_limit": 3
+            })
+        );
+    }
+
+    #[test]
+    fn keli_core_user_delta_revision_mismatch_falls_back_to_full_snapshot() {
+        let dir = temp_test_dir("user-delta-full-snapshot-fallback");
+        let mut resolved = ResolvedConfig {
+            kernel: Default::default(),
+            realtime: Default::default(),
+            machine: ResolvedMachineConfig {
+                enabled: true,
+                continue_on_error: true,
+                profiles: Vec::new(),
+            },
+            agent: Default::default(),
+            nodes: vec![NodeConfig {
+                url: "https://panel.example.test".to_string(),
+                token: "token".to_string(),
+                node_id: 12,
+                machine_id: 12,
+                ..NodeConfig::default()
+            }],
+        };
+        resolved.kernel.r#type = "keli-core-rs".to_string();
+        resolved.kernel.config_dir = dir.join("v2node").display().to_string();
+        let node = test_node_with_host("https://panel.example.test", "vless", 12);
+        let tag = node.tag.clone();
+        let plan = build_runtime_bootstrap_plan(resolved, vec![node], Vec::new()).unwrap();
+        let config_path = plan.core_plan.as_ref().unwrap().config_path.clone();
+        let old_user = UserInfo {
+            id: 12,
+            uuid: "55555555-5555-5555-5555-555555555555".to_string(),
+            speed_limit: 0,
+            device_limit: 0,
+        };
+        let new_user = UserInfo {
+            id: 13,
+            uuid: "66666666-6666-6666-6666-666666666666".to_string(),
+            speed_limit: 30,
+            device_limit: 3,
+        };
+        let mut sync_state = BTreeMap::new();
+        sync_state.insert(
+            tag.clone(),
+            RuntimeUserSyncEntry {
+                state: UserSyncState {
+                    revision: 43,
+                    users: vec![old_user.clone(), new_user.clone()],
+                    updated_at: None,
+                },
+                delta_supported: true,
+                path: String::new(),
+                last_change: Some(RuntimeUserDeltaChange {
+                    full: false,
+                    base_revision: 42,
+                    revision: 43,
+                    diff: UserListDiff {
+                        added: vec![new_user.clone()],
+                        updated: Vec::new(),
+                        deleted: Vec::new(),
+                    },
+                }),
+            },
+        );
+        let mut users_by_tag = BTreeMap::new();
+        users_by_tag.insert(tag.clone(), vec![old_user, new_user.clone()]);
+        let control_addr = keli_core_rs_control_addr(&config_path);
+        let listener = TcpListener::bind(&control_addr).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let tag_for_thread = tag.clone();
+        let new_user_for_thread = new_user.clone();
+        let control_thread = thread::spawn(move || {
+            let mut commands = Vec::new();
+            for index in 0..2 {
+                let deadline = Instant::now() + Duration::from_secs(2);
+                let (mut stream, _) = loop {
+                    match listener.accept() {
+                        Ok(accepted) => break accepted,
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            if Instant::now() >= deadline {
+                                panic!(
+                                    "keli-core-rs user delta control command {index} was not received"
+                                );
+                            }
+                            thread::sleep(Duration::from_millis(10));
+                        }
+                        Err(error) => panic!("accept keli-core-rs control command: {error}"),
+                    }
+                };
+                let mut command = String::new();
+                BufReader::new(stream.try_clone().unwrap())
+                    .read_line(&mut command)
+                    .unwrap();
+                let command = serde_json::from_str::<serde_json::Value>(command.trim()).unwrap();
+                commands.push(command.clone());
+                if index == 0 {
+                    writeln!(
+                        stream,
+                        "{}",
+                        json!({
+                            "type": "error",
+                            "message": "revision mismatch for inbound"
+                        })
+                    )
+                    .unwrap();
+                } else {
+                    writeln!(
+                        stream,
+                        "{}",
+                        json!({
+                            "type": "user_delta_applied",
+                            "node_tag": tag_for_thread,
+                            "result": {
+                                "added": 0,
+                                "updated": 0,
+                                "deleted": 0,
+                                "missing_updated": 0,
+                                "missing_deleted": 0,
+                                "active_users": 2,
+                                "full_applied": true
+                            },
+                            "status": "running",
+                            "listeners": []
+                        })
+                    )
+                    .unwrap();
+                }
+            }
+            assert_eq!(commands[0]["delta"]["base_revision"], "42");
+            assert_eq!(commands[1]["delta"]["revision"], "43");
+            assert_eq!(
+                commands[1]["delta"]["full"][1]["uuid"],
+                new_user_for_thread.uuid
+            );
+        });
+
+        assert!(try_apply_keli_core_rs_user_deltas(
+            &plan,
+            &sync_state,
+            &users_by_tag
+        ));
+        control_thread.join().unwrap();
+
+        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -2133,7 +2351,7 @@ mod tests {
                 "{}",
                 json!({
                     "type": "error",
-                    "message": "revision mismatch for inbound"
+                    "message": "permission denied"
                 })
             )
             .unwrap();
