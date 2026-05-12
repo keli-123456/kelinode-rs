@@ -225,9 +225,18 @@ fn native_core_gray_health_value(metrics: &Map<String, Value>) -> Value {
         "fallback_repaired" => "full snapshot fallback observed; monitor for repetition",
         _ => "",
     };
+    let gate = match mode {
+        "native_delta" => "allow_widen",
+        "fallback_repaired" => "hold_monitor",
+        "full_rebuild" | "degraded" => "hold_rollback",
+        _ => "hold",
+    };
 
     json!({
         "mode": mode,
+        "gate": gate,
+        "can_widen": gate == "allow_widen",
+        "rollback_recommended": gate == "hold_rollback",
         "warning": warning,
         "native_apply_success_total": native_success,
         "native_apply_failed_total": native_failed,
@@ -760,6 +769,18 @@ mod tests {
             json!("fallback_repaired")
         );
         assert_eq!(
+            payload.status["metrics"]["native_core_gray_health"]["gate"],
+            json!("hold_monitor")
+        );
+        assert_eq!(
+            payload.status["metrics"]["native_core_gray_health"]["can_widen"],
+            json!(false)
+        );
+        assert_eq!(
+            payload.status["metrics"]["native_core_gray_health"]["rollback_recommended"],
+            json!(false)
+        );
+        assert_eq!(
             payload.status["metrics"]["native_core_gray_health"]["full_snapshot_fallback_total"],
             json!(1)
         );
@@ -795,6 +816,9 @@ mod tests {
         let summary = metrics_value(metrics)["native_core_gray_health"].clone();
 
         assert_eq!(summary["mode"], json!("degraded"));
+        assert_eq!(summary["gate"], json!("hold_rollback"));
+        assert_eq!(summary["can_widen"], json!(false));
+        assert_eq!(summary["rollback_recommended"], json!(true));
         assert_eq!(summary["native_apply_failed_total"], json!(2));
         assert_eq!(summary["core_apply_error_total"], json!(1));
         assert_eq!(
@@ -823,6 +847,9 @@ mod tests {
         let summary = metrics_value(metrics)["native_core_gray_health"].clone();
 
         assert_eq!(summary["mode"], json!("degraded"));
+        assert_eq!(summary["gate"], json!("hold_rollback"));
+        assert_eq!(summary["can_widen"], json!(false));
+        assert_eq!(summary["rollback_recommended"], json!(true));
         assert_eq!(summary["metrics_available"], json!(false));
         assert_eq!(summary["reasons"], json!(["metrics_unavailable"]));
         assert_eq!(
@@ -830,6 +857,26 @@ mod tests {
             json!("native core metrics unavailable or apply errors observed")
         );
         assert!(!summary.to_string().contains("KELI_CORE_CONTROL_TOKEN"));
+    }
+
+    #[test]
+    fn native_core_metrics_summary_allows_widen_only_on_clean_native_delta() {
+        let metrics = json!({
+            "user_delta": {
+                "kelinode_user_delta_native_apply_success_total": 12
+            },
+            "keli_core_rs": {
+                "keli_core_user_delta_incremental_total": 12
+            }
+        });
+
+        let summary = metrics_value(metrics)["native_core_gray_health"].clone();
+
+        assert_eq!(summary["mode"], json!("native_delta"));
+        assert_eq!(summary["gate"], json!("allow_widen"));
+        assert_eq!(summary["can_widen"], json!(true));
+        assert_eq!(summary["rollback_recommended"], json!(false));
+        assert_eq!(summary["warning"], json!(""));
     }
 
     #[test]

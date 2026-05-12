@@ -68,6 +68,9 @@ Use machine status metrics to verify that small user changes stay on the native 
 - `metrics.keli_core_rs.keli_core_user_delta_current_revision_missing_total`
 - `metrics.keli_core_rs.keli_core_user_delta_active_users`
 - `metrics.native_core_gray_health.mode`
+- `metrics.native_core_gray_health.gate`
+- `metrics.native_core_gray_health.can_widen`
+- `metrics.native_core_gray_health.rollback_recommended`
 - `metrics.native_core_gray_health.warning`
 - `metrics.native_core_gray_health.reasons`
 - `metrics.native_core_gray_health.metrics_available`
@@ -81,6 +84,8 @@ Healthy gray behavior:
 - Active user counts match the expected node user set.
 - `native_core_gray_health.mode` stays `native_delta` or briefly `fallback_repaired`; `degraded` and
   `full_rebuild` are rollback investigation signals.
+- `native_core_gray_health.gate` is `allow_widen` only for a clean `native_delta` path. Treat
+  `hold_monitor` as a pause before widening and `hold_rollback` as a rollback investigation signal.
 - `native_core_gray_health.reasons` explains the gate, for example `metrics_unavailable`,
   `native_apply_failed`, `core_apply_error`, `full_rebuild`, `revision_mismatch`, or
   `current_revision_missing`.
