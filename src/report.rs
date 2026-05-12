@@ -391,12 +391,7 @@ pub async fn report_keli_core_activity_to_panel_with_user_lookup(
     if records.is_empty() {
         return Ok(NodeActivityBatchReport::default());
     }
-    if let Err(error) = save_pending_keli_core_traffic(&spool_path, &records) {
-        if !drained.is_empty() {
-            let _ = KeliCoreTrafficDrainer::requeue_traffic(&mut client, drained);
-        }
-        return Err(error);
-    }
+    save_pending_or_requeue_drained(&spool_path, &records, drained, &mut client)?;
 
     let snapshots = keli_core_traffic_snapshots_with_user_lookup(core_plan, &records, user_lookup);
     let targets = runtime_activity_targets(plan);
@@ -404,6 +399,24 @@ pub async fn report_keli_core_activity_to_panel_with_user_lookup(
     let failed = failed_keli_core_records(core_plan, &records, &batch);
     save_pending_keli_core_traffic(&spool_path, &failed)?;
     Ok(batch)
+}
+
+fn save_pending_or_requeue_drained<D>(
+    spool_path: &Path,
+    records: &[KeliCoreTrafficRecord],
+    drained: Vec<KeliCoreTrafficRecord>,
+    drainer: &mut D,
+) -> Result<(), String>
+where
+    D: KeliCoreTrafficDrainer,
+{
+    if let Err(error) = save_pending_keli_core_traffic(spool_path, records) {
+        if !drained.is_empty() {
+            let _ = drainer.requeue_traffic(drained);
+        }
+        return Err(error);
+    }
+    Ok(())
 }
 
 pub fn runtime_activity_targets(plan: &RuntimeBootstrapPlan) -> Vec<NodeActivityTarget> {
@@ -502,9 +515,9 @@ mod tests {
         keli_core_traffic_snapshots_with_user_lookup, keli_core_traffic_spool_path,
         load_pending_keli_core_traffic, minimum_report_bytes, report_activity_batch_with,
         report_activity_with_fallback, requeue_failed_keli_core_records, runtime_activity_targets,
-        save_pending_keli_core_traffic, KeliCoreTrafficDrainer, KeliCoreUserIdLookup,
-        NodeActivityBatchReport, NodeActivityFailure, NodeActivityReport, NodeActivitySender,
-        NodeActivitySnapshot, NodeActivityTarget,
+        save_pending_keli_core_traffic, save_pending_or_requeue_drained, KeliCoreTrafficDrainer,
+        KeliCoreUserIdLookup, NodeActivityBatchReport, NodeActivityFailure, NodeActivityReport,
+        NodeActivitySender, NodeActivitySnapshot, NodeActivityTarget,
     };
     use crate::config::{AgentConfig, NodeConfig, ResolvedConfig, ResolvedMachineConfig};
     use crate::core::{CoreKind, CorePlan, InboundPlan, InboundUserPlan};
@@ -776,6 +789,41 @@ mod tests {
 
         assert!(!path.exists());
         assert!(load_pending_keli_core_traffic(&path).unwrap().is_empty());
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn corrupted_pending_keli_core_traffic_returns_clear_error() {
+        let dir = temp_test_dir("traffic-spool-corrupt");
+        let path = dir.join("config.traffic.pending.json");
+        fs::write(&path, b"{not-json").unwrap();
+
+        let error = load_pending_keli_core_traffic(&path).expect_err("corrupt pending error");
+
+        assert!(error.contains("decode pending traffic"));
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn pending_spool_save_failure_requeues_drained_records() {
+        let dir = temp_test_dir("traffic-spool-save-failure");
+        let path = dir.join("config.traffic.pending.json");
+        fs::create_dir_all(&path).unwrap();
+        let drained = vec![traffic_record("node-a", "uuid-a", 10, 20)];
+        let records = drained.clone();
+        let mut drainer = FakeKeliCoreDrainer {
+            records: Vec::new(),
+            minimums: Vec::new(),
+            requeued: Vec::new(),
+        };
+
+        let error = save_pending_or_requeue_drained(&path, &records, drained.clone(), &mut drainer)
+            .expect_err("save failure");
+
+        assert!(
+            error.contains("replace pending traffic") || error.contains("write pending traffic")
+        );
+        assert_eq!(drainer.requeued, drained);
         let _ = fs::remove_dir_all(dir);
     }
 
