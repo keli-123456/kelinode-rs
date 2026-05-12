@@ -94,6 +94,7 @@ Traffic report failure must not lose data. Before increasing traffic, verify:
 - pending traffic files survive report failures
 - retry success clears only successful records
 - failed-node records remain pending
+- exact duplicate records from pending plus fresh drain are reported once
 - `user_id` is preferred over lookup fallback for deleted-user tail traffic
 - expanded port tags such as `node-a|port:2100` fold back to `node-a`
 - minimum report thresholds are honored

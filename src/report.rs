@@ -388,7 +388,7 @@ pub async fn report_keli_core_activity_to_panel_with_user_lookup(
     let spool_path = keli_core_traffic_spool_path(&core_plan.config_path);
     let mut records = load_pending_keli_core_traffic(&spool_path)?;
     let drained = KeliCoreTrafficDrainer::drain_traffic(&mut client, minimum_report_bytes(plan))?;
-    records.extend(drained.iter().cloned());
+    let drained = append_unique_keli_core_records(&mut records, drained);
     if records.is_empty() {
         return Ok(NodeActivityBatchReport::default());
     }
@@ -400,6 +400,21 @@ pub async fn report_keli_core_activity_to_panel_with_user_lookup(
     let failed = failed_keli_core_records(core_plan, &records, &batch);
     save_pending_keli_core_traffic(&spool_path, &failed)?;
     Ok(batch)
+}
+
+fn append_unique_keli_core_records(
+    records: &mut Vec<KeliCoreTrafficRecord>,
+    drained: Vec<KeliCoreTrafficRecord>,
+) -> Vec<KeliCoreTrafficRecord> {
+    let mut appended = Vec::new();
+    for record in drained {
+        if records.iter().any(|existing| existing == &record) {
+            continue;
+        }
+        records.push(record.clone());
+        appended.push(record);
+    }
+    appended
 }
 
 fn save_pending_or_requeue_drained<D>(
@@ -512,13 +527,14 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::{
-        drain_keli_core_activity_snapshots, keli_core_traffic_snapshots,
-        keli_core_traffic_snapshots_with_user_lookup, keli_core_traffic_spool_path,
-        load_pending_keli_core_traffic, minimum_report_bytes, report_activity_batch_with,
-        report_activity_with_fallback, requeue_failed_keli_core_records, runtime_activity_targets,
-        save_pending_keli_core_traffic, save_pending_or_requeue_drained, KeliCoreTrafficDrainer,
-        KeliCoreUserIdLookup, NodeActivityBatchReport, NodeActivityFailure, NodeActivityReport,
-        NodeActivitySender, NodeActivitySnapshot, NodeActivityTarget,
+        append_unique_keli_core_records, drain_keli_core_activity_snapshots,
+        keli_core_traffic_snapshots, keli_core_traffic_snapshots_with_user_lookup,
+        keli_core_traffic_spool_path, load_pending_keli_core_traffic, minimum_report_bytes,
+        report_activity_batch_with, report_activity_with_fallback,
+        requeue_failed_keli_core_records, runtime_activity_targets, save_pending_keli_core_traffic,
+        save_pending_or_requeue_drained, KeliCoreTrafficDrainer, KeliCoreUserIdLookup,
+        NodeActivityBatchReport, NodeActivityFailure, NodeActivityReport, NodeActivitySender,
+        NodeActivitySnapshot, NodeActivityTarget,
     };
     use crate::config::{AgentConfig, NodeConfig, ResolvedConfig, ResolvedMachineConfig};
     use crate::core::{CoreKind, CorePlan, InboundPlan, InboundUserPlan};
@@ -863,6 +879,46 @@ mod tests {
 
         assert!(load_pending_keli_core_traffic(&path).unwrap().is_empty());
         assert!(!path.exists());
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn pending_and_drained_exact_duplicates_are_reported_once() {
+        let pending = traffic_record("node-a", "uuid-a", 10, 20);
+        let duplicate = pending.clone();
+        let fresh = traffic_record("node-a|port:2100", "uuid-a", 1, 2);
+        let mut records = vec![pending.clone()];
+
+        let appended =
+            append_unique_keli_core_records(&mut records, vec![duplicate, fresh.clone()]);
+        let snapshots = keli_core_traffic_snapshots(&core_plan(), &records);
+
+        assert_eq!(appended, vec![fresh]);
+        assert_eq!(records.len(), 2);
+        assert_eq!(snapshots["node-a"].traffic.len(), 1);
+        assert_eq!(snapshots["node-a"].traffic[0].upload, 11);
+        assert_eq!(snapshots["node-a"].traffic[0].download, 22);
+    }
+
+    #[test]
+    fn pending_duplicate_drain_save_failure_requeues_only_new_records() {
+        let dir = temp_test_dir("traffic-spool-dedup-save-failure");
+        let path = dir.join("config.traffic.pending.json");
+        fs::create_dir_all(&path).unwrap();
+        let pending = traffic_record("node-a", "uuid-a", 10, 20);
+        let fresh = traffic_record("node-a", "uuid-a", 1, 2);
+        let mut records = vec![pending.clone()];
+        let drained = append_unique_keli_core_records(&mut records, vec![pending, fresh.clone()]);
+        let mut drainer = FakeKeliCoreDrainer {
+            records: Vec::new(),
+            minimums: Vec::new(),
+            requeued: Vec::new(),
+        };
+
+        let _ = save_pending_or_requeue_drained(&path, &records, drained, &mut drainer)
+            .expect_err("save failure");
+
+        assert_eq!(drainer.requeued, vec![fresh]);
         let _ = fs::remove_dir_all(dir);
     }
 
