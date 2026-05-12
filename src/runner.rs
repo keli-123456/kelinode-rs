@@ -1195,7 +1195,7 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::{
-        handle_runtime_loop_event, keli_core_user_delta_payload,
+        handle_runtime_loop_event, keli_core_rs_metrics_snapshot, keli_core_user_delta_payload,
         keli_core_user_delta_requires_full_snapshot, keli_core_user_full_snapshot_payload,
         node_config_for_info, refresh_runtime_health, refresh_subscription_proxy_health,
         run_runtime_loop, run_runtime_loop_async, run_runtime_loop_async_with_events,
@@ -1212,7 +1212,10 @@ mod tests {
     use crate::machine::MachineUpgradeCommand;
     use crate::panel::types::{CommonNode, NodeInfo, UserInfo};
     use crate::port_forward::{PortForwardCommand, PortForwardExecutor};
-    use crate::process::{keli_core_rs_control_addr, MemoryProcessSupervisor, ProcessSupervisor};
+    use crate::process::{
+        keli_core_rs_control_addr, keli_core_rs_control_token, MemoryProcessSupervisor,
+        ProcessSupervisor,
+    };
     use crate::realtime::RealtimeRuntimeTask;
     use crate::runtime::build_runtime_bootstrap_plan;
     use crate::subscription_proxy::SubscriptionProxyRuntimeManager;
@@ -1583,6 +1586,137 @@ mod tests {
             status["kelinode_user_delta_skipped_port_range_total"],
             json!(1)
         );
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn keli_core_metrics_snapshot_uses_generated_control_token() {
+        let dir = temp_test_dir("core-metrics-token");
+        let mut resolved = ResolvedConfig {
+            kernel: Default::default(),
+            realtime: Default::default(),
+            machine: ResolvedMachineConfig {
+                enabled: true,
+                continue_on_error: true,
+                profiles: Vec::new(),
+            },
+            agent: Default::default(),
+            nodes: vec![NodeConfig {
+                url: "https://panel.example.test".to_string(),
+                token: "token".to_string(),
+                node_id: 14,
+                machine_id: 14,
+                ..NodeConfig::default()
+            }],
+        };
+        resolved.kernel.r#type = "keli-core-rs".to_string();
+        resolved.kernel.config_dir = dir.join("v2node").display().to_string();
+        let plan = build_runtime_bootstrap_plan(
+            resolved,
+            vec![test_node_with_host(
+                "https://panel.example.test",
+                "vless",
+                14,
+            )],
+            Vec::new(),
+        )
+        .unwrap();
+        let config_path = plan.core_plan.as_ref().unwrap().config_path.clone();
+        let token = keli_core_rs_control_token(&config_path).unwrap();
+        let control_addr = keli_core_rs_control_addr(&config_path);
+        let listener = TcpListener::bind(&control_addr).unwrap();
+        let control_thread = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut command = String::new();
+            BufReader::new(stream.try_clone().unwrap())
+                .read_line(&mut command)
+                .unwrap();
+            let command = serde_json::from_str::<serde_json::Value>(command.trim()).unwrap();
+            assert_eq!(command["type"], "metrics");
+            assert_eq!(command["token"], token);
+            writeln!(
+                stream,
+                "{}",
+                json!({
+                    "type": "metrics",
+                    "metrics": {
+                        "keli_core_user_delta_apply_total": 3,
+                        "keli_core_user_delta_incremental_total": 2,
+                        "keli_core_user_delta_active_users": {
+                            "panel.example.test|vless|14": 260000
+                        }
+                    }
+                })
+            )
+            .unwrap();
+        });
+
+        let metrics = keli_core_rs_metrics_snapshot(&plan).unwrap();
+
+        assert_eq!(metrics["keli_core_user_delta_apply_total"], json!(3));
+        assert_eq!(
+            metrics["keli_core_user_delta_active_users"]["panel.example.test|vless|14"],
+            json!(260000)
+        );
+        assert!(!metrics.to_string().contains("KELI_CORE_CONTROL_TOKEN"));
+        assert!(!metrics
+            .to_string()
+            .contains(&config_path.display().to_string()));
+        control_thread.join().unwrap();
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn panel_runtime_loop_ignores_native_core_metrics_failure() {
+        let dir = temp_test_dir("core-metrics-failure");
+        let mut resolved = ResolvedConfig {
+            kernel: Default::default(),
+            realtime: Default::default(),
+            machine: ResolvedMachineConfig {
+                enabled: true,
+                continue_on_error: true,
+                profiles: Vec::new(),
+            },
+            agent: Default::default(),
+            nodes: vec![NodeConfig {
+                url: "https://panel.example.test".to_string(),
+                token: "token".to_string(),
+                node_id: 15,
+                machine_id: 15,
+                ..NodeConfig::default()
+            }],
+        };
+        resolved.kernel.r#type = "keli-core-rs".to_string();
+        resolved.kernel.config_dir = dir.join("v2node").display().to_string();
+        let plan = build_runtime_bootstrap_plan(
+            resolved,
+            vec![test_node_with_host(
+                "https://panel.example.test",
+                "vless",
+                15,
+            )],
+            Vec::new(),
+        )
+        .unwrap();
+        let mut process = MemoryProcessSupervisor::default();
+        let mut port_forward = FakePortForwardExecutor::default();
+        let mut runner = PanelRuntimeLoop::new(plan, &mut process, &mut port_forward, None);
+
+        let signal = AsyncRuntimeLoopCallbacks::run_tick(
+            &mut runner,
+            RuntimeTickOptions {
+                control: RuntimeControlOptions {
+                    machine_id: 15,
+                    ..RuntimeControlOptions::default()
+                },
+                report_to_panel: false,
+                users_by_node_tag: BTreeMap::new(),
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(signal, RuntimeLoopSignal::Continue);
         let _ = fs::remove_dir_all(dir);
     }
 

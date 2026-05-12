@@ -583,6 +583,58 @@ mod tests {
     }
 
     #[test]
+    fn machine_status_includes_native_core_metrics_without_user_cardinality() {
+        let mut resolved = ResolvedConfig {
+            kernel: Default::default(),
+            realtime: Default::default(),
+            machine: ResolvedMachineConfig {
+                enabled: true,
+                continue_on_error: true,
+                profiles: Vec::new(),
+            },
+            agent: AgentConfig::default(),
+            nodes: vec![node_config("https://panel.example.test", 8, 3)],
+        };
+        resolved.kernel.r#type = "keli-core-rs".to_string();
+        let node = test_node("socks", 8);
+        let plan = build_runtime_bootstrap_plan(resolved, vec![node], Vec::new()).unwrap();
+        let metrics = json!({
+            "user_delta": {
+                "kelinode_user_delta_native_apply_success_total": 7,
+                "kelinode_user_delta_full_snapshot_fallback_total": 1
+            },
+            "keli_core_rs": {
+                "keli_core_user_delta_apply_total": 8,
+                "keli_core_user_delta_active_users": {
+                    "panel.example.test|socks|8": 260000
+                }
+            }
+        });
+
+        let payload = build_machine_status_payload(
+            3,
+            &plan,
+            HealthReportInput {
+                metrics: Some(metrics),
+                ..HealthReportInput::default()
+            },
+        );
+
+        assert_eq!(
+            payload.status["metrics"]["user_delta"]
+                ["kelinode_user_delta_native_apply_success_total"],
+            json!(7)
+        );
+        assert_eq!(
+            payload.status["metrics"]["keli_core_rs"]["keli_core_user_delta_apply_total"],
+            json!(8)
+        );
+        let status = serde_json::to_string(&payload.status["metrics"]).unwrap();
+        assert!(!status.contains("11111111-1111-1111-1111-111111111111"));
+        assert!(!status.contains("KELI_CORE_CONTROL_TOKEN"));
+    }
+
+    #[test]
     fn runtime_subscription_proxy_status_overrides_config_snapshot() {
         let resolved = ResolvedConfig {
             kernel: Default::default(),
