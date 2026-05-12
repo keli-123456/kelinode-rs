@@ -203,6 +203,7 @@ struct RuntimeUserSyncEntry {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct RuntimeUserDeltaChange {
     full: bool,
+    base_revision: i64,
     revision: i64,
     diff: UserListDiff,
 }
@@ -411,6 +412,7 @@ fn keli_core_user_delta_payload(node_tag: &str, change: &RuntimeUserDeltaChange)
             .iter()
             .map(|user| user.uuid.clone())
             .collect::<Vec<_>>(),
+        "base_revision": change.base_revision.to_string(),
         "revision": change.revision.to_string()
     })
 }
@@ -845,11 +847,13 @@ async fn load_users_for_node(
     client: &mut PanelClient,
 ) -> Result<Vec<UserInfo>, String> {
     if entry.delta_supported {
+        let base_revision = entry.state.revision;
         match client.get_user_delta(entry.state.revision).await {
             Ok(delta) => {
                 let result = apply_user_delta_body(&entry.state, &delta);
                 entry.last_change = Some(RuntimeUserDeltaChange {
                     full: delta.full,
+                    base_revision,
                     revision: delta.revision,
                     diff: result.diff.clone(),
                 });
@@ -886,6 +890,7 @@ async fn load_users_for_node(
     let result = apply_full_user_list(&entry.state, &users);
     entry.last_change = Some(RuntimeUserDeltaChange {
         full: true,
+        base_revision: entry.state.revision,
         revision: entry.state.revision,
         diff: result.diff.clone(),
     });
@@ -1045,6 +1050,7 @@ mod tests {
     fn keli_core_user_delta_payload_maps_panel_diff() {
         let change = RuntimeUserDeltaChange {
             full: false,
+            base_revision: 41,
             revision: 42,
             diff: UserListDiff {
                 deleted: vec![UserInfo {
@@ -1090,6 +1096,7 @@ mod tests {
                     "device_limit": 3
                 }],
                 "deleted": ["deleted-user"],
+                "base_revision": "41",
                 "revision": "42"
             })
         );
@@ -1522,6 +1529,7 @@ mod tests {
                 path: String::new(),
                 last_change: Some(RuntimeUserDeltaChange {
                     full: false,
+                    base_revision: 42,
                     revision: 43,
                     diff: UserListDiff {
                         added: vec![new_user.clone()],
@@ -1558,6 +1566,7 @@ mod tests {
             assert_eq!(command["type"], "apply_user_delta");
             assert_eq!(command["node_tag"], tag_for_thread);
             assert_eq!(command["delta"]["added"][0]["uuid"], new_uuid_for_thread);
+            assert_eq!(command["delta"]["base_revision"], "42");
             writeln!(
                 stream,
                 "{}",
@@ -1613,6 +1622,163 @@ mod tests {
             .iter()
             .flat_map(|inbound| inbound.users.iter())
             .all(|user| user.uuid != new_user.uuid));
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn panel_runtime_loop_falls_back_to_full_plan_on_user_delta_error() {
+        let dir = temp_test_dir("panel-runtime-loop-user-delta-fallback");
+        let mut resolved = ResolvedConfig {
+            kernel: Default::default(),
+            realtime: Default::default(),
+            machine: ResolvedMachineConfig {
+                enabled: true,
+                continue_on_error: true,
+                profiles: Vec::new(),
+            },
+            agent: Default::default(),
+            nodes: vec![NodeConfig {
+                url: "https://panel.example.test".to_string(),
+                token: "token".to_string(),
+                node_id: 11,
+                machine_id: 11,
+                ..NodeConfig::default()
+            }],
+        };
+        resolved.kernel.r#type = "keli-core-rs".to_string();
+        resolved.kernel.config_dir = dir.join("v2node").display().to_string();
+        let node = test_node_with_host("https://panel.example.test", "vless", 11);
+        let tag = node.tag.clone();
+        let plan = build_runtime_bootstrap_plan(resolved, vec![node], Vec::new()).unwrap();
+        let mut process = MemoryProcessSupervisor::default();
+        let mut port_forward = FakePortForwardExecutor::default();
+        let mut runner = PanelRuntimeLoop::new(plan, &mut process, &mut port_forward, None);
+        let old_user = UserInfo {
+            id: 11,
+            uuid: "33333333-3333-3333-3333-333333333333".to_string(),
+            speed_limit: 0,
+            device_limit: 0,
+        };
+        let new_user = UserInfo {
+            id: 12,
+            uuid: "44444444-4444-4444-4444-444444444444".to_string(),
+            speed_limit: 30,
+            device_limit: 3,
+        };
+        let mut initial_users_by_tag = BTreeMap::new();
+        initial_users_by_tag.insert(tag.clone(), vec![old_user.clone()]);
+
+        AsyncRuntimeLoopCallbacks::run_tick(
+            &mut runner,
+            RuntimeTickOptions {
+                control: RuntimeControlOptions {
+                    machine_id: 11,
+                    start_core: true,
+                    ..RuntimeControlOptions::default()
+                },
+                report_to_panel: false,
+                users_by_node_tag: initial_users_by_tag,
+            },
+        )
+        .await
+        .unwrap();
+        let config_path = runner.plan.core_plan.as_ref().unwrap().config_path.clone();
+        let saved_before = fs::read_to_string(&config_path).unwrap();
+        assert!(saved_before.contains(&old_user.uuid));
+        assert!(!saved_before.contains(&new_user.uuid));
+        let stops_before = runner.process_supervisor.stops.len();
+
+        runner.user_sync.insert(
+            tag.clone(),
+            RuntimeUserSyncEntry {
+                state: UserSyncState {
+                    revision: 43,
+                    users: vec![old_user.clone(), new_user.clone()],
+                    updated_at: None,
+                },
+                delta_supported: true,
+                path: String::new(),
+                last_change: Some(RuntimeUserDeltaChange {
+                    full: false,
+                    base_revision: 42,
+                    revision: 43,
+                    diff: UserListDiff {
+                        added: vec![new_user.clone()],
+                        updated: Vec::new(),
+                        deleted: Vec::new(),
+                    },
+                }),
+            },
+        );
+        let control_addr = keli_core_rs_control_addr(&config_path);
+        let listener = TcpListener::bind(&control_addr).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let tag_for_thread = tag.clone();
+        let control_thread = thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(2);
+            let (mut stream, _) = loop {
+                match listener.accept() {
+                    Ok(accepted) => break accepted,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        if Instant::now() >= deadline {
+                            panic!("keli-core-rs user delta control command was not received");
+                        }
+                        thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(error) => panic!("accept keli-core-rs control command: {error}"),
+                }
+            };
+            let mut command = String::new();
+            BufReader::new(stream.try_clone().unwrap())
+                .read_line(&mut command)
+                .unwrap();
+            let command = serde_json::from_str::<serde_json::Value>(command.trim()).unwrap();
+            assert_eq!(command["type"], "apply_user_delta");
+            assert_eq!(command["node_tag"], tag_for_thread);
+            assert_eq!(command["delta"]["base_revision"], "42");
+            writeln!(
+                stream,
+                "{}",
+                json!({
+                    "type": "error",
+                    "message": "revision mismatch for inbound"
+                })
+            )
+            .unwrap();
+        });
+        let mut current_users_by_tag = BTreeMap::new();
+        current_users_by_tag.insert(tag.clone(), vec![old_user, new_user.clone()]);
+
+        let signal = AsyncRuntimeLoopCallbacks::run_tick(
+            &mut runner,
+            RuntimeTickOptions {
+                control: RuntimeControlOptions {
+                    machine_id: 11,
+                    start_core: true,
+                    ..RuntimeControlOptions::default()
+                },
+                report_to_panel: false,
+                users_by_node_tag: current_users_by_tag,
+            },
+        )
+        .await
+        .unwrap();
+        control_thread.join().unwrap();
+        let saved_after = fs::read_to_string(&config_path).unwrap();
+
+        assert_eq!(signal, RuntimeLoopSignal::Continue);
+        assert!(saved_after.contains(&new_user.uuid));
+        assert!(runner
+            .plan
+            .core_plan
+            .as_ref()
+            .unwrap()
+            .inbounds
+            .iter()
+            .flat_map(|inbound| inbound.users.iter())
+            .any(|user| user.uuid == new_user.uuid));
+        assert!(runner.process_supervisor.stops.len() > stops_before);
 
         let _ = fs::remove_dir_all(dir);
     }
