@@ -1,4 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::fs;
+use std::path::{Path, PathBuf};
 
 use crate::config::NodeConfig;
 use crate::core::{CoreKind, CorePlan};
@@ -87,6 +89,7 @@ where
     Ok(keli_core_traffic_snapshots(core_plan, &records))
 }
 
+#[cfg(test)]
 fn requeue_failed_keli_core_records<D>(
     core_plan: &CorePlan,
     drainer: &mut D,
@@ -96,15 +99,27 @@ fn requeue_failed_keli_core_records<D>(
 where
     D: KeliCoreTrafficDrainer,
 {
-    if batch.failures.is_empty() {
+    let requeue = failed_keli_core_records(core_plan, records, batch);
+    if requeue.is_empty() {
         return Ok(0);
+    }
+    drainer.requeue_traffic(requeue)
+}
+
+fn failed_keli_core_records(
+    core_plan: &CorePlan,
+    records: &[KeliCoreTrafficRecord],
+    batch: &NodeActivityBatchReport,
+) -> Vec<KeliCoreTrafficRecord> {
+    if batch.failures.is_empty() {
+        return Vec::new();
     }
     let failed_tags = batch
         .failures
         .iter()
         .map(|failure| failure.tag.as_str())
         .collect::<BTreeSet<_>>();
-    let requeue = records
+    records
         .iter()
         .filter(|record| {
             keli_core_record_report_tag(core_plan, record)
@@ -112,11 +127,7 @@ where
                 .unwrap_or(false)
         })
         .cloned()
-        .collect::<Vec<_>>();
-    if requeue.is_empty() {
-        return Ok(0);
-    }
-    drainer.requeue_traffic(requeue)
+        .collect()
 }
 
 pub fn keli_core_traffic_snapshots(
@@ -348,11 +359,25 @@ pub async fn report_keli_core_activity_to_panel(
     }
 
     let mut client = KeliCoreControlClient::new(keli_core_rs_control_addr(&core_plan.config_path));
-    let records = KeliCoreTrafficDrainer::drain_traffic(&mut client, minimum_report_bytes(plan))?;
+    let spool_path = keli_core_traffic_spool_path(&core_plan.config_path);
+    let mut records = load_pending_keli_core_traffic(&spool_path)?;
+    let drained = KeliCoreTrafficDrainer::drain_traffic(&mut client, minimum_report_bytes(plan))?;
+    records.extend(drained.iter().cloned());
+    if records.is_empty() {
+        return Ok(NodeActivityBatchReport::default());
+    }
+    if let Err(error) = save_pending_keli_core_traffic(&spool_path, &records) {
+        if !drained.is_empty() {
+            let _ = KeliCoreTrafficDrainer::requeue_traffic(&mut client, drained);
+        }
+        return Err(error);
+    }
+
     let snapshots = keli_core_traffic_snapshots(core_plan, &records);
     let targets = runtime_activity_targets(plan);
     let batch = report_activity_batch_to_panel(&targets, &snapshots).await;
-    requeue_failed_keli_core_records(core_plan, &mut client, &records, &batch)?;
+    let failed = failed_keli_core_records(core_plan, &records, &batch);
+    save_pending_keli_core_traffic(&spool_path, &failed)?;
     Ok(batch)
 }
 
@@ -383,17 +408,77 @@ fn minimum_report_bytes(plan: &RuntimeBootstrapPlan) -> u64 {
         .unwrap_or(0)
 }
 
+pub fn keli_core_traffic_spool_path(config_path: impl AsRef<Path>) -> PathBuf {
+    config_path.as_ref().with_extension("traffic.pending.json")
+}
+
+fn traffic_spool_tmp_path(path: &Path) -> PathBuf {
+    let Some(file_name) = path.file_name() else {
+        return path.with_extension("tmp");
+    };
+    let mut tmp_name = file_name.to_os_string();
+    tmp_name.push(".tmp");
+    path.with_file_name(tmp_name)
+}
+
+fn load_pending_keli_core_traffic(
+    path: impl AsRef<Path>,
+) -> Result<Vec<KeliCoreTrafficRecord>, String> {
+    let path = path.as_ref();
+    match fs::read(path) {
+        Ok(data) if data.is_empty() => Ok(Vec::new()),
+        Ok(data) => serde_json::from_slice(&data)
+            .map_err(|err| format!("decode pending traffic {}: {err}", path.display())),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(error) => Err(format!("read pending traffic {}: {error}", path.display())),
+    }
+}
+
+fn save_pending_keli_core_traffic(
+    path: impl AsRef<Path>,
+    records: &[KeliCoreTrafficRecord],
+) -> Result<(), String> {
+    let path = path.as_ref();
+    if records.is_empty() {
+        match fs::remove_file(path) {
+            Ok(()) => return Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => {
+                return Err(format!(
+                    "remove pending traffic {}: {error}",
+                    path.display()
+                ));
+            }
+        }
+    }
+
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|err| format!("create pending traffic dir {}: {err}", parent.display()))?;
+    }
+    let data = serde_json::to_vec(records)
+        .map_err(|err| format!("encode pending traffic {}: {err}", path.display()))?;
+    let tmp = traffic_spool_tmp_path(path);
+    fs::write(&tmp, data)
+        .map_err(|err| format!("write pending traffic {}: {err}", tmp.display()))?;
+    fs::rename(&tmp, path)
+        .map_err(|err| format!("replace pending traffic {}: {err}", path.display()))
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
+    use std::fs;
     use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::{
         drain_keli_core_activity_snapshots, keli_core_traffic_snapshots,
-        report_activity_batch_with, report_activity_with_fallback,
-        requeue_failed_keli_core_records, runtime_activity_targets, KeliCoreTrafficDrainer,
-        NodeActivityBatchReport, NodeActivityFailure, NodeActivityReport, NodeActivitySender,
-        NodeActivitySnapshot, NodeActivityTarget,
+        keli_core_traffic_spool_path, load_pending_keli_core_traffic, report_activity_batch_with,
+        report_activity_with_fallback, requeue_failed_keli_core_records, runtime_activity_targets,
+        save_pending_keli_core_traffic, KeliCoreTrafficDrainer, NodeActivityBatchReport,
+        NodeActivityFailure, NodeActivityReport, NodeActivitySender, NodeActivitySnapshot,
+        NodeActivityTarget,
     };
     use crate::config::{AgentConfig, NodeConfig, ResolvedConfig, ResolvedMachineConfig};
     use crate::core::{CoreKind, CorePlan, InboundPlan, InboundUserPlan};
@@ -573,6 +658,40 @@ mod tests {
     }
 
     #[test]
+    fn builds_keli_core_traffic_spool_path_next_to_core_config() {
+        let path = keli_core_traffic_spool_path(PathBuf::from("/srv/v2node/config.json"));
+
+        assert_eq!(
+            path,
+            PathBuf::from("/srv/v2node/config.traffic.pending.json")
+        );
+    }
+
+    #[test]
+    fn saves_loads_and_clears_pending_keli_core_traffic() {
+        let dir = temp_test_dir("traffic-spool");
+        let path = dir.join("config.traffic.pending.json");
+        let records = vec![traffic_record_with_ips(
+            "node-a",
+            "uuid-a",
+            10,
+            20,
+            vec!["198.51.100.7".to_string()],
+        )];
+
+        save_pending_keli_core_traffic(&path, &records).unwrap();
+
+        let loaded = load_pending_keli_core_traffic(&path).unwrap();
+        assert_eq!(loaded, records);
+
+        save_pending_keli_core_traffic(&path, &[]).unwrap();
+
+        assert!(!path.exists());
+        assert!(load_pending_keli_core_traffic(&path).unwrap().is_empty());
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn folds_keli_core_expanded_port_tags_back_to_node_tag() {
         let records = vec![traffic_record("node-a|port:2100", "uuid-a", 12, 34)];
 
@@ -723,6 +842,17 @@ mod tests {
             download,
             online_ips,
         }
+    }
+
+    fn temp_test_dir(label: &str) -> PathBuf {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path =
+            std::env::temp_dir().join(format!("kelinode-rs-{label}-{}-{now}", std::process::id()));
+        fs::create_dir_all(&path).unwrap();
+        path
     }
 
     #[derive(Default)]
