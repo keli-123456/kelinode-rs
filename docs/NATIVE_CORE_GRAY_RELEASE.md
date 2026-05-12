@@ -66,6 +66,8 @@ Use machine status metrics to verify that small user changes stay on the native 
 - `metrics.keli_core_rs.keli_core_user_delta_revision_mismatch_total`
 - `metrics.keli_core_rs.keli_core_user_delta_current_revision_missing_total`
 - `metrics.keli_core_rs.keli_core_user_delta_active_users`
+- `metrics.native_core_gray_health.mode`
+- `metrics.native_core_gray_health.warning`
 
 Healthy gray behavior:
 
@@ -74,6 +76,8 @@ Healthy gray behavior:
 - Full rebuild does not increase during normal small user changes.
 - Current-revision-missing does not repeat after fallback snapshot repair.
 - Active user counts match the expected node user set.
+- `native_core_gray_health.mode` stays `native_delta` or briefly `fallback_repaired`; `degraded` and
+  `full_rebuild` are rollback investigation signals.
 
 Do not expose `user_uuid` or token values as metric dimensions.
 

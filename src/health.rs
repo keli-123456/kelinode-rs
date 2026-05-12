@@ -89,7 +89,7 @@ pub fn build_machine_status_payload(
         payload.insert_status("upgrade", upgrade);
     }
     if let Some(metrics) = input.metrics {
-        payload.insert_status("metrics", metrics);
+        payload.insert_status("metrics", metrics_value(metrics));
     }
 
     payload
@@ -122,6 +122,105 @@ fn usage_value(usage: UsageSnapshot) -> Value {
         "total": usage.total,
         "used": usage.used
     })
+}
+
+fn metrics_value(mut metrics: Value) -> Value {
+    let Value::Object(metrics_map) = &mut metrics else {
+        return metrics;
+    };
+    let summary = native_core_gray_health_value(metrics_map);
+    if !summary.is_null() {
+        metrics_map.insert("native_core_gray_health".to_string(), summary);
+    }
+    metrics
+}
+
+fn native_core_gray_health_value(metrics: &Map<String, Value>) -> Value {
+    let native_success = nested_metric_u64(
+        metrics,
+        "user_delta",
+        "kelinode_user_delta_native_apply_success_total",
+    );
+    let native_failed = nested_metric_u64(
+        metrics,
+        "user_delta",
+        "kelinode_user_delta_native_apply_failed_total",
+    );
+    let full_snapshot_fallback = nested_metric_u64(
+        metrics,
+        "user_delta",
+        "kelinode_user_delta_full_snapshot_fallback_total",
+    );
+    let full_rebuild = nested_metric_u64(
+        metrics,
+        "user_delta",
+        "kelinode_user_delta_full_rebuild_total",
+    );
+    let revision_mismatch = nested_metric_u64(
+        metrics,
+        "keli_core_rs",
+        "keli_core_user_delta_revision_mismatch_total",
+    );
+    let current_revision_missing = nested_metric_u64(
+        metrics,
+        "keli_core_rs",
+        "keli_core_user_delta_current_revision_missing_total",
+    );
+    let core_apply_errors = nested_metric_u64(
+        metrics,
+        "keli_core_rs",
+        "keli_core_user_delta_apply_error_total",
+    );
+
+    if native_success == 0
+        && native_failed == 0
+        && full_snapshot_fallback == 0
+        && full_rebuild == 0
+        && revision_mismatch == 0
+        && current_revision_missing == 0
+        && core_apply_errors == 0
+    {
+        return Value::Null;
+    }
+
+    let mode = if native_failed > 0 || core_apply_errors > 0 {
+        "degraded"
+    } else if full_rebuild > 0 {
+        "full_rebuild"
+    } else if full_snapshot_fallback > 0 || revision_mismatch > 0 || current_revision_missing > 0 {
+        "fallback_repaired"
+    } else if native_success > 0 {
+        "native_delta"
+    } else {
+        "unknown"
+    };
+    let warning = match mode {
+        "degraded" => "native user delta apply errors observed",
+        "full_rebuild" => "native user delta fell back to full plan rebuild",
+        "fallback_repaired" => "full snapshot fallback observed; monitor for repetition",
+        _ => "",
+    };
+
+    json!({
+        "mode": mode,
+        "warning": warning,
+        "native_apply_success_total": native_success,
+        "native_apply_failed_total": native_failed,
+        "full_snapshot_fallback_total": full_snapshot_fallback,
+        "full_rebuild_total": full_rebuild,
+        "revision_mismatch_total": revision_mismatch,
+        "current_revision_missing_total": current_revision_missing,
+        "core_apply_error_total": core_apply_errors
+    })
+}
+
+fn nested_metric_u64(metrics: &Map<String, Value>, section: &str, key: &str) -> u64 {
+    metrics
+        .get(section)
+        .and_then(Value::as_object)
+        .and_then(|section| section.get(key))
+        .and_then(Value::as_u64)
+        .unwrap_or(0)
 }
 
 fn version_value(version: String) -> Value {
@@ -401,8 +500,8 @@ mod tests {
     use crate::subscription_proxy::SubscriptionProxyStatus;
 
     use super::{
-        build_machine_status_payload, installed_core_versions_value, node_failure_payloads,
-        HealthReportInput, ResourceSnapshot, UsageSnapshot,
+        build_machine_status_payload, installed_core_versions_value, metrics_value,
+        node_failure_payloads, HealthReportInput, ResourceSnapshot, UsageSnapshot,
     };
 
     #[test]
@@ -629,9 +728,45 @@ mod tests {
             payload.status["metrics"]["keli_core_rs"]["keli_core_user_delta_apply_total"],
             json!(8)
         );
+        assert_eq!(
+            payload.status["metrics"]["native_core_gray_health"]["mode"],
+            json!("fallback_repaired")
+        );
+        assert_eq!(
+            payload.status["metrics"]["native_core_gray_health"]["full_snapshot_fallback_total"],
+            json!(1)
+        );
+        assert_eq!(
+            payload.status["metrics"]["native_core_gray_health"]["warning"],
+            json!("full snapshot fallback observed; monitor for repetition")
+        );
         let status = serde_json::to_string(&payload.status["metrics"]).unwrap();
         assert!(!status.contains("11111111-1111-1111-1111-111111111111"));
         assert!(!status.contains("KELI_CORE_CONTROL_TOKEN"));
+    }
+
+    #[test]
+    fn native_core_metrics_summary_marks_apply_errors_as_degraded() {
+        let metrics = json!({
+            "user_delta": {
+                "kelinode_user_delta_native_apply_success_total": 10,
+                "kelinode_user_delta_native_apply_failed_total": 2
+            },
+            "keli_core_rs": {
+                "keli_core_user_delta_apply_error_total": 1
+            }
+        });
+
+        let summary = metrics_value(metrics)["native_core_gray_health"].clone();
+
+        assert_eq!(summary["mode"], json!("degraded"));
+        assert_eq!(summary["native_apply_failed_total"], json!(2));
+        assert_eq!(summary["core_apply_error_total"], json!(1));
+        assert_eq!(
+            summary["warning"],
+            json!("native user delta apply errors observed")
+        );
+        assert!(!summary.to_string().contains("KELI_CORE_CONTROL_TOKEN"));
     }
 
     #[test]
