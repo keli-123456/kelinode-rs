@@ -6,10 +6,13 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+pub const KELI_CORE_CONTROL_TOKEN_ENV: &str = "KELI_CORE_CONTROL_TOKEN";
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct KeliCoreControlClient {
     addr: String,
     timeout: Duration,
+    token: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -117,11 +120,22 @@ impl KeliCoreControlClient {
         Self {
             addr: addr.into(),
             timeout: Duration::from_secs(5),
+            token: control_token_from_env(),
         }
     }
 
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
+        self
+    }
+
+    pub fn with_token(mut self, token: impl Into<String>) -> Self {
+        let token = token.into();
+        self.token = if token.trim().is_empty() {
+            None
+        } else {
+            Some(token)
+        };
         self
     }
 
@@ -231,7 +245,14 @@ impl KeliCoreControlClient {
                 KeliCoreControlError::new(format!("set keli-core-rs write timeout: {err}"))
             })?;
 
-        let body = serde_json::to_string(command)
+        let mut command = serde_json::to_value(command)
+            .map_err(|err| KeliCoreControlError::new(format!("encode control command: {err}")))?;
+        if let Some(token) = self.token.as_deref() {
+            if let Value::Object(object) = &mut command {
+                object.insert("token".to_string(), Value::String(token.to_string()));
+            }
+        }
+        let body = serde_json::to_string(&command)
             .map_err(|err| KeliCoreControlError::new(format!("encode control command: {err}")))?;
         writeln!(stream, "{body}")
             .map_err(|err| KeliCoreControlError::new(format!("write control command: {err}")))?;
@@ -246,6 +267,13 @@ impl KeliCoreControlClient {
         serde_json::from_str(response.trim())
             .map_err(|err| KeliCoreControlError::new(format!("decode control response: {err}")))
     }
+}
+
+fn control_token_from_env() -> Option<String> {
+    std::env::var(KELI_CORE_CONTROL_TOKEN_ENV)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
 }
 
 #[cfg(test)]
@@ -381,6 +409,44 @@ mod tests {
         });
 
         let response = KeliCoreControlClient::new(addr.to_string())
+            .status()
+            .unwrap();
+
+        assert!(matches!(response, KeliCoreResponse::Status { .. }));
+        join.join().unwrap();
+    }
+
+    #[test]
+    fn sends_control_token_when_configured() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let join = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut command = String::new();
+            BufReader::new(stream.try_clone().unwrap())
+                .read_line(&mut command)
+                .unwrap();
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(command.trim()).unwrap(),
+                json!({
+                    "type": "status",
+                    "token": "secret-token"
+                })
+            );
+            writeln!(
+                stream,
+                "{}",
+                json!({
+                    "type": "status",
+                    "status": "running",
+                    "listeners": []
+                })
+            )
+            .unwrap();
+        });
+
+        let response = KeliCoreControlClient::new(addr.to_string())
+            .with_token("secret-token")
             .status()
             .unwrap();
 
