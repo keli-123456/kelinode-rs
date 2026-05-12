@@ -287,12 +287,13 @@ where
                     &self.user_sync,
                     &options.users_by_node_tag,
                 );
-                self.plan =
-                    rebuild_runtime_plan_with_users(&self.plan, &options.users_by_node_tag)?;
                 if applied_user_delta {
                     options.control.keli_core_rs_user_delta_applied = true;
-                    options.users_by_node_tag.clear();
+                } else {
+                    self.plan =
+                        rebuild_runtime_plan_with_users(&self.plan, &options.users_by_node_tag)?;
                 }
+                options.users_by_node_tag.clear();
             }
             if self.refresh_health {
                 let resources = if self.public_ip_probe {
@@ -942,7 +943,10 @@ mod tests {
     use std::collections::BTreeMap;
     use std::collections::BTreeSet;
     use std::fs;
-    use std::time::Duration;
+    use std::io::{BufRead, BufReader, Write};
+    use std::net::TcpListener;
+    use std::thread;
+    use std::time::{Duration, Instant};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::{
@@ -952,6 +956,7 @@ mod tests {
         should_run, user_delta_not_supported, AsyncRuntimeLoopCallbacks, PanelRuntimeLoop,
         RuntimeLoopCallbacks, RuntimeLoopEvent, RuntimeLoopEventKind, RuntimeLoopExit,
         RuntimeLoopExitReason, RuntimeLoopFuture, RuntimeLoopOptions, RuntimeUserDeltaChange,
+        RuntimeUserSyncEntry,
     };
     use crate::config::{NodeConfig, ResolvedConfig, ResolvedMachineConfig};
     use crate::control::RuntimeControlOptions;
@@ -960,11 +965,11 @@ mod tests {
     use crate::machine::MachineUpgradeCommand;
     use crate::panel::types::{CommonNode, NodeInfo, UserInfo};
     use crate::port_forward::{PortForwardCommand, PortForwardExecutor};
-    use crate::process::MemoryProcessSupervisor;
+    use crate::process::{keli_core_rs_control_addr, MemoryProcessSupervisor};
     use crate::realtime::RealtimeRuntimeTask;
     use crate::runtime::build_runtime_bootstrap_plan;
     use crate::subscription_proxy::SubscriptionProxyRuntimeManager;
-    use crate::user::UserListDiff;
+    use crate::user::{UserListDiff, UserSyncState};
     use serde_json::json;
 
     #[test]
@@ -1437,6 +1442,177 @@ mod tests {
 
         assert_eq!(signal, RuntimeLoopSignal::Continue);
         assert!(saved.contains("44444444-4444-4444-4444-444444444444"));
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn panel_runtime_loop_skips_full_plan_rebuild_after_user_delta_apply() {
+        let dir = temp_test_dir("panel-runtime-loop-user-delta");
+        let mut resolved = ResolvedConfig {
+            kernel: Default::default(),
+            realtime: Default::default(),
+            machine: ResolvedMachineConfig {
+                enabled: true,
+                continue_on_error: true,
+                profiles: Vec::new(),
+            },
+            agent: Default::default(),
+            nodes: vec![NodeConfig {
+                url: "https://panel.example.test".to_string(),
+                token: "token".to_string(),
+                node_id: 10,
+                machine_id: 10,
+                ..NodeConfig::default()
+            }],
+        };
+        resolved.kernel.r#type = "keli-core-rs".to_string();
+        resolved.kernel.config_dir = dir.join("v2node").display().to_string();
+        let node = test_node_with_host("https://panel.example.test", "vless", 10);
+        let tag = node.tag.clone();
+        let plan = build_runtime_bootstrap_plan(resolved, vec![node], Vec::new()).unwrap();
+        let mut process = MemoryProcessSupervisor::default();
+        let mut port_forward = FakePortForwardExecutor::default();
+        let mut runner = PanelRuntimeLoop::new(plan, &mut process, &mut port_forward, None);
+        let old_user = UserInfo {
+            id: 10,
+            uuid: "11111111-1111-1111-1111-111111111111".to_string(),
+            speed_limit: 0,
+            device_limit: 0,
+        };
+        let new_user = UserInfo {
+            id: 11,
+            uuid: "22222222-2222-2222-2222-222222222222".to_string(),
+            speed_limit: 20,
+            device_limit: 2,
+        };
+        let mut initial_users_by_tag = BTreeMap::new();
+        initial_users_by_tag.insert(tag.clone(), vec![old_user.clone()]);
+
+        AsyncRuntimeLoopCallbacks::run_tick(
+            &mut runner,
+            RuntimeTickOptions {
+                control: RuntimeControlOptions {
+                    machine_id: 10,
+                    start_core: true,
+                    ..RuntimeControlOptions::default()
+                },
+                report_to_panel: false,
+                users_by_node_tag: initial_users_by_tag,
+            },
+        )
+        .await
+        .unwrap();
+        let config_path = runner.plan.core_plan.as_ref().unwrap().config_path.clone();
+        let saved_before = fs::read_to_string(&config_path).unwrap();
+        assert!(saved_before.contains(&old_user.uuid));
+        assert!(!saved_before.contains(&new_user.uuid));
+        let stops_before = runner.process_supervisor.stops.len();
+        let starts_before = runner.process_supervisor.starts.len();
+
+        runner.user_sync.insert(
+            tag.clone(),
+            RuntimeUserSyncEntry {
+                state: UserSyncState {
+                    revision: 43,
+                    users: vec![old_user.clone(), new_user.clone()],
+                    updated_at: None,
+                },
+                delta_supported: true,
+                path: String::new(),
+                last_change: Some(RuntimeUserDeltaChange {
+                    full: false,
+                    revision: 43,
+                    diff: UserListDiff {
+                        added: vec![new_user.clone()],
+                        updated: Vec::new(),
+                        deleted: Vec::new(),
+                    },
+                }),
+            },
+        );
+        let control_addr = keli_core_rs_control_addr(&config_path);
+        let listener = TcpListener::bind(&control_addr).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let tag_for_thread = tag.clone();
+        let new_uuid_for_thread = new_user.uuid.clone();
+        let control_thread = thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(2);
+            let (mut stream, _) = loop {
+                match listener.accept() {
+                    Ok(accepted) => break accepted,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        if Instant::now() >= deadline {
+                            panic!("keli-core-rs user delta control command was not received");
+                        }
+                        thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(error) => panic!("accept keli-core-rs control command: {error}"),
+                }
+            };
+            let mut command = String::new();
+            BufReader::new(stream.try_clone().unwrap())
+                .read_line(&mut command)
+                .unwrap();
+            let command = serde_json::from_str::<serde_json::Value>(command.trim()).unwrap();
+            assert_eq!(command["type"], "apply_user_delta");
+            assert_eq!(command["node_tag"], tag_for_thread);
+            assert_eq!(command["delta"]["added"][0]["uuid"], new_uuid_for_thread);
+            writeln!(
+                stream,
+                "{}",
+                json!({
+                    "type": "user_delta_applied",
+                    "node_tag": tag_for_thread,
+                    "result": {
+                        "added": 1,
+                        "updated": 0,
+                        "deleted": 0,
+                        "missing_updated": 0,
+                        "missing_deleted": 0,
+                        "active_users": 2,
+                        "full_applied": false
+                    },
+                    "status": "running",
+                    "listeners": []
+                })
+            )
+            .unwrap();
+        });
+        let mut current_users_by_tag = BTreeMap::new();
+        current_users_by_tag.insert(tag, vec![old_user.clone(), new_user.clone()]);
+
+        let signal = AsyncRuntimeLoopCallbacks::run_tick(
+            &mut runner,
+            RuntimeTickOptions {
+                control: RuntimeControlOptions {
+                    machine_id: 10,
+                    start_core: true,
+                    hot_apply_keli_core_rs: true,
+                    ..RuntimeControlOptions::default()
+                },
+                report_to_panel: false,
+                users_by_node_tag: current_users_by_tag,
+            },
+        )
+        .await
+        .unwrap();
+        control_thread.join().unwrap();
+        let saved_after = fs::read_to_string(&config_path).unwrap();
+
+        assert_eq!(signal, RuntimeLoopSignal::Continue);
+        assert_eq!(saved_after, saved_before);
+        assert_eq!(runner.process_supervisor.stops.len(), stops_before);
+        assert_eq!(runner.process_supervisor.starts.len(), starts_before + 1);
+        assert!(runner
+            .plan
+            .core_plan
+            .as_ref()
+            .unwrap()
+            .inbounds
+            .iter()
+            .flat_map(|inbound| inbound.users.iter())
+            .all(|user| user.uuid != new_user.uuid));
 
         let _ = fs::remove_dir_all(dir);
     }
