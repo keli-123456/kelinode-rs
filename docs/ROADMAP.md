@@ -115,6 +115,7 @@
 - Deterministic local control address wiring for `keli-core-rs run-config --control`.
 - JSON-line `keli-core-rs` control client for status, stop, `ApplyConfig`, and per-user traffic drain.
 - Runtime hot-apply path for running `keli-core-rs` configs, with process reload fallback for old or unavailable control sockets.
+- Native core gray release runbook covering opt-in enablement, control token safety, user-delta metrics, traffic reliability signals, rollback triggers, and interop/soak gates.
 - Compatibility tests around protocol parsing and endpoint construction.
 
 ## Phase 2: Runtime Control

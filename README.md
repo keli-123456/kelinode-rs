@@ -119,6 +119,7 @@ Not implemented yet:
 - Subscription reverse proxy.
 
 The native renderer parity gate is tracked in `docs/NATIVE_CORE_PARITY.md`.
+The native production gray release runbook is tracked in `docs/NATIVE_CORE_GRAY_RELEASE.md`.
 
 ## Native Core Binary Example
 
