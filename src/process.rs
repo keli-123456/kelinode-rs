@@ -383,6 +383,7 @@ pub fn keli_core_rs_control_token(config_path: &Path) -> Result<String, ProcessE
     if let Ok(contents) = fs::read_to_string(&token_path) {
         let token = contents.trim();
         if !token.is_empty() {
+            secure_keli_core_rs_control_token_file(&token_path)?;
             return Ok(token.to_string());
         }
     }
@@ -402,17 +403,26 @@ pub fn keli_core_rs_control_token(config_path: &Path) -> Result<String, ProcessE
             token_path.display()
         ))
     })?;
+    secure_keli_core_rs_control_token_file(&token_path)?;
+    Ok(token)
+}
+
+fn secure_keli_core_rs_control_token_file(token_path: &Path) -> Result<(), ProcessError> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&token_path, fs::Permissions::from_mode(0o600)).map_err(|err| {
+        fs::set_permissions(token_path, fs::Permissions::from_mode(0o600)).map_err(|err| {
             ProcessError::new(format!(
                 "secure keli-core-rs control token {}: {err}",
                 token_path.display()
             ))
         })?;
     }
-    Ok(token)
+    #[cfg(not(unix))]
+    {
+        let _ = token_path;
+    }
+    Ok(())
 }
 
 fn generate_keli_core_rs_control_token() -> Result<String, ProcessError> {
@@ -610,6 +620,26 @@ mod tests {
 
         assert_eq!(first, second);
         assert_eq!(fs::read_to_string(token_path).unwrap().trim(), first);
+        fs::remove_dir_all(dir).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn keli_core_rs_control_token_repairs_existing_file_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = temp_test_dir("control-token-permissions");
+        let config_path = dir.join("config.json");
+        let token_path = keli_core_rs_control_token_path(&config_path);
+        fs::create_dir_all(token_path.parent().unwrap()).unwrap();
+        fs::write(&token_path, "existing-token\n").unwrap();
+        fs::set_permissions(&token_path, fs::Permissions::from_mode(0o644)).unwrap();
+
+        let token = keli_core_rs_control_token(&config_path).unwrap();
+        let mode = fs::metadata(&token_path).unwrap().permissions().mode() & 0o777;
+
+        assert_eq!(token, "existing-token");
+        assert_eq!(mode, 0o600);
         fs::remove_dir_all(dir).ok();
     }
 

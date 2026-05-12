@@ -43,7 +43,8 @@ Recommended rollout:
 
 `kelinode-rs` generates a local per-config control token for `keli-core-rs`, injects it through
 `KELI_CORE_CONTROL_TOKEN`, and uses the same token for control commands. The token is stored beside
-the generated config as a local secret. It must not be copied into:
+the generated config as a local secret. On Unix systems the token file is kept at `0600` when it is
+created or reused. It must not be copied into:
 
 - core config JSON
 - machine status payloads
