@@ -292,9 +292,20 @@ impl PanelClient {
             .await
             .context("request machine nodes")?;
         ensure_success(response.status(), "machine nodes")?;
+        let content_type = response
+            .headers()
+            .get(CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or("")
+            .to_string();
         let body = response.bytes().await.context("read machine nodes")?;
-        let envelope: MachineNodesEnvelope =
-            serde_json::from_slice(&body).context("decode machine nodes")?;
+        let envelope: MachineNodesEnvelope = serde_json::from_slice(&body).map_err(|error| {
+            anyhow!(
+                "decode machine nodes: {error}; content_type={}; body_prefix={}",
+                content_type,
+                safe_response_preview(&body, &self.options.token)
+            )
+        })?;
         Ok(envelope.into_response())
     }
 
@@ -408,6 +419,24 @@ fn ensure_success(status: StatusCode, label: &str) -> Result<()> {
     }
 }
 
+fn safe_response_preview(body: &[u8], token: &str) -> String {
+    const LIMIT: usize = 240;
+    let mut text = String::from_utf8_lossy(&body[..body.len().min(LIMIT)]).to_string();
+    let token = token.trim();
+    if !token.is_empty() {
+        text = text.replace(token, "[redacted]");
+    }
+    text.chars()
+        .map(|value| {
+            if value.is_control() && !matches!(value, '\n' | '\r' | '\t') {
+                ' '
+            } else {
+                value
+            }
+        })
+        .collect()
+}
+
 fn decode_user_list_body(body: &[u8], content_type: Option<&str>) -> Result<UserListBody> {
     if is_msgpack_content_type(content_type) {
         rmp_serde::from_slice(body).context("decode msgpack user list")
@@ -443,8 +472,8 @@ mod tests {
     use std::time::Duration;
 
     use super::{
-        decode_user_delta_body, decode_user_list_body, is_msgpack_content_type, PanelClient,
-        PanelClientOptions,
+        decode_user_delta_body, decode_user_list_body, is_msgpack_content_type,
+        safe_response_preview, PanelClient, PanelClientOptions,
     };
     use crate::panel::contract::{
         PATH_V2_MACHINE_NODES, PATH_V2_SERVER_CONFIG, PATH_V2_SERVER_HANDSHAKE,
@@ -595,6 +624,18 @@ mod tests {
 
         assert!(json_err.to_string().contains("decode json user list"));
         assert!(msgpack_err.to_string().contains("decode msgpack user list"));
+    }
+
+    #[test]
+    fn safe_response_preview_redacts_token() {
+        let preview = safe_response_preview(
+            b"{\"message\":\"bad token secret-token value\",\"control\":\"\x01\"}",
+            "secret-token",
+        );
+
+        assert!(!preview.contains("secret-token"));
+        assert!(preview.contains("[redacted]"));
+        assert!(!preview.contains('\u{0001}'));
     }
 
     #[test]

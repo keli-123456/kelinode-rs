@@ -15,14 +15,25 @@ use crate::panel::{PanelClient, PanelClientOptions};
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 pub struct MachinePanelNode {
     pub id: u32,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_optional_string")]
     pub code: String,
-    #[serde(default, rename = "type")]
+    #[serde(
+        default,
+        rename = "type",
+        deserialize_with = "deserialize_optional_string"
+    )]
     pub node_type: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_optional_string")]
     pub name: String,
     #[serde(default)]
     pub updated_at: Value,
+}
+
+fn deserialize_optional_string<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Option::<String>::deserialize(deserializer)?.unwrap_or_default())
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq)]
@@ -647,6 +658,24 @@ mod tests {
             response.agent.unwrap().subscription_proxy.unwrap().site_id,
             "site-a"
         );
+    }
+
+    #[test]
+    fn machine_nodes_response_accepts_null_optional_node_strings() {
+        let envelope: MachineNodesEnvelope = serde_json::from_value(json!({
+            "nodes": [
+                {"id": 32, "code": null, "type": "vless", "name": null, "updated_at": 1778599385}
+            ]
+        }))
+        .unwrap();
+
+        let response = envelope.into_response();
+
+        assert_eq!(response.nodes.len(), 1);
+        assert_eq!(response.nodes[0].id, 32);
+        assert_eq!(response.nodes[0].code, "");
+        assert_eq!(response.nodes[0].node_type, "vless");
+        assert_eq!(response.nodes[0].name, "");
     }
 
     #[test]
