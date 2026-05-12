@@ -44,6 +44,7 @@ enum KeliCoreCommand {
     DrainTraffic { minimum_bytes: u64 },
     RequeueTraffic { records: Vec<KeliCoreTrafficRecord> },
     Status,
+    Metrics,
     Stop,
 }
 
@@ -70,6 +71,9 @@ pub enum KeliCoreResponse {
     Status {
         status: Value,
         listeners: Vec<Value>,
+    },
+    Metrics {
+        metrics: Value,
     },
     Stopped,
     Error {
@@ -145,6 +149,16 @@ impl KeliCoreControlClient {
 
     pub fn status(&self) -> Result<KeliCoreResponse, KeliCoreControlError> {
         self.send(&KeliCoreCommand::Status)
+    }
+
+    pub fn metrics(&self) -> Result<Value, KeliCoreControlError> {
+        match self.send(&KeliCoreCommand::Metrics)? {
+            KeliCoreResponse::Metrics { metrics } => Ok(metrics),
+            KeliCoreResponse::Error { message } => Err(KeliCoreControlError::new(message)),
+            response => Err(KeliCoreControlError::new(format!(
+                "unexpected keli-core-rs metrics response: {response:?}"
+            ))),
+        }
     }
 
     pub fn apply_config_response(
@@ -413,6 +427,46 @@ mod tests {
             .unwrap();
 
         assert!(matches!(response, KeliCoreResponse::Status { .. }));
+        join.join().unwrap();
+    }
+
+    #[test]
+    fn parses_metrics_response() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let join = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut command = String::new();
+            BufReader::new(stream.try_clone().unwrap())
+                .read_line(&mut command)
+                .unwrap();
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(command.trim()).unwrap(),
+                json!({ "type": "metrics" })
+            );
+            writeln!(
+                stream,
+                "{}",
+                json!({
+                    "type": "metrics",
+                    "metrics": {
+                        "keli_core_user_delta_apply_total": 2,
+                        "keli_core_user_delta_full_snapshot_total": 1
+                    }
+                })
+            )
+            .unwrap();
+        });
+
+        let metrics = KeliCoreControlClient::new(addr.to_string())
+            .metrics()
+            .unwrap();
+
+        assert_eq!(metrics["keli_core_user_delta_apply_total"], json!(2));
+        assert_eq!(
+            metrics["keli_core_user_delta_full_snapshot_total"],
+            json!(1)
+        );
         join.join().unwrap();
     }
 

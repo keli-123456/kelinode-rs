@@ -40,6 +40,7 @@ pub struct HealthReportInput {
     pub sidecars: Vec<ProcessStatus>,
     pub subscription_proxy: Option<SubscriptionProxyStatus>,
     pub upgrade: Option<Value>,
+    pub metrics: Option<Value>,
 }
 
 pub fn build_machine_status_payload(
@@ -86,6 +87,9 @@ pub fn build_machine_status_payload(
     }
     if let Some(upgrade) = input.upgrade {
         payload.insert_status("upgrade", upgrade);
+    }
+    if let Some(metrics) = input.metrics {
+        payload.insert_status("metrics", metrics);
     }
 
     payload
@@ -438,6 +442,7 @@ mod tests {
                 sidecars: Vec::new(),
                 subscription_proxy: None,
                 upgrade: None,
+                metrics: None,
             },
         );
 
