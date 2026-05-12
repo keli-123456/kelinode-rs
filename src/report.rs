@@ -89,11 +89,16 @@ pub fn keli_core_traffic_snapshots(
     for record in records {
         let Some((node_tag, uid)) = core_plan.inbounds.iter().find_map(|inbound| {
             let node_tag = normalize_keli_core_record_tag(&record.node_tag, &inbound.tag)?;
-            let uid = inbound
-                .users
-                .iter()
-                .find(|user| user.uuid == record.user_uuid)
-                .map(|user| user.id)?;
+            let uid = record
+                .user_id
+                .and_then(|id| u32::try_from(id).ok())
+                .or_else(|| {
+                    inbound
+                        .users
+                        .iter()
+                        .find(|user| user.uuid == record.user_uuid)
+                        .map(|user| user.id)
+                })?;
             Some((node_tag.to_string(), uid))
         }) else {
             continue;
@@ -447,6 +452,27 @@ mod tests {
     }
 
     #[test]
+    fn maps_keli_core_traffic_records_by_user_id_after_user_deletion() {
+        let records = vec![KeliCoreTrafficRecord {
+            node_tag: "node-a".to_string(),
+            user_uuid: "deleted-uuid".to_string(),
+            user_id: Some(99),
+            upload: 10,
+            download: 20,
+            online_ips: vec!["198.51.100.9".to_string()],
+        }];
+
+        let snapshots = keli_core_traffic_snapshots(&core_plan(), &records);
+
+        assert_eq!(snapshots["node-a"].traffic[0].uid, 99);
+        assert_eq!(snapshots["node-a"].traffic[0].upload, 10);
+        assert_eq!(
+            snapshots["node-a"].online[&99],
+            vec!["198.51.100.9".to_string()]
+        );
+    }
+
+    #[test]
     fn drains_keli_core_traffic_through_injected_client() {
         let mut drainer = FakeKeliCoreDrainer {
             records: vec![traffic_record("node-a", "uuid-b", 30, 40)],
@@ -589,6 +615,7 @@ mod tests {
         KeliCoreTrafficRecord {
             node_tag: node_tag.to_string(),
             user_uuid: user_uuid.to_string(),
+            user_id: None,
             upload,
             download,
             online_ips: Vec::new(),
@@ -605,6 +632,7 @@ mod tests {
         KeliCoreTrafficRecord {
             node_tag: node_tag.to_string(),
             user_uuid: user_uuid.to_string(),
+            user_id: None,
             upload,
             download,
             online_ips,

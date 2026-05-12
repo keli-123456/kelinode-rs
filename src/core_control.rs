@@ -67,6 +67,8 @@ pub enum KeliCoreResponse {
 pub struct KeliCoreTrafficRecord {
     pub node_tag: String,
     pub user_uuid: String,
+    #[serde(default)]
+    pub user_id: Option<u64>,
     pub upload: u64,
     pub download: u64,
     #[serde(default)]
