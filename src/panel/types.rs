@@ -226,13 +226,13 @@ pub struct UserInfo {
     pub device_limit: u32,
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 pub struct UserListBody {
     #[serde(default)]
     pub users: Vec<UserInfo>,
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 pub struct UserDeltaBody {
     #[serde(default)]
     pub full: bool,

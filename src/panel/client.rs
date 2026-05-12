@@ -155,18 +155,13 @@ impl PanelClient {
             .get(ETAG)
             .and_then(|value| value.to_str().ok())
             .map(str::to_string);
-        let is_msgpack = response
+        let content_type = response
             .headers()
             .get(CONTENT_TYPE)
-            .and_then(|value| value.to_str().ok())
-            .map(|value| value.contains(CONTENT_TYPE_MSGPACK))
-            .unwrap_or(false);
+            .and_then(|value| value.to_str().ok());
+        let content_type = content_type.map(str::to_string);
         let body = response.bytes().await.context("read user list")?;
-        let user_list: UserListBody = if is_msgpack {
-            rmp_serde::from_slice(&body).context("decode msgpack user list")?
-        } else {
-            serde_json::from_slice(&body).context("decode json user list")?
-        };
+        let user_list = decode_user_list_body(&body, content_type.as_deref())?;
         self.user_etag = etag;
         Ok(Some(user_list.users))
     }
@@ -180,8 +175,13 @@ impl PanelClient {
             .await
             .context("request user delta")?;
         ensure_success(response.status(), "user delta")?;
+        let content_type = response
+            .headers()
+            .get(CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string);
         let body = response.bytes().await.context("read user delta")?;
-        serde_json::from_slice(&body).context("decode user delta")
+        decode_user_delta_body(&body, content_type.as_deref())
     }
 
     pub async fn get_alive_list(&self) -> Result<AliveMap> {
@@ -408,15 +408,49 @@ fn ensure_success(status: StatusCode, label: &str) -> Result<()> {
     }
 }
 
+fn decode_user_list_body(body: &[u8], content_type: Option<&str>) -> Result<UserListBody> {
+    if is_msgpack_content_type(content_type) {
+        rmp_serde::from_slice(body).context("decode msgpack user list")
+    } else {
+        serde_json::from_slice(body).context("decode json user list")
+    }
+}
+
+fn decode_user_delta_body(body: &[u8], content_type: Option<&str>) -> Result<UserDeltaBody> {
+    if is_msgpack_content_type(content_type) {
+        rmp_serde::from_slice(body).context("decode msgpack user delta")
+    } else {
+        serde_json::from_slice(body).context("decode json user delta")
+    }
+}
+
+fn is_msgpack_content_type(content_type: Option<&str>) -> bool {
+    content_type
+        .and_then(|value| value.split(';').next())
+        .map(str::trim)
+        .map(str::to_ascii_lowercase)
+        .map(|value| {
+            value == CONTENT_TYPE_MSGPACK
+                || value == "application/msgpack"
+                || value == "application/vnd.msgpack"
+                || value == "application/vnd.msgpack+binary"
+        })
+        .unwrap_or(false)
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
 
-    use super::{PanelClient, PanelClientOptions};
+    use super::{
+        decode_user_delta_body, decode_user_list_body, is_msgpack_content_type, PanelClient,
+        PanelClientOptions,
+    };
     use crate::panel::contract::{
         PATH_V2_MACHINE_NODES, PATH_V2_SERVER_CONFIG, PATH_V2_SERVER_HANDSHAKE,
         PATH_V2_SERVER_REPORT,
     };
+    use crate::panel::types::{UserDeltaBody, UserInfo, UserListBody};
 
     #[test]
     fn endpoint_joins_trimmed_host_and_path() {
@@ -475,5 +509,124 @@ mod tests {
             client.endpoint(PATH_V2_MACHINE_NODES),
             "https://panel.example.test/api/v2/server/machine/nodes"
         );
+    }
+
+    #[test]
+    fn decodes_json_user_delta_body() {
+        let expected = incremental_delta();
+        let body = serde_json::to_vec(&expected).expect("encode json");
+
+        let decoded =
+            decode_user_delta_body(&body, Some("application/json")).expect("decode json delta");
+
+        assert_eq!(decoded, expected);
+    }
+
+    #[test]
+    fn decodes_msgpack_user_delta_body() {
+        let expected = incremental_delta();
+        let body = rmp_serde::to_vec_named(&expected).expect("encode msgpack");
+
+        let decoded = decode_user_delta_body(&body, Some("application/x-msgpack; charset=binary"))
+            .expect("decode msgpack delta");
+
+        assert_eq!(decoded, expected);
+    }
+
+    #[test]
+    fn decodes_empty_and_full_user_delta_bodies() {
+        let empty = UserDeltaBody {
+            revision: 8,
+            ..UserDeltaBody::default()
+        };
+        let full = UserDeltaBody {
+            full: true,
+            revision: 9,
+            users: vec![user(1, "user-a")],
+            deleted: Vec::new(),
+            upsert: Vec::new(),
+        };
+
+        let empty_body = serde_json::to_vec(&empty).expect("encode empty delta");
+        let full_body = rmp_serde::to_vec_named(&full).expect("encode full delta");
+
+        assert_eq!(
+            decode_user_delta_body(&empty_body, Some("application/json")).unwrap(),
+            empty
+        );
+        assert_eq!(
+            decode_user_delta_body(&full_body, Some("application/msgpack")).unwrap(),
+            full
+        );
+    }
+
+    #[test]
+    fn reports_malformed_user_delta_bodies_by_format() {
+        let json_err =
+            decode_user_delta_body(b"{not-json", Some("application/json")).expect_err("json error");
+        let msgpack_err = decode_user_delta_body(b"{not-msgpack", Some("application/x-msgpack"))
+            .expect_err("msgpack error");
+
+        assert!(json_err.to_string().contains("decode json user delta"));
+        assert!(msgpack_err
+            .to_string()
+            .contains("decode msgpack user delta"));
+    }
+
+    #[test]
+    fn decodes_msgpack_user_list_body() {
+        let expected = UserListBody {
+            users: vec![user(1, "user-a"), user(2, "user-b")],
+        };
+        let body = rmp_serde::to_vec_named(&expected).expect("encode msgpack list");
+
+        let decoded = decode_user_list_body(&body, Some("application/vnd.msgpack"))
+            .expect("decode msgpack list");
+
+        assert_eq!(decoded, expected);
+    }
+
+    #[test]
+    fn reports_malformed_user_list_bodies_by_format() {
+        let json_err =
+            decode_user_list_body(b"{not-json", Some("application/json")).expect_err("json error");
+        let msgpack_err = decode_user_list_body(b"{not-msgpack", Some("application/msgpack"))
+            .expect_err("msgpack error");
+
+        assert!(json_err.to_string().contains("decode json user list"));
+        assert!(msgpack_err.to_string().contains("decode msgpack user list"));
+    }
+
+    #[test]
+    fn recognizes_msgpack_content_type_aliases() {
+        assert!(is_msgpack_content_type(Some("application/x-msgpack")));
+        assert!(is_msgpack_content_type(Some(
+            "application/msgpack; charset=binary"
+        )));
+        assert!(is_msgpack_content_type(Some("application/vnd.msgpack")));
+        assert!(is_msgpack_content_type(Some(
+            "application/vnd.msgpack+binary"
+        )));
+        assert!(!is_msgpack_content_type(Some("application/json")));
+        assert!(!is_msgpack_content_type(None));
+    }
+
+    fn incremental_delta() -> UserDeltaBody {
+        UserDeltaBody {
+            full: false,
+            revision: 7,
+            users: Vec::new(),
+            deleted: vec![user(1, "user-a")],
+            upsert: vec![user(2, "user-b")],
+        }
+    }
+
+    fn user(id: u32, uuid: &str) -> UserInfo {
+        UserInfo {
+            id,
+            uuid: uuid.to_string(),
+            speed_limit: id * 10,
+            device_limit: id,
+        }
     }
 }
