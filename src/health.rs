@@ -171,6 +171,7 @@ fn native_core_gray_health_value(metrics: &Map<String, Value>) -> Value {
         "keli_core_rs",
         "keli_core_user_delta_apply_error_total",
     );
+    let metrics_failure = metrics.get("keli_core_rs_error").is_some();
 
     if native_success == 0
         && native_failed == 0
@@ -179,11 +180,35 @@ fn native_core_gray_health_value(metrics: &Map<String, Value>) -> Value {
         && revision_mismatch == 0
         && current_revision_missing == 0
         && core_apply_errors == 0
+        && !metrics_failure
     {
         return Value::Null;
     }
 
-    let mode = if native_failed > 0 || core_apply_errors > 0 {
+    let mut reasons = Vec::new();
+    if metrics_failure {
+        reasons.push("metrics_unavailable");
+    }
+    if native_failed > 0 {
+        reasons.push("native_apply_failed");
+    }
+    if core_apply_errors > 0 {
+        reasons.push("core_apply_error");
+    }
+    if full_rebuild > 0 {
+        reasons.push("full_rebuild");
+    }
+    if full_snapshot_fallback > 0 {
+        reasons.push("full_snapshot_fallback");
+    }
+    if revision_mismatch > 0 {
+        reasons.push("revision_mismatch");
+    }
+    if current_revision_missing > 0 {
+        reasons.push("current_revision_missing");
+    }
+
+    let mode = if metrics_failure || native_failed > 0 || core_apply_errors > 0 {
         "degraded"
     } else if full_rebuild > 0 {
         "full_rebuild"
@@ -195,7 +220,7 @@ fn native_core_gray_health_value(metrics: &Map<String, Value>) -> Value {
         "unknown"
     };
     let warning = match mode {
-        "degraded" => "native user delta apply errors observed",
+        "degraded" => "native core metrics unavailable or apply errors observed",
         "full_rebuild" => "native user delta fell back to full plan rebuild",
         "fallback_repaired" => "full snapshot fallback observed; monitor for repetition",
         _ => "",
@@ -210,7 +235,9 @@ fn native_core_gray_health_value(metrics: &Map<String, Value>) -> Value {
         "full_rebuild_total": full_rebuild,
         "revision_mismatch_total": revision_mismatch,
         "current_revision_missing_total": current_revision_missing,
-        "core_apply_error_total": core_apply_errors
+        "core_apply_error_total": core_apply_errors,
+        "metrics_available": !metrics_failure,
+        "reasons": reasons
     })
 }
 
@@ -740,6 +767,14 @@ mod tests {
             payload.status["metrics"]["native_core_gray_health"]["warning"],
             json!("full snapshot fallback observed; monitor for repetition")
         );
+        assert_eq!(
+            payload.status["metrics"]["native_core_gray_health"]["metrics_available"],
+            json!(true)
+        );
+        assert_eq!(
+            payload.status["metrics"]["native_core_gray_health"]["reasons"],
+            json!(["full_snapshot_fallback"])
+        );
         let status = serde_json::to_string(&payload.status["metrics"]).unwrap();
         assert!(!status.contains("11111111-1111-1111-1111-111111111111"));
         assert!(!status.contains("KELI_CORE_CONTROL_TOKEN"));
@@ -764,7 +799,35 @@ mod tests {
         assert_eq!(summary["core_apply_error_total"], json!(1));
         assert_eq!(
             summary["warning"],
-            json!("native user delta apply errors observed")
+            json!("native core metrics unavailable or apply errors observed")
+        );
+        assert_eq!(summary["metrics_available"], json!(true));
+        assert_eq!(
+            summary["reasons"],
+            json!(["native_apply_failed", "core_apply_error"])
+        );
+        assert!(!summary.to_string().contains("KELI_CORE_CONTROL_TOKEN"));
+    }
+
+    #[test]
+    fn native_core_metrics_summary_marks_metrics_failure_as_degraded() {
+        let metrics = json!({
+            "user_delta": {
+                "kelinode_user_delta_native_apply_success_total": 10
+            },
+            "keli_core_rs_error": {
+                "message": "fetch keli-core-rs metrics: connection refused"
+            }
+        });
+
+        let summary = metrics_value(metrics)["native_core_gray_health"].clone();
+
+        assert_eq!(summary["mode"], json!("degraded"));
+        assert_eq!(summary["metrics_available"], json!(false));
+        assert_eq!(summary["reasons"], json!(["metrics_unavailable"]));
+        assert_eq!(
+            summary["warning"],
+            json!("native core metrics unavailable or apply errors observed")
         );
         assert!(!summary.to_string().contains("KELI_CORE_CONTROL_TOKEN"));
     }

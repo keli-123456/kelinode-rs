@@ -387,8 +387,16 @@ where
             let mut metrics = json!({
                 "user_delta": self.user_delta_metrics.status_value()
             });
-            if let Some(core_metrics) = keli_core_rs_metrics_snapshot(&self.plan) {
-                metrics["keli_core_rs"] = core_metrics;
+            match keli_core_rs_metrics_snapshot(&self.plan) {
+                Ok(Some(core_metrics)) => {
+                    metrics["keli_core_rs"] = core_metrics;
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    metrics["keli_core_rs_error"] = json!({
+                        "message": error
+                    });
+                }
             }
             options.control.health.metrics = Some(metrics);
             if options.control.start_core
@@ -657,15 +665,19 @@ fn sync_runtime_user_id_lookup_from_state(
     }
 }
 
-fn keli_core_rs_metrics_snapshot(plan: &RuntimeBootstrapPlan) -> Option<Value> {
-    let core_plan = plan.core_plan.as_ref()?;
+fn keli_core_rs_metrics_snapshot(plan: &RuntimeBootstrapPlan) -> Result<Option<Value>, String> {
+    let Some(core_plan) = plan.core_plan.as_ref() else {
+        return Ok(None);
+    };
     if core_plan.kind != CoreKind::KeliCoreRs {
-        return None;
+        return Ok(None);
     }
-    keli_core_rs_control_client(&core_plan.config_path)
-        .ok()?
+    let client = keli_core_rs_control_client(&core_plan.config_path)
+        .map_err(|error| format!("create keli-core-rs metrics client: {}", error.message))?;
+    client
         .metrics()
-        .ok()
+        .map(Some)
+        .map_err(|error| format!("fetch keli-core-rs metrics: {}", error.message))
 }
 
 fn refresh_runtime_health(
@@ -1651,7 +1663,7 @@ mod tests {
             .unwrap();
         });
 
-        let metrics = keli_core_rs_metrics_snapshot(&plan).unwrap();
+        let metrics = keli_core_rs_metrics_snapshot(&plan).unwrap().unwrap();
 
         assert_eq!(metrics["keli_core_user_delta_apply_total"], json!(3));
         assert_eq!(
@@ -1663,6 +1675,49 @@ mod tests {
             .to_string()
             .contains(&config_path.display().to_string()));
         control_thread.join().unwrap();
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn keli_core_metrics_snapshot_reports_fetch_errors_without_token() {
+        let dir = temp_test_dir("core-metrics-error");
+        let mut resolved = ResolvedConfig {
+            kernel: Default::default(),
+            realtime: Default::default(),
+            machine: ResolvedMachineConfig {
+                enabled: true,
+                continue_on_error: true,
+                profiles: Vec::new(),
+            },
+            agent: Default::default(),
+            nodes: vec![NodeConfig {
+                url: "https://panel.example.test".to_string(),
+                token: "token".to_string(),
+                node_id: 16,
+                machine_id: 16,
+                ..NodeConfig::default()
+            }],
+        };
+        resolved.kernel.r#type = "keli-core-rs".to_string();
+        resolved.kernel.config_dir = dir.join("v2node").display().to_string();
+        let plan = build_runtime_bootstrap_plan(
+            resolved,
+            vec![test_node_with_host(
+                "https://panel.example.test",
+                "vless",
+                16,
+            )],
+            Vec::new(),
+        )
+        .unwrap();
+        let config_path = plan.core_plan.as_ref().unwrap().config_path.clone();
+        let token = keli_core_rs_control_token(&config_path).unwrap();
+
+        let error = keli_core_rs_metrics_snapshot(&plan).expect_err("metrics should fail");
+
+        assert!(error.contains("fetch keli-core-rs metrics"));
+        assert!(!error.contains(&token));
+        assert!(!error.contains("KELI_CORE_CONTROL_TOKEN"));
         let _ = fs::remove_dir_all(dir);
     }
 
