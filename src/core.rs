@@ -432,7 +432,6 @@ fn render_mieru_sidecar_config(plan: &CorePlan) -> Result<Value, CoreError> {
 }
 
 fn render_keli_core_rs_config(plan: &CorePlan) -> Result<Value, CoreError> {
-    let mut routes = Vec::new();
     let mut outbounds = vec![json!({
         "tag": "direct",
         "protocol": "freedom",
@@ -441,85 +440,7 @@ fn render_keli_core_rs_config(plan: &CorePlan) -> Result<Value, CoreError> {
     })];
     for inbound in &plan.inbounds {
         validate_keli_core_rs_inbound(inbound)?;
-
-        for route in &inbound.routes {
-            if route.match_rules.is_empty() && route.action != "default_out" {
-                continue;
-            }
-            match route.action.as_str() {
-                "block" => routes.push(json!({
-                    "targets": keli_core_rs_block_route_targets(inbound, route)?,
-                    "action": "block"
-                })),
-                "block_ip" => routes.push(json!({
-                    "targets": prefixed_keli_core_rs_ip_route_targets(inbound, route)?,
-                    "action": "block"
-                })),
-                "block_port" => routes.push(json!({
-                    "targets": prefixed_keli_core_rs_port_route_targets(inbound, route)?,
-                    "action": "block"
-                })),
-                "route" => {
-                    if let Some((tag, outbound)) = keli_core_rs_route_outbound(inbound, route)? {
-                        push_keli_core_rs_outbound_once(
-                            &mut outbounds,
-                            tag.as_str(),
-                            outbound.clone(),
-                        );
-                        routes.push(json!({
-                            "targets": keli_core_rs_route_targets(inbound, route)?,
-                            "action": {
-                                "outbound": tag
-                            },
-                            "outbound": outbound
-                        }));
-                    }
-                }
-                "route_ip" => {
-                    if let Some((tag, outbound)) = keli_core_rs_route_outbound(inbound, route)? {
-                        push_keli_core_rs_outbound_once(
-                            &mut outbounds,
-                            tag.as_str(),
-                            outbound.clone(),
-                        );
-                        routes.push(json!({
-                            "targets": prefixed_keli_core_rs_ip_route_targets(inbound, route)?,
-                            "action": {
-                                "outbound": tag
-                            },
-                            "outbound": outbound
-                        }));
-                    }
-                }
-                "default_out" => {
-                    if let Some((tag, outbound)) = keli_core_rs_route_outbound(inbound, route)? {
-                        push_keli_core_rs_outbound_once(
-                            &mut outbounds,
-                            tag.as_str(),
-                            outbound.clone(),
-                        );
-                        routes.push(json!({
-                            "targets": ["*"],
-                            "action": {
-                                "outbound": tag
-                            },
-                            "outbound": outbound
-                        }));
-                    }
-                }
-                "protocol" => routes.push(json!({
-                    "targets": prefixed_keli_core_rs_protocol_route_targets(inbound, route)?,
-                    "action": "block"
-                })),
-                "dns" => {}
-                value => {
-                    return Err(CoreError::new(format!(
-                        "keli-core-rs route action {value} on inbound {} is not supported yet",
-                        inbound.tag
-                    )));
-                }
-            }
-        }
+        collect_keli_core_rs_route_outbounds(inbound, &mut outbounds)?;
     }
 
     Ok(json!({
@@ -528,12 +449,98 @@ fn render_keli_core_rs_config(plan: &CorePlan) -> Result<Value, CoreError> {
         "dns": render_keli_core_rs_dns(plan)?,
         "inbounds": render_keli_core_rs_inbounds(&plan.inbounds)?,
         "outbounds": outbounds,
-        "routes": routes,
+        "routes": [],
         "stats": {
             "enabled": true,
             "per_user": true
         }
     }))
+}
+
+fn collect_keli_core_rs_route_outbounds(
+    inbound: &InboundPlan,
+    outbounds: &mut Vec<Value>,
+) -> Result<(), CoreError> {
+    for route in &inbound.routes {
+        if route.match_rules.is_empty() && route.action != "default_out" {
+            continue;
+        }
+        if !matches!(route.action.as_str(), "route" | "route_ip" | "default_out") {
+            continue;
+        }
+        if let Some((tag, outbound)) = keli_core_rs_route_outbound(inbound, route)? {
+            push_keli_core_rs_outbound_once(outbounds, tag.as_str(), outbound);
+        }
+    }
+    Ok(())
+}
+
+fn render_keli_core_rs_routes_for_inbound(inbound: &InboundPlan) -> Result<Vec<Value>, CoreError> {
+    let mut routes = Vec::new();
+    for route in &inbound.routes {
+        if route.match_rules.is_empty() && route.action != "default_out" {
+            continue;
+        }
+        match route.action.as_str() {
+            "block" => routes.push(json!({
+                "targets": keli_core_rs_block_route_targets(inbound, route)?,
+                "action": "block"
+            })),
+            "block_ip" => routes.push(json!({
+                "targets": prefixed_keli_core_rs_ip_route_targets(inbound, route)?,
+                "action": "block"
+            })),
+            "block_port" => routes.push(json!({
+                "targets": prefixed_keli_core_rs_port_route_targets(inbound, route)?,
+                "action": "block"
+            })),
+            "route" => {
+                if let Some((tag, outbound)) = keli_core_rs_route_outbound(inbound, route)? {
+                    routes.push(json!({
+                        "targets": keli_core_rs_route_targets(inbound, route)?,
+                        "action": {
+                            "outbound": tag
+                        },
+                        "outbound": outbound
+                    }));
+                }
+            }
+            "route_ip" => {
+                if let Some((tag, outbound)) = keli_core_rs_route_outbound(inbound, route)? {
+                    routes.push(json!({
+                        "targets": prefixed_keli_core_rs_ip_route_targets(inbound, route)?,
+                        "action": {
+                            "outbound": tag
+                        },
+                        "outbound": outbound
+                    }));
+                }
+            }
+            "default_out" => {
+                if let Some((tag, outbound)) = keli_core_rs_route_outbound(inbound, route)? {
+                    routes.push(json!({
+                        "targets": ["*"],
+                        "action": {
+                            "outbound": tag
+                        },
+                        "outbound": outbound
+                    }));
+                }
+            }
+            "protocol" => routes.push(json!({
+                "targets": prefixed_keli_core_rs_protocol_route_targets(inbound, route)?,
+                "action": "block"
+            })),
+            "dns" => {}
+            value => {
+                return Err(CoreError::new(format!(
+                    "keli-core-rs route action {value} on inbound {} is not supported yet",
+                    inbound.tag
+                )));
+            }
+        }
+    }
+    Ok(routes)
 }
 
 fn render_keli_core_rs_dns(plan: &CorePlan) -> Result<Value, CoreError> {
@@ -2155,8 +2162,8 @@ fn keli_core_rs_instance_id(plan: &CorePlan) -> String {
         .to_string()
 }
 
-fn render_keli_core_rs_inbound(inbound: &InboundPlan) -> Value {
-    json!({
+fn render_keli_core_rs_inbound(inbound: &InboundPlan) -> Result<Value, CoreError> {
+    Ok(json!({
         "tag": &inbound.tag,
         "protocol": keli_core_rs_protocol_name(inbound),
         "listen": &inbound.listen,
@@ -2178,15 +2185,16 @@ fn render_keli_core_rs_inbound(inbound: &InboundPlan) -> Value {
         "sniffing": {
             "enabled": true,
             "dest_override": ["http", "tls"]
-        }
-    })
+        },
+        "routes": render_keli_core_rs_routes_for_inbound(inbound)?
+    }))
 }
 
 fn render_keli_core_rs_inbounds(inbounds: &[InboundPlan]) -> Result<Vec<Value>, CoreError> {
     let mut rendered = Vec::new();
     for inbound in inbounds {
         for expanded in expand_keli_core_rs_inbound(inbound)? {
-            rendered.push(render_keli_core_rs_inbound(&expanded));
+            rendered.push(render_keli_core_rs_inbound(&expanded)?);
         }
     }
     Ok(rendered)
@@ -3712,11 +3720,20 @@ mod tests {
         let config = render_core_config(&plan).unwrap();
 
         assert_eq!(config["inbounds"][0]["protocol"], "mieru");
-        assert_eq!(config["routes"][0]["targets"][0], "*");
-        assert_eq!(config["routes"][0]["action"]["outbound"], "http-out");
-        assert_eq!(config["routes"][0]["outbound"]["protocol"], "http");
-        assert_eq!(config["routes"][0]["outbound"]["address"], "127.0.0.1");
-        assert_eq!(config["routes"][0]["outbound"]["port"], 8080);
+        assert_eq!(config["inbounds"][0]["routes"][0]["targets"][0], "*");
+        assert_eq!(
+            config["inbounds"][0]["routes"][0]["action"]["outbound"],
+            "http-out"
+        );
+        assert_eq!(
+            config["inbounds"][0]["routes"][0]["outbound"]["protocol"],
+            "http"
+        );
+        assert_eq!(
+            config["inbounds"][0]["routes"][0]["outbound"]["address"],
+            "127.0.0.1"
+        );
+        assert_eq!(config["inbounds"][0]["routes"][0]["outbound"]["port"], 8080);
     }
 
     #[test]
@@ -3972,14 +3989,71 @@ mod tests {
 
         let config = render_core_config(&plan).unwrap();
 
-        assert_eq!(config["routes"][0]["targets"][0], "*.blocked.example");
-        assert_eq!(config["routes"][0]["targets"][1], "domain:example.com");
-        assert_eq!(config["routes"][0]["targets"][2], "keyword:tracker");
-        assert_eq!(config["routes"][0]["targets"][3], "network:udp");
-        assert_eq!(config["routes"][0]["action"], "block");
-        assert_eq!(config["routes"][1]["targets"][0], "ip:10.0.0.0/8");
-        assert_eq!(config["routes"][1]["targets"][1], "ip:2001:db8::/32");
-        assert_eq!(config["routes"][2]["targets"][0], "port:6881-6889,6969");
+        assert_eq!(
+            config["inbounds"][0]["routes"][0]["targets"][0],
+            "*.blocked.example"
+        );
+        assert_eq!(
+            config["inbounds"][0]["routes"][0]["targets"][1],
+            "domain:example.com"
+        );
+        assert_eq!(
+            config["inbounds"][0]["routes"][0]["targets"][2],
+            "keyword:tracker"
+        );
+        assert_eq!(
+            config["inbounds"][0]["routes"][0]["targets"][3],
+            "network:udp"
+        );
+        assert_eq!(config["inbounds"][0]["routes"][0]["action"], "block");
+        assert_eq!(
+            config["inbounds"][0]["routes"][1]["targets"][0],
+            "ip:10.0.0.0/8"
+        );
+        assert_eq!(
+            config["inbounds"][0]["routes"][1]["targets"][1],
+            "ip:2001:db8::/32"
+        );
+        assert_eq!(
+            config["inbounds"][0]["routes"][2]["targets"][0],
+            "port:6881-6889,6969"
+        );
+    }
+
+    #[test]
+    fn renders_keli_core_rs_routes_on_owning_inbound_only() {
+        let mut socks = test_node("socks", 28, "");
+        socks.common.routes = vec![Route {
+            id: 1,
+            match_rules: vec!["geoip:private".to_string()],
+            action: "block_ip".to_string(),
+            action_value: None,
+        }];
+        let vless = test_node("vless", 32, "");
+        let plan = CorePlan::from_nodes(
+            CoreKind::KeliCoreRs,
+            PathBuf::from("/srv/v2node/keli-core-rs.json"),
+            &[socks, vless],
+        )
+        .unwrap();
+
+        let config = render_core_config(&plan).unwrap();
+
+        assert_eq!(config["routes"].as_array().unwrap().len(), 0);
+        let socks_inbound = config["inbounds"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|inbound| inbound["protocol"] == "socks")
+            .expect("socks inbound");
+        let vless_inbound = config["inbounds"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|inbound| inbound["protocol"] == "vless")
+            .expect("vless inbound");
+        assert_eq!(socks_inbound["routes"][0]["targets"][0], "geoip:private");
+        assert_eq!(vless_inbound["routes"].as_array().unwrap().len(), 0);
     }
 
     #[test]
@@ -4057,12 +4131,27 @@ mod tests {
                 .count(),
             1
         );
-        assert_eq!(config["routes"][0]["targets"][0], "domain:example.com");
-        assert_eq!(config["routes"][0]["action"]["outbound"], "warp");
-        assert_eq!(config["routes"][0]["outbound"]["address"], "127.0.0.1");
-        assert_eq!(config["routes"][0]["outbound"]["port"], 40000);
-        assert_eq!(config["routes"][1]["targets"][0], "ip:10.0.0.0/8");
-        assert_eq!(config["routes"][2]["targets"][0], "*");
+        assert_eq!(
+            config["inbounds"][0]["routes"][0]["targets"][0],
+            "domain:example.com"
+        );
+        assert_eq!(
+            config["inbounds"][0]["routes"][0]["action"]["outbound"],
+            "warp"
+        );
+        assert_eq!(
+            config["inbounds"][0]["routes"][0]["outbound"]["address"],
+            "127.0.0.1"
+        );
+        assert_eq!(
+            config["inbounds"][0]["routes"][0]["outbound"]["port"],
+            40000
+        );
+        assert_eq!(
+            config["inbounds"][0]["routes"][1]["targets"][0],
+            "ip:10.0.0.0/8"
+        );
+        assert_eq!(config["inbounds"][0]["routes"][2]["targets"][0], "*");
     }
 
     #[test]
@@ -4092,7 +4181,10 @@ mod tests {
         assert_eq!(config["outbounds"][1]["port"], 1080);
         assert_eq!(config["outbounds"][1]["username"], "alice");
         assert_eq!(config["outbounds"][1]["password"], "secret");
-        assert_eq!(config["routes"][0]["outbound"]["protocol"], "socks");
+        assert_eq!(
+            config["inbounds"][0]["routes"][0]["outbound"]["protocol"],
+            "socks"
+        );
     }
 
     #[test]
@@ -4122,7 +4214,10 @@ mod tests {
         assert_eq!(config["outbounds"][1]["address"], "127.0.0.1");
         assert_eq!(config["outbounds"][1]["port"], 8388);
         assert_eq!(config["outbounds"][1]["password"], "secret");
-        assert_eq!(config["routes"][0]["outbound"]["method"], "aes-128-gcm");
+        assert_eq!(
+            config["inbounds"][0]["routes"][0]["outbound"]["method"],
+            "aes-128-gcm"
+        );
     }
 
     #[test]
@@ -4151,7 +4246,10 @@ mod tests {
         assert_eq!(config["outbounds"][1]["address"], "proxy.example.com");
         assert_eq!(config["outbounds"][1]["port"], 443);
         assert_eq!(config["outbounds"][1]["password"], "secret");
-        assert_eq!(config["routes"][0]["outbound"]["protocol"], "trojan");
+        assert_eq!(
+            config["inbounds"][0]["routes"][0]["outbound"]["protocol"],
+            "trojan"
+        );
     }
 
     #[test]
@@ -4324,7 +4422,10 @@ mod tests {
             config["outbounds"][1]["username"],
             "11111111-1111-1111-1111-111111111111"
         );
-        assert_eq!(config["routes"][0]["outbound"]["protocol"], "vless");
+        assert_eq!(
+            config["inbounds"][0]["routes"][0]["outbound"]["protocol"],
+            "vless"
+        );
     }
 
     #[test]
@@ -4771,7 +4872,10 @@ mod tests {
         assert_eq!(config["outbounds"][1]["protocol"], "vmess");
         assert_eq!(config["outbounds"][1]["method"], "aes-128-gcm");
         assert_eq!(config["outbounds"][1]["alter_id"], 8);
-        assert_eq!(config["routes"][0]["outbound"]["alter_id"], 8);
+        assert_eq!(
+            config["inbounds"][0]["routes"][0]["outbound"]["alter_id"],
+            8
+        );
     }
 
     #[test]
@@ -4795,8 +4899,14 @@ mod tests {
 
         let config = render_core_config(&plan).unwrap();
 
-        assert_eq!(config["routes"][0]["targets"][0], "network:udp");
-        assert_eq!(config["routes"][0]["outbound"]["tag"], "vmess-udp");
+        assert_eq!(
+            config["inbounds"][0]["routes"][0]["targets"][0],
+            "network:udp"
+        );
+        assert_eq!(
+            config["inbounds"][0]["routes"][0]["outbound"]["tag"],
+            "vmess-udp"
+        );
         assert_eq!(config["outbounds"][1]["protocol"], "vmess");
         assert_eq!(config["outbounds"][1]["address"], "proxy.example.com");
     }
@@ -5718,8 +5828,11 @@ mod tests {
 
         let config = render_core_config(&plan).unwrap();
 
-        assert_eq!(config["routes"][0]["targets"][0], "protocol:bittorrent");
-        assert_eq!(config["routes"][0]["action"], "block");
+        assert_eq!(
+            config["inbounds"][0]["routes"][0]["targets"][0],
+            "protocol:bittorrent"
+        );
+        assert_eq!(config["inbounds"][0]["routes"][0]["action"], "block");
     }
 
     #[test]
@@ -5791,10 +5904,22 @@ mod tests {
 
         let config = render_core_config(&plan).unwrap();
 
-        assert_eq!(config["routes"][0]["targets"][0], "geoip:private");
-        assert_eq!(config["routes"][1]["targets"][0], "geosite:private");
-        assert_eq!(config["routes"][1]["targets"][1], "regexp:^api\\.");
-        assert_eq!(config["routes"][1]["targets"][2], "protocol:udp");
+        assert_eq!(
+            config["inbounds"][0]["routes"][0]["targets"][0],
+            "geoip:private"
+        );
+        assert_eq!(
+            config["inbounds"][0]["routes"][1]["targets"][0],
+            "geosite:private"
+        );
+        assert_eq!(
+            config["inbounds"][0]["routes"][1]["targets"][1],
+            "regexp:^api\\."
+        );
+        assert_eq!(
+            config["inbounds"][0]["routes"][1]["targets"][2],
+            "protocol:udp"
+        );
     }
 
     #[test]
