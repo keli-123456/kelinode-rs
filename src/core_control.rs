@@ -38,6 +38,7 @@ impl std::error::Error for KeliCoreControlError {}
 enum KeliCoreCommand {
     ApplyConfig { config: Value },
     DrainTraffic { minimum_bytes: u64 },
+    RequeueTraffic { records: Vec<KeliCoreTrafficRecord> },
     Status,
     Stop,
 }
@@ -53,6 +54,9 @@ pub enum KeliCoreResponse {
     Traffic {
         records: Vec<KeliCoreTrafficRecord>,
     },
+    TrafficRequeued {
+        count: usize,
+    },
     Status {
         status: Value,
         listeners: Vec<Value>,
@@ -63,11 +67,11 @@ pub enum KeliCoreResponse {
     },
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct KeliCoreTrafficRecord {
     pub node_tag: String,
     pub user_uuid: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub user_id: Option<u64>,
     pub upload: u64,
     pub download: u64,
@@ -141,6 +145,19 @@ impl KeliCoreControlClient {
         }
     }
 
+    pub fn requeue_traffic(
+        &self,
+        records: Vec<KeliCoreTrafficRecord>,
+    ) -> Result<usize, KeliCoreControlError> {
+        match self.send(&KeliCoreCommand::RequeueTraffic { records })? {
+            KeliCoreResponse::TrafficRequeued { count } => Ok(count),
+            KeliCoreResponse::Error { message } => Err(KeliCoreControlError::new(message)),
+            response => Err(KeliCoreControlError::new(format!(
+                "unexpected keli-core-rs requeue response: {response:?}"
+            ))),
+        }
+    }
+
     pub fn stop(&self) -> Result<(), KeliCoreControlError> {
         match self.send(&KeliCoreCommand::Stop)? {
             KeliCoreResponse::Stopped => Ok(()),
@@ -190,7 +207,7 @@ mod tests {
 
     use serde_json::json;
 
-    use super::{KeliCoreControlClient, KeliCoreResponse};
+    use super::{KeliCoreControlClient, KeliCoreResponse, KeliCoreTrafficRecord};
 
     #[test]
     fn drains_traffic_over_json_line_control_socket() {
@@ -233,6 +250,57 @@ mod tests {
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].node_tag, "panel|socks|1");
         assert_eq!(records[0].upload, 10);
+        join.join().unwrap();
+    }
+
+    #[test]
+    fn requeues_traffic_over_json_line_control_socket() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let join = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut command = String::new();
+            BufReader::new(stream.try_clone().unwrap())
+                .read_line(&mut command)
+                .unwrap();
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(command.trim()).unwrap(),
+                json!({
+                    "type": "requeue_traffic",
+                    "records": [{
+                        "node_tag": "panel|socks|1",
+                        "user_uuid": "uuid-a",
+                        "user_id": 7,
+                        "upload": 10,
+                        "download": 20,
+                        "online_ips": ["198.51.100.7"]
+                    }]
+                })
+            );
+            writeln!(
+                stream,
+                "{}",
+                json!({
+                    "type": "traffic_requeued",
+                    "count": 1
+                })
+            )
+            .unwrap();
+        });
+
+        let count = KeliCoreControlClient::new(addr.to_string())
+            .with_timeout(Duration::from_secs(2))
+            .requeue_traffic(vec![KeliCoreTrafficRecord {
+                node_tag: "panel|socks|1".to_string(),
+                user_uuid: "uuid-a".to_string(),
+                user_id: Some(7),
+                upload: 10,
+                download: 20,
+                online_ips: vec!["198.51.100.7".to_string()],
+            }])
+            .unwrap();
+
+        assert_eq!(count, 1);
         join.join().unwrap();
     }
 

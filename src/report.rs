@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::config::NodeConfig;
 use crate::core::{CoreKind, CorePlan};
@@ -55,11 +55,17 @@ pub trait NodeActivitySender {
 
 pub trait KeliCoreTrafficDrainer {
     fn drain_traffic(&mut self, minimum_bytes: u64) -> Result<Vec<KeliCoreTrafficRecord>, String>;
+
+    fn requeue_traffic(&mut self, records: Vec<KeliCoreTrafficRecord>) -> Result<usize, String>;
 }
 
 impl KeliCoreTrafficDrainer for KeliCoreControlClient {
     fn drain_traffic(&mut self, minimum_bytes: u64) -> Result<Vec<KeliCoreTrafficRecord>, String> {
         KeliCoreControlClient::drain_traffic(self, minimum_bytes).map_err(|err| err.message)
+    }
+
+    fn requeue_traffic(&mut self, records: Vec<KeliCoreTrafficRecord>) -> Result<usize, String> {
+        KeliCoreControlClient::requeue_traffic(self, records).map_err(|err| err.message)
     }
 }
 
@@ -81,31 +87,50 @@ where
     Ok(keli_core_traffic_snapshots(core_plan, &records))
 }
 
+fn requeue_failed_keli_core_records<D>(
+    core_plan: &CorePlan,
+    drainer: &mut D,
+    records: &[KeliCoreTrafficRecord],
+    batch: &NodeActivityBatchReport,
+) -> Result<usize, String>
+where
+    D: KeliCoreTrafficDrainer,
+{
+    if batch.failures.is_empty() {
+        return Ok(0);
+    }
+    let failed_tags = batch
+        .failures
+        .iter()
+        .map(|failure| failure.tag.as_str())
+        .collect::<BTreeSet<_>>();
+    let requeue = records
+        .iter()
+        .filter(|record| {
+            keli_core_record_report_tag(core_plan, record)
+                .map(|tag| failed_tags.contains(tag))
+                .unwrap_or(false)
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    if requeue.is_empty() {
+        return Ok(0);
+    }
+    drainer.requeue_traffic(requeue)
+}
+
 pub fn keli_core_traffic_snapshots(
     core_plan: &CorePlan,
     records: &[KeliCoreTrafficRecord],
 ) -> BTreeMap<String, NodeActivitySnapshot> {
     let mut snapshots = BTreeMap::new();
     for record in records {
-        let Some((node_tag, uid)) = core_plan.inbounds.iter().find_map(|inbound| {
-            let node_tag = normalize_keli_core_record_tag(&record.node_tag, &inbound.tag)?;
-            let uid = record
-                .user_id
-                .and_then(|id| u32::try_from(id).ok())
-                .or_else(|| {
-                    inbound
-                        .users
-                        .iter()
-                        .find(|user| user.uuid == record.user_uuid)
-                        .map(|user| user.id)
-                })?;
-            Some((node_tag.to_string(), uid))
-        }) else {
+        let Some((node_tag, uid)) = keli_core_record_report_target(core_plan, record) else {
             continue;
         };
 
         let snapshot = snapshots
-            .entry(node_tag)
+            .entry(node_tag.to_string())
             .or_insert_with(NodeActivitySnapshot::default);
         merge_user_traffic(
             &mut snapshot.traffic,
@@ -118,10 +143,37 @@ pub fn keli_core_traffic_snapshots(
     snapshots
 }
 
-fn normalize_keli_core_record_tag<'a>(
-    record_tag: &'a str,
-    inbound_tag: &'a str,
+fn keli_core_record_report_target<'a>(
+    core_plan: &'a CorePlan,
+    record: &KeliCoreTrafficRecord,
+) -> Option<(&'a str, u32)> {
+    core_plan.inbounds.iter().find_map(|inbound| {
+        let node_tag = normalize_keli_core_record_tag(&record.node_tag, &inbound.tag)?;
+        let uid = record
+            .user_id
+            .and_then(|id| u32::try_from(id).ok())
+            .or_else(|| {
+                inbound
+                    .users
+                    .iter()
+                    .find(|user| user.uuid == record.user_uuid)
+                    .map(|user| user.id)
+            })?;
+        Some((node_tag, uid))
+    })
+}
+
+fn keli_core_record_report_tag<'a>(
+    core_plan: &'a CorePlan,
+    record: &KeliCoreTrafficRecord,
 ) -> Option<&'a str> {
+    core_plan
+        .inbounds
+        .iter()
+        .find_map(|inbound| normalize_keli_core_record_tag(&record.node_tag, &inbound.tag))
+}
+
+fn normalize_keli_core_record_tag<'a>(record_tag: &str, inbound_tag: &'a str) -> Option<&'a str> {
     if record_tag == inbound_tag {
         return Some(inbound_tag);
     }
@@ -296,10 +348,12 @@ pub async fn report_keli_core_activity_to_panel(
     }
 
     let mut client = KeliCoreControlClient::new(keli_core_rs_control_addr(&core_plan.config_path));
-    let snapshots =
-        drain_keli_core_activity_snapshots(core_plan, &mut client, minimum_report_bytes(plan))?;
+    let records = KeliCoreTrafficDrainer::drain_traffic(&mut client, minimum_report_bytes(plan))?;
+    let snapshots = keli_core_traffic_snapshots(core_plan, &records);
     let targets = runtime_activity_targets(plan);
-    Ok(report_activity_batch_to_panel(&targets, &snapshots).await)
+    let batch = report_activity_batch_to_panel(&targets, &snapshots).await;
+    requeue_failed_keli_core_records(core_plan, &mut client, &records, &batch)?;
+    Ok(batch)
 }
 
 pub fn runtime_activity_targets(plan: &RuntimeBootstrapPlan) -> Vec<NodeActivityTarget> {
@@ -336,9 +390,10 @@ mod tests {
 
     use super::{
         drain_keli_core_activity_snapshots, keli_core_traffic_snapshots,
-        report_activity_batch_with, report_activity_with_fallback, runtime_activity_targets,
-        KeliCoreTrafficDrainer, NodeActivityReport, NodeActivitySender, NodeActivitySnapshot,
-        NodeActivityTarget,
+        report_activity_batch_with, report_activity_with_fallback,
+        requeue_failed_keli_core_records, runtime_activity_targets, KeliCoreTrafficDrainer,
+        NodeActivityBatchReport, NodeActivityFailure, NodeActivityReport, NodeActivitySender,
+        NodeActivitySnapshot, NodeActivityTarget,
     };
     use crate::config::{AgentConfig, NodeConfig, ResolvedConfig, ResolvedMachineConfig};
     use crate::core::{CoreKind, CorePlan, InboundPlan, InboundUserPlan};
@@ -477,6 +532,7 @@ mod tests {
         let mut drainer = FakeKeliCoreDrainer {
             records: vec![traffic_record("node-a", "uuid-b", 30, 40)],
             minimums: Vec::new(),
+            requeued: Vec::new(),
         };
 
         let snapshots = drain_keli_core_activity_snapshots(&core_plan(), &mut drainer, 64).unwrap();
@@ -484,6 +540,36 @@ mod tests {
         assert_eq!(drainer.minimums, vec![64]);
         assert_eq!(snapshots["node-a"].traffic[0].uid, 8);
         assert_eq!(snapshots["node-a"].traffic[0].upload, 30);
+    }
+
+    #[test]
+    fn requeues_only_failed_keli_core_traffic_records() {
+        let records = vec![
+            traffic_record("node-a", "uuid-a", 10, 20),
+            traffic_record("node-b", "uuid-b", 30, 40),
+            traffic_record("node-a|port:2100", "uuid-a", 1, 2),
+        ];
+        let batch = NodeActivityBatchReport {
+            reported: 1,
+            skipped: 0,
+            failures: vec![NodeActivityFailure {
+                tag: "node-a".to_string(),
+                error: "send failed".to_string(),
+            }],
+        };
+        let mut drainer = FakeKeliCoreDrainer {
+            records: Vec::new(),
+            minimums: Vec::new(),
+            requeued: Vec::new(),
+        };
+
+        let count =
+            requeue_failed_keli_core_records(&core_plan(), &mut drainer, &records, &batch).unwrap();
+
+        assert_eq!(count, 2);
+        assert_eq!(drainer.requeued.len(), 2);
+        assert_eq!(drainer.requeued[0].node_tag, "node-a");
+        assert_eq!(drainer.requeued[1].node_tag, "node-a|port:2100");
     }
 
     #[test]
@@ -672,6 +758,7 @@ mod tests {
     struct FakeKeliCoreDrainer {
         records: Vec<KeliCoreTrafficRecord>,
         minimums: Vec<u64>,
+        requeued: Vec<KeliCoreTrafficRecord>,
     }
 
     impl KeliCoreTrafficDrainer for FakeKeliCoreDrainer {
@@ -681,6 +768,15 @@ mod tests {
         ) -> Result<Vec<KeliCoreTrafficRecord>, String> {
             self.minimums.push(minimum_bytes);
             Ok(self.records.clone())
+        }
+
+        fn requeue_traffic(
+            &mut self,
+            records: Vec<KeliCoreTrafficRecord>,
+        ) -> Result<usize, String> {
+            let count = records.len();
+            self.requeued.extend(records);
+            Ok(count)
         }
     }
 }
