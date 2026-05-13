@@ -1655,6 +1655,9 @@ fn validate_keli_core_rs_inbound(inbound: &InboundPlan) -> Result<(), CoreError>
         }
         "anytls" => {
             validate_keli_core_rs_plain_tcp_inbound(inbound)?;
+            if inbound.security == "tls" {
+                validate_keli_core_rs_tls_inbound(inbound)?;
+            }
             Ok(())
         }
         "mieru" => {
@@ -1732,10 +1735,12 @@ fn validate_keli_core_rs_plain_tcp_inbound(inbound: &InboundPlan) -> Result<(), 
             inbound.tag, network
         )));
     }
-    if inbound.security != "none" {
+    if inbound.security != "none" && !(protocol == "anytls" && inbound.security == "tls") {
         return Err(CoreError::new(format!(
-            "keli-core-rs {protocol} currently supports only security none; inbound {} uses {}",
-            inbound.tag, inbound.security
+            "keli-core-rs {protocol} currently supports only security none{}; inbound {} uses {}",
+            if protocol == "anytls" { "/tls" } else { "" },
+            inbound.tag,
+            inbound.security
         )));
     }
     if protocol != "mieru" && !inbound.port_range.trim().is_empty() {
@@ -3593,8 +3598,7 @@ mod tests {
     fn keli_core_rs_skips_unsupported_native_inbounds_without_dropping_supported_nodes() {
         let supported = test_node("vless", 41, "");
         let mut unsupported = test_node("anytls", 42, "");
-        unsupported.security = Security::Tls;
-        unsupported.common.tls = 1;
+        unsupported.common.network = "ws".to_string();
 
         let nodes = vec![supported, unsupported];
         let bundle = split_core_plans_for_nodes_with_kind(
@@ -5808,6 +5812,33 @@ mod tests {
         assert_eq!(config["inbounds"][0]["protocol"], "anytls");
         assert_eq!(config["inbounds"][0]["padding_scheme"][0], "stop=8");
         assert_eq!(config["inbounds"][0]["padding_scheme"][1], "0=30-30");
+    }
+
+    #[test]
+    fn renders_keli_core_rs_anytls_tls_settings() {
+        let mut node = test_node("anytls", 60, "");
+        node.security = Security::Tls;
+        node.common.cert_info.as_mut().unwrap().cert_file = "/srv/v2node/anytls.cer".to_string();
+        node.common.cert_info.as_mut().unwrap().key_file = "/srv/v2node/anytls.key".to_string();
+        node.common.cert_info.as_mut().unwrap().cert_domain = "anytls.example.test".to_string();
+        let plan = CorePlan::from_nodes(
+            CoreKind::KeliCoreRs,
+            PathBuf::from("/srv/v2node/keli-core-rs.json"),
+            &[node],
+        )
+        .unwrap();
+
+        let config = render_core_config(&plan).unwrap();
+
+        assert_eq!(config["inbounds"][0]["protocol"], "anytls");
+        assert_eq!(
+            config["inbounds"][0]["tls"]["server_name"],
+            "anytls.example.test"
+        );
+        assert_eq!(
+            config["inbounds"][0]["tls"]["cert_file"],
+            "/srv/v2node/anytls.cer"
+        );
     }
 
     #[test]
