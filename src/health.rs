@@ -156,6 +156,18 @@ fn native_core_gray_health_value(metrics: &Map<String, Value>) -> Value {
         "user_delta",
         "kelinode_user_delta_full_rebuild_total",
     );
+    let core_apply_total =
+        nested_metric_u64(metrics, "keli_core_rs", "keli_core_user_delta_apply_total");
+    let core_incremental = nested_metric_u64(
+        metrics,
+        "keli_core_rs",
+        "keli_core_user_delta_incremental_total",
+    );
+    let core_full_snapshot = nested_metric_u64(
+        metrics,
+        "keli_core_rs",
+        "keli_core_user_delta_full_snapshot_total",
+    );
     let revision_mismatch = nested_metric_u64(
         metrics,
         "keli_core_rs",
@@ -171,12 +183,33 @@ fn native_core_gray_health_value(metrics: &Map<String, Value>) -> Value {
         "keli_core_rs",
         "keli_core_user_delta_apply_error_total",
     );
+    let core_apply_duration_count = nested_metric_object_u64(
+        metrics,
+        "keli_core_rs",
+        "keli_core_user_delta_apply_duration_ms",
+        "count",
+    );
+    let core_apply_duration_last_ms = nested_metric_object_u64(
+        metrics,
+        "keli_core_rs",
+        "keli_core_user_delta_apply_duration_ms",
+        "last_ms",
+    );
+    let core_apply_duration_max_ms = nested_metric_object_u64(
+        metrics,
+        "keli_core_rs",
+        "keli_core_user_delta_apply_duration_ms",
+        "max_ms",
+    );
     let metrics_failure = metrics.get("keli_core_rs_error").is_some();
 
     if native_success == 0
         && native_failed == 0
         && full_snapshot_fallback == 0
         && full_rebuild == 0
+        && core_apply_total == 0
+        && core_incremental == 0
+        && core_full_snapshot == 0
         && revision_mismatch == 0
         && current_revision_missing == 0
         && core_apply_errors == 0
@@ -242,9 +275,15 @@ fn native_core_gray_health_value(metrics: &Map<String, Value>) -> Value {
         "native_apply_failed_total": native_failed,
         "full_snapshot_fallback_total": full_snapshot_fallback,
         "full_rebuild_total": full_rebuild,
+        "core_apply_total": core_apply_total,
+        "core_incremental_total": core_incremental,
+        "core_full_snapshot_total": core_full_snapshot,
         "revision_mismatch_total": revision_mismatch,
         "current_revision_missing_total": current_revision_missing,
         "core_apply_error_total": core_apply_errors,
+        "core_apply_duration_count": core_apply_duration_count,
+        "core_apply_duration_last_ms": core_apply_duration_last_ms,
+        "core_apply_duration_max_ms": core_apply_duration_max_ms,
         "metrics_available": !metrics_failure,
         "reasons": reasons
     })
@@ -255,6 +294,22 @@ fn nested_metric_u64(metrics: &Map<String, Value>, section: &str, key: &str) -> 
         .get(section)
         .and_then(Value::as_object)
         .and_then(|section| section.get(key))
+        .and_then(Value::as_u64)
+        .unwrap_or(0)
+}
+
+fn nested_metric_object_u64(
+    metrics: &Map<String, Value>,
+    section: &str,
+    object_key: &str,
+    key: &str,
+) -> u64 {
+    metrics
+        .get(section)
+        .and_then(Value::as_object)
+        .and_then(|section| section.get(object_key))
+        .and_then(Value::as_object)
+        .and_then(|object| object.get(key))
         .and_then(Value::as_u64)
         .unwrap_or(0)
 }
@@ -740,6 +795,13 @@ mod tests {
             },
             "keli_core_rs": {
                 "keli_core_user_delta_apply_total": 8,
+                "keli_core_user_delta_incremental_total": 7,
+                "keli_core_user_delta_full_snapshot_total": 1,
+                "keli_core_user_delta_apply_duration_ms": {
+                    "count": 8,
+                    "last_ms": 3,
+                    "max_ms": 41
+                },
                 "keli_core_user_delta_active_users": {
                     "panel.example.test|socks|8": 260000
                 }
@@ -783,6 +845,30 @@ mod tests {
         assert_eq!(
             payload.status["metrics"]["native_core_gray_health"]["full_snapshot_fallback_total"],
             json!(1)
+        );
+        assert_eq!(
+            payload.status["metrics"]["native_core_gray_health"]["core_apply_total"],
+            json!(8)
+        );
+        assert_eq!(
+            payload.status["metrics"]["native_core_gray_health"]["core_incremental_total"],
+            json!(7)
+        );
+        assert_eq!(
+            payload.status["metrics"]["native_core_gray_health"]["core_full_snapshot_total"],
+            json!(1)
+        );
+        assert_eq!(
+            payload.status["metrics"]["native_core_gray_health"]["core_apply_duration_count"],
+            json!(8)
+        );
+        assert_eq!(
+            payload.status["metrics"]["native_core_gray_health"]["core_apply_duration_last_ms"],
+            json!(3)
+        );
+        assert_eq!(
+            payload.status["metrics"]["native_core_gray_health"]["core_apply_duration_max_ms"],
+            json!(41)
         );
         assert_eq!(
             payload.status["metrics"]["native_core_gray_health"]["warning"],

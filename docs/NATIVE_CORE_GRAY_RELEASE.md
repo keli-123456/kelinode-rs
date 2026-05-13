@@ -74,6 +74,11 @@ Use machine status metrics to verify that small user changes stay on the native 
 - `metrics.native_core_gray_health.warning`
 - `metrics.native_core_gray_health.reasons`
 - `metrics.native_core_gray_health.metrics_available`
+- `metrics.native_core_gray_health.core_apply_total`
+- `metrics.native_core_gray_health.core_incremental_total`
+- `metrics.native_core_gray_health.core_full_snapshot_total`
+- `metrics.native_core_gray_health.core_apply_duration_last_ms`
+- `metrics.native_core_gray_health.core_apply_duration_max_ms`
 
 Healthy gray behavior:
 
