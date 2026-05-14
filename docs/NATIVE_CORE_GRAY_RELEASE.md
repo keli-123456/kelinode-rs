@@ -30,6 +30,16 @@ kernel:
 
 Keep `kernel.type: xray` for nodes that are not part of the gray release.
 
+Before starting the runtime, run the preflight gate:
+
+```bash
+kelinode-rs gray-preflight /etc/v2node/config.yml
+```
+
+Treat any `error:` line as a blocker. Warnings are not automatic blockers, but they must be
+understood before widening traffic. In particular, explicit listen addresses such as `127.0.0.1`
+or a single public IPv4/IPv6 address bypass the native core wildcard dual-stack listener behavior.
+
 Recommended rollout:
 
 1. Internal test node with no customer traffic.

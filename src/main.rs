@@ -55,6 +55,18 @@ fn run() -> Result<(), String> {
                 resolved.agent.subscription_proxy.enabled
             );
         }
+        "gray-preflight" => {
+            let path = args
+                .next()
+                .unwrap_or_else(|| "/etc/v2node/config.yml".to_string());
+            let runtime = tokio::runtime::Runtime::new()
+                .map_err(|err| format!("start tokio runtime: {err}"))?;
+            let report = runtime.block_on(run_native_gray_preflight(&path))?;
+            print_native_gray_preflight_report(&report);
+            if !report.errors.is_empty() {
+                return Err("native gray preflight failed".to_string());
+            }
+        }
         "run" => {
             let path = args
                 .next()
@@ -71,6 +83,122 @@ fn run() -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+async fn run_native_gray_preflight(path: &str) -> Result<NativeGrayPreflightReport, String> {
+    let config = AppConfig::load_from_path(path)?;
+    let plan = bootstrap_from_config(&config).await?;
+    Ok(native_gray_preflight_report(&plan))
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct NativeGrayPreflightReport {
+    details: Vec<String>,
+    warnings: Vec<String>,
+    errors: Vec<String>,
+}
+
+fn native_gray_preflight_report(plan: &RuntimeBootstrapPlan) -> NativeGrayPreflightReport {
+    let mut report = NativeGrayPreflightReport::default();
+    report
+        .details
+        .push(format!("mode={:?}", plan.bootstrap.mode));
+    report
+        .details
+        .push(format!("resolved_nodes={}", plan.node_infos.len()));
+    report.details.push(format!(
+        "machine_profiles={}",
+        plan.resolved.machine.profiles.len()
+    ));
+
+    for failure in &plan.node_failures {
+        report.errors.push(format!(
+            "node resolve failed: api_host={} node_id={} machine_id={} error={}",
+            failure.config.url, failure.config.node_id, failure.config.machine_id, failure.error
+        ));
+    }
+
+    let Some(core_plan) = plan.core_plan.as_ref() else {
+        report
+            .errors
+            .push("no primary core plan was built for this config".to_string());
+        return report;
+    };
+
+    if core_plan.kind != CoreKind::KeliCoreRs {
+        report.errors.push(format!(
+            "primary core plan is {:?}; set kernel.type: keli-core-rs for native gray release",
+            core_plan.kind
+        ));
+    }
+
+    report
+        .details
+        .push(format!("native_inbounds={}", core_plan.inbounds.len()));
+    report
+        .details
+        .push(format!("sidecar_plans={}", plan.sidecar_core_plans.len()));
+
+    if core_plan.inbounds.is_empty() {
+        report
+            .errors
+            .push("native core plan has no inbounds".to_string());
+    }
+
+    if !plan.sidecar_core_plans.is_empty() {
+        report.warnings.push(format!(
+            "{} sidecar core plan(s) exist; gray metrics cover the primary native core only",
+            plan.sidecar_core_plans.len()
+        ));
+    }
+
+    if core_plan
+        .inbounds
+        .iter()
+        .all(|inbound| inbound.users.is_empty())
+    {
+        report.warnings.push(
+            "preflight checks node config without panel user list; verify user sync and ApplyUserDelta during the smoke window"
+                .to_string(),
+        );
+    }
+
+    for inbound in &core_plan.inbounds {
+        if !is_wildcard_listen(&inbound.listen) {
+            report.warnings.push(format!(
+                "inbound {} listens on explicit address {}; automatic dual-stack wildcard does not apply",
+                inbound.tag, inbound.listen
+            ));
+        }
+        if inbound.port == 0 {
+            report
+                .errors
+                .push(format!("inbound {} has empty server port", inbound.tag));
+        }
+    }
+
+    report
+}
+
+fn is_wildcard_listen(value: &str) -> bool {
+    matches!(value.trim(), "" | "0.0.0.0" | "::" | "[::]")
+}
+
+fn print_native_gray_preflight_report(report: &NativeGrayPreflightReport) {
+    if report.errors.is_empty() {
+        println!("native gray preflight: ok");
+    } else {
+        println!("native gray preflight: failed");
+    }
+    for detail in &report.details {
+        println!("  {detail}");
+    }
+    for warning in &report.warnings {
+        println!("  warning: {warning}");
+    }
+    for error in &report.errors {
+        println!("  error: {error}");
+    }
 }
 
 async fn run_agent(path: &str) -> Result<(), String> {
@@ -405,19 +533,23 @@ fn print_help() {
     println!("kelinode-rs commands:");
     println!("  version    print version and API contract");
     println!("  check-config [path]    load config and print resolved runtime shape");
+    println!(
+        "  gray-preflight [path]    check whether config is ready for native core gray release"
+    );
     println!("  run [path]    start the node runtime loop");
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        machine_panel_clients, runtime_loop_options, runtime_tick_interval,
-        start_subscription_proxy_manager,
+        machine_panel_clients, native_gray_preflight_report, runtime_loop_options,
+        runtime_tick_interval, start_subscription_proxy_manager,
     };
     use kelinode_rs::config::{
         AgentConfig, MachineProfileConfig, NodeConfig, ResolvedConfig, ResolvedMachineConfig,
         SubscriptionProxyConfig,
     };
+    use kelinode_rs::core::CoreKind;
     use kelinode_rs::panel::types::{CommonNode, NodeInfo};
     use kelinode_rs::runtime::{build_runtime_bootstrap_plan, RuntimeBootstrapPlan};
     use serde_json::json;
@@ -528,6 +660,50 @@ mod tests {
         let plan = test_plan(Vec::new(), Vec::new());
 
         assert!(start_subscription_proxy_manager(&plan).is_none());
+    }
+
+    #[test]
+    fn native_gray_preflight_accepts_native_core_plan() {
+        let mut plan = test_plan(vec![test_node_with_intervals(7, 30, 45)], Vec::new());
+        plan.resolved.kernel.r#type = "keli-core-rs".to_string();
+        plan.core_plan.as_mut().unwrap().kind = CoreKind::KeliCoreRs;
+
+        let report = native_gray_preflight_report(&plan);
+
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+        assert!(report
+            .details
+            .iter()
+            .any(|detail| detail == "native_inbounds=1"));
+    }
+
+    #[test]
+    fn native_gray_preflight_rejects_non_native_core_plan() {
+        let plan = test_plan(vec![test_node_with_intervals(7, 30, 45)], Vec::new());
+
+        let report = native_gray_preflight_report(&plan);
+
+        assert!(report
+            .errors
+            .iter()
+            .any(|error| error.contains("kernel.type: keli-core-rs")));
+    }
+
+    #[test]
+    fn native_gray_preflight_warns_for_explicit_single_stack_listen() {
+        let mut plan = test_plan(vec![test_node_with_intervals(7, 30, 45)], Vec::new());
+        plan.resolved.kernel.r#type = "keli-core-rs".to_string();
+        let core_plan = plan.core_plan.as_mut().unwrap();
+        core_plan.kind = CoreKind::KeliCoreRs;
+        core_plan.inbounds[0].listen = "127.0.0.1".to_string();
+
+        let report = native_gray_preflight_report(&plan);
+
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+        assert!(report.warnings.iter().any(|warning| {
+            warning.contains("explicit address 127.0.0.1")
+                && warning.contains("dual-stack wildcard")
+        }));
     }
 
     fn test_plan(nodes: Vec<NodeInfo>, configs: Vec<NodeConfig>) -> RuntimeBootstrapPlan {

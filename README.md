@@ -115,6 +115,7 @@ Not implemented yet:
 - Set `kernel.core_command` when the native core binary is installed outside `PATH`, such as from a `keli-core-rs` release tarball.
 - When `keli-core-rs` is already running, `kelinode-rs` hot-applies changed native configs through the local `ApplyConfig` control socket and falls back to a process reload if that control path is unavailable.
 - For native core control, `kelinode-rs` generates a per-config local token, injects it into the `keli-core-rs` process as `KELI_CORE_CONTROL_TOKEN`, and uses the same token for `ApplyConfig`, `ApplyUserDelta`, metrics, traffic drain, and requeue commands. The token is stored beside the generated config as a local control secret and is not written into the core config or machine status payload.
+- Run `kelinode-rs gray-preflight /etc/v2node/config.yml` before moving a node into the native gray path. It resolves the runtime plan and fails early when the primary core is not `keli-core-rs`, nodes fail to resolve, or no native inbounds are available; warnings call out sidecar plans, missing user-sync validation, and explicit single-stack listen addresses.
 - Real-client interop and production soak testing are still required before making `keli-core-rs` the default.
 - Subscription reverse proxy.
 
