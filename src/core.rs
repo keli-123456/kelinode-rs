@@ -3,6 +3,7 @@ use std::fs;
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 
+use rcgen::{generate_simple_self_signed, CertifiedKey};
 use serde_json::{json, Map, Value};
 
 use crate::panel::types::{CertInfo, NodeInfo, Protocol, Security, TlsSettings, UserInfo};
@@ -2429,6 +2430,8 @@ fn render_keli_core_rs_user(user: &InboundUserPlan) -> Value {
 }
 
 pub fn write_core_config(plan: &CorePlan) -> Result<CoreConfigWriteResult, CoreError> {
+    ensure_core_plan_certificates(plan)?;
+
     if matches!(&plan.kind, CoreKind::Sidecar(name) if name == "naive") {
         let content = render_naive_sidecar_config(plan)?;
         return write_core_config_bytes(
@@ -2439,6 +2442,149 @@ pub fn write_core_config(plan: &CorePlan) -> Result<CoreConfigWriteResult, CoreE
     }
     let value = render_core_config(plan)?;
     write_core_config_value(&plan.config_path, &value, plan.inbounds.len())
+}
+
+fn ensure_core_plan_certificates(plan: &CorePlan) -> Result<(), CoreError> {
+    for inbound in &plan.inbounds {
+        ensure_inbound_certificate_pair(inbound)?;
+    }
+    Ok(())
+}
+
+fn ensure_inbound_certificate_pair(inbound: &InboundPlan) -> Result<(), CoreError> {
+    if !inbound.security.eq_ignore_ascii_case("tls") {
+        return Ok(());
+    }
+
+    let cert_file = inbound.cert_file.trim();
+    let key_file = inbound.key_file.trim();
+    if cert_file.is_empty() || key_file.is_empty() {
+        return Ok(());
+    }
+
+    let cert_path = Path::new(cert_file);
+    let key_path = Path::new(key_file);
+    if certificate_pair_looks_usable(cert_path, key_path) {
+        return Ok(());
+    }
+
+    let domain = self_signed_certificate_name(inbound);
+    let CertifiedKey { cert, key_pair } = generate_simple_self_signed(vec![domain.clone()])
+        .map_err(|err| {
+            CoreError::new(format!(
+                "generate self-signed certificate for inbound {} domain {domain}: {err}",
+                inbound.tag
+            ))
+        })?;
+    write_certificate_file(cert_path, cert.pem().as_bytes(), false)?;
+    write_certificate_file(key_path, key_pair.serialize_pem().as_bytes(), true)?;
+    eprintln!(
+        "warning: generated fallback self-signed certificate for inbound {} domain {}",
+        inbound.tag, domain
+    );
+
+    Ok(())
+}
+
+fn self_signed_certificate_name(inbound: &InboundPlan) -> String {
+    normalize_certificate_name(&inbound.server_name)
+        .or_else(|| normalize_certificate_name(&inbound.reality_dest))
+        .unwrap_or_else(|| "localhost".to_string())
+}
+
+fn normalize_certificate_name(value: &str) -> Option<String> {
+    let mut name = value.trim().trim_matches('"').trim_matches('\'').trim();
+    if name.is_empty() {
+        return None;
+    }
+
+    if let Some(rest) = name.strip_prefix('[') {
+        if let Some((inside, _)) = rest.split_once(']') {
+            name = inside.trim();
+        }
+    } else if name.matches(':').count() == 1 {
+        if let Some((host, port)) = name.rsplit_once(':') {
+            if !host.trim().is_empty() && port.chars().all(|character| character.is_ascii_digit()) {
+                name = host.trim();
+            }
+        }
+    }
+
+    let name = name.trim_end_matches('.').trim();
+    if name.is_empty() {
+        None
+    } else {
+        Some(name.to_string())
+    }
+}
+
+fn certificate_pair_looks_usable(cert_path: &Path, key_path: &Path) -> bool {
+    certificate_file_looks_usable(cert_path) && private_key_file_looks_usable(key_path)
+}
+
+fn certificate_file_looks_usable(path: &Path) -> bool {
+    let Ok(file) = fs::File::open(path) else {
+        return false;
+    };
+    let mut reader = std::io::BufReader::new(file);
+    let Ok(certs) = rustls_pemfile::certs(&mut reader).collect::<Result<Vec<_>, _>>() else {
+        return false;
+    };
+    !certs.is_empty()
+}
+
+fn private_key_file_looks_usable(path: &Path) -> bool {
+    let Ok(file) = fs::File::open(path) else {
+        return false;
+    };
+    let mut reader = std::io::BufReader::new(file);
+    rustls_pemfile::private_key(&mut reader)
+        .ok()
+        .flatten()
+        .is_some()
+}
+
+fn write_certificate_file(path: &Path, content: &[u8], private: bool) -> Result<(), CoreError> {
+    #[cfg(not(unix))]
+    let _ = private;
+
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|err| {
+            CoreError::new(format!(
+                "create certificate dir {}: {err}",
+                parent.display()
+            ))
+        })?;
+    }
+
+    let temp_path = path.with_extension(format!(
+        "{}.tmp",
+        path.extension()
+            .and_then(|extension| extension.to_str())
+            .unwrap_or("pem")
+    ));
+    fs::write(&temp_path, content).map_err(|err| {
+        CoreError::new(format!(
+            "write certificate temp {}: {err}",
+            temp_path.display()
+        ))
+    })?;
+    replace_file(&temp_path, path)
+        .map_err(|err| CoreError::new(format!("replace certificate {}: {err}", path.display())))?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = if private { 0o600 } else { 0o644 };
+        fs::set_permissions(path, fs::Permissions::from_mode(mode)).map_err(|err| {
+            CoreError::new(format!(
+                "set certificate permissions {}: {err}",
+                path.display()
+            ))
+        })?;
+    }
+
+    Ok(())
 }
 
 pub fn write_core_config_value(
@@ -6726,6 +6872,65 @@ mod tests {
         assert_eq!(first.inbound_count, 1);
         assert!(saved.contains("\"inbounds\""));
         assert!(!path.with_extension("json.tmp").exists());
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn write_core_config_generates_self_signed_cert_when_tls_files_are_missing() {
+        let dir = temp_test_dir("core-config-self-signed");
+        let path = dir.join("runtime").join("config.json");
+        let cert_path = dir.join("certs").join("node.cer");
+        let key_path = dir.join("certs").join("node.key");
+        let mut node = test_node("vless", 80, "");
+        node.security = Security::Tls;
+        {
+            let cert = node.common.cert_info.as_mut().unwrap();
+            cert.cert_file = cert_path.to_string_lossy().to_string();
+            cert.key_file = key_path.to_string_lossy().to_string();
+            cert.cert_domain = "node.example.test".to_string();
+        }
+        let plan = CorePlan::from_nodes(CoreKind::KeliCoreRs, path, &[node]).unwrap();
+
+        let written = write_core_config(&plan).unwrap();
+        let cert_content = fs::read_to_string(&cert_path).unwrap();
+        let key_content = fs::read_to_string(&key_path).unwrap();
+
+        assert!(written.changed);
+        assert!(cert_content.contains("-----BEGIN CERTIFICATE-----"));
+        assert!(key_content.contains("-----BEGIN PRIVATE KEY-----"));
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn write_core_config_preserves_existing_tls_cert_files() {
+        let dir = temp_test_dir("core-config-preserve-cert");
+        let path = dir.join("runtime").join("config.json");
+        let cert_path = dir.join("certs").join("node.cer");
+        let key_path = dir.join("certs").join("node.key");
+        fs::create_dir_all(cert_path.parent().unwrap()).unwrap();
+        let generated =
+            rcgen::generate_simple_self_signed(vec!["node.example.test".to_string()]).unwrap();
+        let cert_content = generated.cert.pem();
+        let key_content = generated.key_pair.serialize_pem();
+        fs::write(&cert_path, &cert_content).unwrap();
+        fs::write(&key_path, &key_content).unwrap();
+
+        let mut node = test_node("vless", 81, "");
+        node.security = Security::Tls;
+        {
+            let cert = node.common.cert_info.as_mut().unwrap();
+            cert.cert_file = cert_path.to_string_lossy().to_string();
+            cert.key_file = key_path.to_string_lossy().to_string();
+            cert.cert_domain = "node.example.test".to_string();
+        }
+        let plan = CorePlan::from_nodes(CoreKind::KeliCoreRs, path, &[node]).unwrap();
+
+        write_core_config(&plan).unwrap();
+
+        assert_eq!(fs::read_to_string(&cert_path).unwrap(), cert_content);
+        assert_eq!(fs::read_to_string(&key_path).unwrap(), key_content);
 
         let _ = fs::remove_dir_all(dir);
     }

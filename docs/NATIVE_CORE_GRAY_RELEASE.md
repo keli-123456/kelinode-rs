@@ -72,7 +72,10 @@ Certificates remain external files. Mount the host certificate directory into th
 by the panel, or in direct-node Docker mode provide `V2NODE_TLS_CERT_URL` and
 `V2NODE_TLS_KEY_URL` so the entrypoint can download them before startup. In machine or multi-node
 mode, prefer mounting the certificate directory, or set `V2NODE_TLS_CERT_FILE` and
-`V2NODE_TLS_KEY_FILE` explicitly when using URL download.
+`V2NODE_TLS_KEY_FILE` explicitly when using URL download. If certificate files are missing, empty, or
+clearly malformed, the agent generates a self-signed fallback certificate using the panel-rendered
+domain before writing the core config. Treat that as a startup safety net only; widening gray traffic
+should still require trusted certificates to be mounted or downloaded successfully.
 
 Native `geoip:` and `geosite:` rules read optional text files from `geoip/<rule>.txt` and
 `geosite/<rule>.txt` below `kernel.config_dir`. Built-in private rules work without files. Xray

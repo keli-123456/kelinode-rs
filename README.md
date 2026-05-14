@@ -205,6 +205,13 @@ Certificates are not embedded in the binary. TLS, HY2, TUIC, AnyTLS, and similar
 the certificate directory from the host into the same path visible to the container. This matches the
 old operational model and avoids baking private keys into release artifacts.
 
+If the rendered certificate files are missing, empty, or clearly malformed, `kelinode-rs` now creates
+a local self-signed fallback certificate at the rendered paths before writing the core config. The
+fallback certificate uses the domain from the panel certificate metadata when available, with
+`localhost` used only as a last-resort startup fallback. Existing usable certificate files are not
+overwritten. This keeps a node from failing hard when certificate delivery is temporarily broken, but
+public production traffic should still use a trusted certificate from the panel or mounted host path.
+
 For direct-node Docker compatibility, the entrypoint also accepts certificate download URLs:
 
 ```bash
