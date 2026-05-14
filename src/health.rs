@@ -329,10 +329,32 @@ fn runtime_value(plan: &RuntimeBootstrapPlan) -> Value {
         "mode": runtime_mode_label(&plan.bootstrap.mode),
         "nodes": plan.node_count,
         "configured_nodes": plan.resolved.nodes.len(),
+        "node_statuses": runtime_node_statuses_value(plan),
         "machine_profiles": plan.bootstrap.machine_profile_count,
         "sidecars": plan.sidecar_core_plans.len(),
         "subscription_proxy_only": plan.subscription_proxy_only
     })
+}
+
+fn runtime_node_statuses_value(plan: &RuntimeBootstrapPlan) -> Value {
+    let rows = plan
+        .node_infos
+        .iter()
+        .map(|node| {
+            json!({
+                "node_id": node.id,
+                "node_type": "v2node",
+                "protocol": node.protocol.as_str(),
+                "tag": node.tag,
+                "listen_ip": node.common.listen_ip,
+                "server_port": node.common.server_port,
+                "port": node.common.port.0,
+                "status": "configured"
+            })
+        })
+        .collect::<Vec<_>>();
+
+    Value::Array(rows)
 }
 
 fn core_value(
@@ -642,6 +664,15 @@ mod tests {
         assert_eq!(payload.status["version"], json!("v0.4.0"));
         assert_eq!(payload.status["runtime"]["agent"], json!("kelinode-rs"));
         assert_eq!(payload.status["runtime"]["mode"], json!("machine_binding"));
+        assert_eq!(payload.status["runtime"]["node_statuses"][0]["node_id"], json!(7));
+        assert_eq!(
+            payload.status["runtime"]["node_statuses"][0]["protocol"],
+            json!("vless")
+        );
+        assert_eq!(
+            payload.status["runtime"]["node_statuses"][0]["status"],
+            json!("configured")
+        );
         assert_eq!(payload.status["core"]["status"]["state"], json!("running"));
         assert_eq!(
             payload.status["node_failures"][0]["api_host"],

@@ -14,12 +14,15 @@ MACHINE_URL_ARG=""
 MACHINE_ID_ARG=""
 MACHINE_TOKEN_ARG=""
 MACHINE_NAME_ARG=""
+ACTION="install"
+PURGE_CONFIG="false"
 LOCK_DIR="/tmp/keli-native-node-install.lock"
 
 usage() {
     cat <<'EOF'
 Usage:
-  install.sh [--version v0.1.26] --machine-url URL --machine-id ID --machine-token TOKEN [--machine-name NAME]
+  install.sh [install] [--version v0.1.27] --machine-url URL --machine-id ID --machine-token TOKEN [--machine-name NAME]
+  install.sh uninstall [--purge-config]
 
 Options:
   --version VERSION        kelinode-rs release version. Defaults to the latest GitHub release.
@@ -27,10 +30,20 @@ Options:
   --machine-id ID         server machine ID.
   --machine-token TOKEN   server machine token.
   --machine-name NAME     local profile name.
+  --purge-config          uninstall only: also remove /etc/v2node.
 EOF
 }
 
 parse_args() {
+    if [[ $# -gt 0 ]]; then
+        case "$1" in
+            install)
+                ACTION="install"; shift ;;
+            uninstall|remove)
+                ACTION="uninstall"; shift ;;
+        esac
+    fi
+
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --version)
@@ -43,6 +56,10 @@ parse_args() {
                 MACHINE_TOKEN_ARG="${2:-}"; shift 2 ;;
             --machine-name)
                 MACHINE_NAME_ARG="${2:-}"; shift 2 ;;
+            --purge-config)
+                PURGE_CONFIG="true"; shift ;;
+            --uninstall|--remove)
+                ACTION="uninstall"; shift ;;
             -h|--help)
                 usage; exit 0 ;;
             --*)
@@ -59,6 +76,10 @@ parse_args() {
 }
 
 validate_args() {
+    if [[ "$ACTION" == "uninstall" ]]; then
+        return
+    fi
+
     if [[ -z "$MACHINE_URL_ARG" || -z "$MACHINE_ID_ARG" || -z "$MACHINE_TOKEN_ARG" ]]; then
         echo -e "${red}machine mode requires --machine-url, --machine-id, and --machine-token${plain}" >&2
         usage
@@ -195,6 +216,51 @@ stop_existing_service() {
     fi
 }
 
+uninstall_service() {
+    if command -v systemctl >/dev/null 2>&1; then
+        systemctl stop v2node >/dev/null 2>&1 || true
+        systemctl disable v2node >/dev/null 2>&1 || true
+        rm -f /etc/systemd/system/v2node.service
+        systemctl daemon-reload >/dev/null 2>&1 || true
+        systemctl reset-failed v2node >/dev/null 2>&1 || true
+    fi
+
+    if command -v rc-service >/dev/null 2>&1; then
+        rc-service v2node stop >/dev/null 2>&1 || true
+    fi
+    if command -v rc-update >/dev/null 2>&1; then
+        rc-update del v2node default >/dev/null 2>&1 || true
+    fi
+    rm -f /etc/init.d/v2node
+}
+
+uninstall_native_node() {
+    echo -e "${yellow}Uninstalling Keli native node...${plain}"
+    uninstall_service
+
+    if [[ -L /usr/local/bin/v2node ]]; then
+        local link_target
+        link_target="$(readlink /usr/local/bin/v2node || true)"
+        if [[ "$link_target" == "${INSTALL_DIR}/v2node" ]]; then
+            rm -f /usr/local/bin/v2node
+        fi
+    fi
+
+    rm -f "${INSTALL_DIR}/v2node"
+    rm -f "${INSTALL_DIR}/control.token"
+    rm -f "${INSTALL_DIR}/.installed_version" "${INSTALL_DIR}/.kelinode-rs_version" "${INSTALL_DIR}/.keli-core-rs_version"
+
+    if [[ "$PURGE_CONFIG" == "true" ]]; then
+        rm -rf "$CONFIG_DIR"
+        rm -rf "$INSTALL_DIR"
+        echo -e "${green}Keli native node uninstalled and config removed.${plain}"
+    else
+        rmdir "$INSTALL_DIR" >/dev/null 2>&1 || true
+        echo -e "${green}Keli native node uninstalled. Config preserved at ${CONFIG_DIR}.${plain}"
+        echo "To remove config too: bash install.sh uninstall --purge-config"
+    fi
+}
+
 install_service() {
     if command -v systemctl >/dev/null 2>&1; then
         cat >/etc/systemd/system/v2node.service <<EOF
@@ -267,6 +333,12 @@ main() {
     parse_args "$@"
     validate_args
     require_root
+
+    if [[ "$ACTION" == "uninstall" ]]; then
+        uninstall_native_node
+        exit 0
+    fi
+
     WORK_DIR="$(mktemp -d)"
     acquire_lock
     install_base_packages
