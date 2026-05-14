@@ -19,7 +19,7 @@ LOCK_DIR="/tmp/keli-native-node-install.lock"
 usage() {
     cat <<'EOF'
 Usage:
-  install.sh [--version v0.1.25] --machine-url URL --machine-id ID --machine-token TOKEN [--machine-name NAME]
+  install.sh [--version v0.1.26] --machine-url URL --machine-id ID --machine-token TOKEN [--machine-name NAME]
 
 Options:
   --version VERSION        kelinode-rs release version. Defaults to the latest GitHub release.
@@ -209,7 +209,7 @@ Group=root
 Type=simple
 LimitNOFILE=999999
 WorkingDirectory=${INSTALL_DIR}
-ExecStart=/usr/local/bin/v2node server --config ${CONFIG_FILE}
+ExecStart=${INSTALL_DIR}/v2node server --config ${CONFIG_FILE}
 Restart=always
 RestartSec=10
 
@@ -226,7 +226,7 @@ EOF
 
 name="v2node"
 description="Keli Native Node"
-command="/usr/local/bin/v2node"
+command="${INSTALL_DIR}/v2node"
 command_args="server --config ${CONFIG_FILE}"
 command_user="root"
 pidfile="/run/v2node.pid"
@@ -242,7 +242,7 @@ EOF
         echo -e "${green}v2node service started with OpenRC.${plain}"
     else
         echo -e "${yellow}No supported service manager found. Start manually:${plain}"
-        echo "  /usr/local/bin/v2node server --config ${CONFIG_FILE}"
+        echo "  ${INSTALL_DIR}/v2node server --config ${CONFIG_FILE}"
     fi
 }
 

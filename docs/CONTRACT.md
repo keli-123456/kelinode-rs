@@ -52,6 +52,6 @@ Naive still requires explicit Caddy forward_proxy integration before the panel s
 
 The experimental `keli-core-rs` native core path now renders SOCKS, HTTP, Shadowsocks, VMess, VLESS, Trojan, AnyTLS, Hysteria2, TUIC, Mieru TCP including expanded port ranges and stream multiplexing, common TCP/WS/HTTPUpgrade/H2/gRPC transports, XHTTP/splithttp stream-one route outbounds, old-QUIC route outbounds with `none`/`aes-128-gcm`/`chacha20-poly1305` packet security, VMess legacy alterId route outbounds, and VLESS REALITY config into the Rust core schema. Naive remains an explicit sidecar protocol.
 
-Operators opt into that path with `kernel.type: keli-core-rs`; the default remains `xray` for production compatibility. When the release binary is not in `PATH`, operators can set `kernel.core_command` to the absolute `keli-core-rs` binary path.
+Operators opt into that path with `kernel.type: keli-core-rs`; the default remains `xray` for production compatibility. The embedded native release links `keli-core-rs` into the `v2node` binary. Non-embedded development builds can still set `kernel.core_command` to an external `keli-core-rs` binary path.
 
 The native renderer parity gate is documented in `docs/NATIVE_CORE_PARITY.md`. Unsupported panel options must be rejected for `keli-core-rs` instead of being silently dropped.

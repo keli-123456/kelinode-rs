@@ -161,7 +161,8 @@ if [ "$1" = "server" ]; then
 fi
 
 if [ "$1" = "kelinode-rs" ]; then
-	set -- /usr/local/v2node/kelinode-rs "$@"
+	shift
+	set -- /usr/local/v2node/v2node "$@"
 fi
 
 if [ "$1" = "v2node" ] && [ "${2:-}" = "server" ]; then

@@ -22,7 +22,6 @@ cargo build --manifest-path "${AGENT_DIR}/Cargo.toml" --release --locked --featu
 rm -rf "${PACKAGE_DIR}"
 mkdir -p "${PACKAGE_DIR}/bin" "${PACKAGE_DIR}/docs"
 
-cp "${AGENT_DIR}/target/release/kelinode-rs" "${PACKAGE_DIR}/bin/kelinode-rs"
 cp "${AGENT_DIR}/target/release/kelinode-rs" "${PACKAGE_DIR}/bin/v2node"
 cp "${AGENT_DIR}/README.md" "${PACKAGE_DIR}/README.md"
 cp "${AGENT_DIR}/docs/CONTRACT.md" "${PACKAGE_DIR}/docs/CONTRACT.md"
@@ -49,12 +48,12 @@ cat >"${PACKAGE_DIR}/install.sh" <<'SH'
 set -eu
 
 install_dir="${1:-/usr/local/v2node}"
-mkdir -p "$install_dir" /etc/v2node
-cp bin/kelinode-rs "$install_dir/kelinode-rs"
-cp bin/v2node /usr/local/bin/v2node
-chmod +x "$install_dir/kelinode-rs" /usr/local/bin/v2node
+mkdir -p "$install_dir" /etc/v2node /usr/local/bin
+cp bin/v2node "$install_dir/v2node"
+chmod +x "$install_dir/v2node"
+ln -sf "$install_dir/v2node" /usr/local/bin/v2node
 echo "Installed Keli native node to $install_dir"
-echo "Run: v2node server --config /etc/v2node/config.yml"
+echo "Run: $install_dir/v2node server --config /etc/v2node/config.yml"
 SH
 chmod +x "${PACKAGE_DIR}/install.sh"
 

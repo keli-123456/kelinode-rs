@@ -24,7 +24,6 @@ Start with an opt-in node or machine profile:
 ```yaml
 kernel:
   type: keli-core-rs
-  core_command: "/usr/local/bin/keli-core-rs"
   config_dir: "/etc/v2node"
 ```
 
@@ -45,7 +44,6 @@ core separately. The package contains one native agent binary with the Rust core
 
 ```text
 bin/v2node
-bin/kelinode-rs
 ```
 
 Install it with:
@@ -56,7 +54,8 @@ sudo v2node server --config /etc/v2node/config.yml
 ```
 
 `v2node server` is kept as a compatibility alias for the old Go node command. The package installs
-`kelinode-rs` under `/usr/local/v2node` and `v2node` under `/usr/local/bin`.
+the single `v2node` binary under `/usr/local/v2node/v2node` and creates `/usr/local/bin/v2node` as
+a compatibility symlink.
 
 For Docker gray releases, build the image from the `kelinode-rs` repository:
 

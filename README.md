@@ -136,11 +136,10 @@ kernel:
 Leave `core_command` empty when the binary name `keli-core-rs` resolves from `PATH`.
 
 The native bundle builds with the `embedded-core` feature, so the Rust data-plane runs inside the
-agent process. The package keeps the old agent entry name:
+agent process. The package keeps the old Go-compatible entry name as the only shipped binary:
 
 ```text
-bin/v2node          legacy-compatible agent entry
-bin/kelinode-rs    Rust agent binary
+bin/v2node
 ```
 
 After extracting the release package on Linux:
@@ -155,7 +154,7 @@ The `server` command is an alias for `run`, and both commands accept the old con
 ```bash
 v2node server --config /etc/v2node/config.yml
 v2node server -c /etc/v2node/config.yml
-kelinode-rs run /etc/v2node/config.yml
+/usr/local/v2node/v2node run /etc/v2node/config.yml
 ```
 
 For machine-bound native testing, keep the config explicit:

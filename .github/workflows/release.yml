@@ -101,7 +101,6 @@ jobs:
           version="${{ steps.meta.outputs.version }}"
           name="${{ steps.meta.outputs.asset_prefix }}"
           mkdir -p "dist/${name}/bin" "dist/${name}/docs"
-          cp target/release/kelinode-rs "dist/${name}/bin/kelinode-rs"
           cp target/release/kelinode-rs "dist/${name}/bin/v2node"
           cp README.md "dist/${name}/"
           cp docs/CONTRACT.md "dist/${name}/CONTRACT.md"
@@ -126,12 +125,12 @@ jobs:
           #!/usr/bin/env sh
           set -eu
           install_dir="${1:-/usr/local/v2node}"
-          mkdir -p "$install_dir" /etc/v2node
-          cp bin/kelinode-rs "$install_dir/kelinode-rs"
-          cp bin/v2node /usr/local/bin/v2node
-          chmod +x "$install_dir/kelinode-rs" /usr/local/bin/v2node
+          mkdir -p "$install_dir" /etc/v2node /usr/local/bin
+          cp bin/v2node "$install_dir/v2node"
+          chmod +x "$install_dir/v2node"
+          ln -sf "$install_dir/v2node" /usr/local/bin/v2node
           echo "Installed Keli native node to $install_dir"
-          echo "Run: v2node server --config /etc/v2node/config.yml"
+          echo "Run: $install_dir/v2node server --config /etc/v2node/config.yml"
           SH
           chmod +x "dist/${name}/install.sh"
           tar -C dist -czf "dist/${name}.tar.gz" "${name}"
@@ -145,8 +144,7 @@ jobs:
             "archive": "${name}.tar.gz",
             "sha256": "${sha256}",
             "binaries": {
-              "agent": "bin/kelinode-rs",
-              "legacy_agent": "bin/v2node"
+              "agent": "bin/v2node"
             },
             "run_args": ["server", "--config", "<config.yml>"],
             "default_core": "embedded-keli-core-rs"

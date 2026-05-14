@@ -210,7 +210,7 @@ impl ReleaseUpgradeSpec {
             name: "kelinode-rs".to_string(),
             owner: DEFAULT_RELEASE_OWNER.to_string(),
             repository: "kelinode-rs".to_string(),
-            binary: "kelinode-rs".to_string(),
+            binary: "v2node".to_string(),
             install_dir: "/usr/local/v2node".to_string(),
             service_name: "v2node".to_string(),
             platform: DEFAULT_RELEASE_PLATFORM.to_string(),
@@ -632,6 +632,7 @@ mod tests {
         assert!(script.contains("restore_backup()"));
         assert!(script.contains("kelinode-rs-v1.2.5-linux-x86_64.manifest.json"));
         assert!(script.contains("kelinode-rs-v1.2.5-linux-x86_64.tar.gz"));
+        assert!(script.contains("binary_name='v2node'"));
         assert!(script.contains("manifest_sha=$(sed"));
         assert!(script.contains("sha256sum -c -"));
         assert!(script.contains("tar -xzf \"$archive_file\""));

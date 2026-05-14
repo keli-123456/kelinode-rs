@@ -10,6 +10,7 @@ use std::sync::{Arc, Mutex};
 use crate::core::{CoreKind, CorePlan};
 use crate::core_control::{KeliCoreControlClient, KELI_CORE_CONTROL_TOKEN_ENV};
 
+#[cfg_attr(feature = "embedded-core", allow(dead_code))]
 const DEFAULT_NATIVE_INSTALL_DIR: &str = "/usr/local/v2node";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -376,14 +377,22 @@ fn default_core_command(kind: &CoreKind) -> Option<String> {
         CoreKind::Xray => Some("xray".to_string()),
         CoreKind::SingBox => Some("sing-box".to_string()),
         CoreKind::Mihomo => Some("mihomo".to_string()),
-        CoreKind::KeliCoreRs => Some(default_binary_command(
-            "keli-core-rs",
-            Path::new(DEFAULT_NATIVE_INSTALL_DIR),
-        )),
+        CoreKind::KeliCoreRs => Some(default_keli_core_rs_command()),
         CoreKind::Sidecar(_) => None,
     }
 }
 
+#[cfg(feature = "embedded-core")]
+fn default_keli_core_rs_command() -> String {
+    "keli-core-rs".to_string()
+}
+
+#[cfg(not(feature = "embedded-core"))]
+fn default_keli_core_rs_command() -> String {
+    default_binary_command("keli-core-rs", Path::new(DEFAULT_NATIVE_INSTALL_DIR))
+}
+
+#[cfg_attr(feature = "embedded-core", allow(dead_code))]
 fn default_binary_command(binary_name: &str, install_dir: &Path) -> String {
     let installed = install_dir.join(binary_name);
     if installed.is_file() {
@@ -709,6 +718,12 @@ mod tests {
 
         assert_eq!(command, "keli-core-rs");
         fs::remove_dir_all(dir).ok();
+    }
+
+    #[cfg(feature = "embedded-core")]
+    #[test]
+    fn embedded_core_default_command_uses_in_process_sentinel() {
+        assert_eq!(super::default_keli_core_rs_command(), "keli-core-rs");
     }
 
     #[cfg(feature = "embedded-core")]

@@ -22,7 +22,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/build/keli-core-rs/target \
     cargo build --manifest-path kelinode-rs/Cargo.toml --release --locked --features embedded-core \
     && mkdir -p /build/out \
-    && cp kelinode-rs/target/release/kelinode-rs /build/out/kelinode-rs
+    && cp kelinode-rs/target/release/kelinode-rs /build/out/v2node
 
 FROM debian:bookworm-slim
 
@@ -32,11 +32,11 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/* \
     && mkdir -p /etc/v2node /usr/local/v2node
 
-COPY --from=builder /build/out/kelinode-rs /usr/local/v2node/kelinode-rs
-COPY --from=builder /build/out/kelinode-rs /usr/local/bin/v2node
+COPY --from=builder /build/out/v2node /usr/local/v2node/v2node
 COPY docker-entrypoint.sh /docker-entrypoint.sh
 
-RUN chmod +x /usr/local/v2node/kelinode-rs /usr/local/bin/v2node /docker-entrypoint.sh
+RUN chmod +x /usr/local/v2node/v2node /docker-entrypoint.sh \
+    && ln -sf /usr/local/v2node/v2node /usr/local/bin/v2node
 
 ENTRYPOINT ["/docker-entrypoint.sh"]
 CMD ["v2node", "server"]
