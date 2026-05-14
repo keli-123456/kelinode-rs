@@ -20,8 +20,17 @@ jobs:
     timeout-minutes: 25
 
     steps:
-      - name: Checkout
+      - name: Checkout kelinode-rs
         uses: actions/checkout@v4
+        with:
+          path: kelinode-rs
+
+      - name: Checkout keli-core-rs
+        uses: actions/checkout@v4
+        with:
+          repository: keli-123456/keli-core-rs
+          ref: main
+          path: keli-core-rs
 
       - name: Install Rust
         run: |
@@ -34,16 +43,20 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}
+            kelinode-rs/target
+            keli-core-rs/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('kelinode-rs/Cargo.lock', 'keli-core-rs/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-
 
       - name: Check formatting
+        working-directory: kelinode-rs
         run: cargo fmt --check
 
       - name: Run tests
+        working-directory: kelinode-rs
         run: cargo test --locked --all-targets -- --test-threads=1
 
       - name: Build
+        working-directory: kelinode-rs
         run: cargo build --locked
