@@ -40,6 +40,44 @@ Treat any `error:` line as a blocker. Warnings are not automatic blockers, but t
 understood before widening traffic. In particular, explicit listen addresses such as `127.0.0.1`
 or a single public IPv4/IPv6 address bypass the native core wildcard dual-stack listener behavior.
 
+For binary gray releases, prefer the embedded native package instead of installing the agent and
+core separately. The package contains one native agent binary with the Rust core linked in:
+
+```text
+bin/v2node
+bin/kelinode-rs
+```
+
+Install it with:
+
+```bash
+sudo ./install.sh
+sudo v2node server --config /etc/v2node/config.yml
+```
+
+`v2node server` is kept as a compatibility alias for the old Go node command. The package installs
+`kelinode-rs` under `/usr/local/v2node` and `v2node` under `/usr/local/bin`.
+
+For Docker gray releases, build the image from the `kelinode-rs` repository:
+
+```bash
+docker build --build-arg KELI_CORE_RS_REF=main -t keli-native-node:latest .
+docker run --rm --network host -v /etc/v2node:/etc/v2node keli-native-node:latest
+```
+
+The Docker image starts `v2node server` by default. The native core runs in-process, so there is no
+separate core binary to install in the container.
+
+Certificates remain external files. Mount the host certificate directory into the same path rendered
+by the panel, or in direct-node Docker mode provide `V2NODE_TLS_CERT_URL` and
+`V2NODE_TLS_KEY_URL` so the entrypoint can download them before startup. In machine or multi-node
+mode, prefer mounting the certificate directory, or set `V2NODE_TLS_CERT_FILE` and
+`V2NODE_TLS_KEY_FILE` explicitly when using URL download.
+
+Native `geoip:` and `geosite:` rules read optional text files from `geoip/<rule>.txt` and
+`geosite/<rule>.txt` below `kernel.config_dir`. Built-in private rules work without files. Xray
+`.dat` files are not parsed by the native Rust core.
+
 Recommended rollout:
 
 1. Internal test node with no customer traffic.

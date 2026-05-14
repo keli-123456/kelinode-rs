@@ -124,7 +124,7 @@ The native production gray release runbook is tracked in `docs/NATIVE_CORE_GRAY_
 
 ## Native Core Binary Example
 
-`kelinode-rs` starts `keli-core-rs run-config <generated-config> --control <local-addr>` when the native core path is selected. Install the `keli-core-rs` release binary on the same machine and either keep it in `PATH` or point the runtime at the absolute binary path:
+When built without `embedded-core`, `kelinode-rs` starts `keli-core-rs run-config <generated-config> --control <local-addr>` when the native core path is selected. Install the `keli-core-rs` release binary on the same machine and either keep it in `PATH` or point the runtime at the absolute binary path:
 
 ```yaml
 kernel:
@@ -135,6 +135,87 @@ kernel:
 
 Leave `core_command` empty when the binary name `keli-core-rs` resolves from `PATH`.
 
+The native bundle builds with the `embedded-core` feature, so the Rust data-plane runs inside the
+agent process. The package keeps the old agent entry name:
+
+```text
+bin/v2node          legacy-compatible agent entry
+bin/kelinode-rs    Rust agent binary
+```
+
+After extracting the release package on Linux:
+
+```bash
+sudo ./install.sh
+sudo v2node server --config /etc/v2node/config.yml
+```
+
+The `server` command is an alias for `run`, and both commands accept the old config flag style:
+
+```bash
+v2node server --config /etc/v2node/config.yml
+v2node server -c /etc/v2node/config.yml
+kelinode-rs run /etc/v2node/config.yml
+```
+
+For machine-bound native testing, keep the config explicit:
+
+```yaml
+kernel:
+  type: keli-core-rs
+  config_dir: "/etc/v2node"
+
+machine:
+  enabled: true
+  continue_on_error: true
+  profiles:
+    - name: "test"
+      url: "https://panel.example.com"
+      token: "replace-me"
+      machine_id: 3
+```
+
+Docker builds produce the same single native agent binary:
+
+```bash
+docker build \
+  --build-arg KELI_CORE_RS_REF=main \
+  -t keli-native-node:latest \
+  .
+
+docker run --rm --network host \
+  -v /etc/v2node:/etc/v2node \
+  keli-native-node:latest
+```
+
+Or generate a direct-node config from environment variables:
+
+```bash
+docker run --rm --network host \
+  -e V2NODE_API_HOST="https://panel.example.com" \
+  -e V2NODE_API_KEY="replace-me" \
+  -e V2NODE_NODE_ID="1" \
+  keli-native-node:latest
+```
+
+For machine-bound mode, use `V2NODE_MACHINE_ID` instead of `V2NODE_NODE_ID`.
+
+Certificates are not embedded in the binary. TLS, HY2, TUIC, AnyTLS, and similar listeners use the
+`cert_file` and `key_file` paths rendered from the panel config, so Docker deployments should mount
+the certificate directory from the host into the same path visible to the container. This matches the
+old operational model and avoids baking private keys into release artifacts.
+
+For direct-node Docker compatibility, the entrypoint also accepts certificate download URLs:
+
+```bash
+-e V2NODE_TLS_CERT_URL="https://example.com/fullchain.pem"
+-e V2NODE_TLS_KEY_URL="https://example.com/privkey.pem"
+```
+
+When `V2NODE_NODE_ID` is present, the entrypoint asks the panel for the configured certificate paths
+and downloads the files there. In machine or multi-node mode, pass explicit
+`V2NODE_TLS_CERT_FILE` and `V2NODE_TLS_KEY_FILE`, or mount the certificate directory directly.
+
 For native `geoip:` and `geosite:` route rules, place optional text rule files next to the generated core config:
 
 ```text
@@ -143,6 +224,9 @@ For native `geoip:` and `geosite:` route rules, place optional text rule files n
 ```
 
 For example, `geosite:openai` reads `/etc/v2node/geosite/openai.txt` when that file exists. Multi-node deployments that use per-node config directories keep their rule files under each node's generated config directory.
+Built-in `geoip:private` and `geosite:private` work without files. External `.dat` files from Xray
+are not parsed by the native Rust core; use one text file per rule group for native gray releases.
+For Docker, mount those folders together with `/etc/v2node` or a custom `kernel.config_dir`.
 
 ## Sidecar Process Example
 

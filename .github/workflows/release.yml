@@ -10,6 +10,10 @@ on:
         description: Version label for artifact names, for example v0.1.0
         required: true
         default: v0.1.0
+      keli_core_rs_ref:
+        description: keli-core-rs ref to bundle
+        required: true
+        default: main
       create_release:
         description: Publish the packaged files as GitHub Release assets
         required: true
@@ -30,8 +34,17 @@ jobs:
     timeout-minutes: 35
 
     steps:
-      - name: Checkout
+      - name: Checkout kelinode-rs
         uses: actions/checkout@v4
+        with:
+          path: kelinode-rs
+
+      - name: Checkout keli-core-rs
+        uses: actions/checkout@v4
+        with:
+          repository: keli-123456/keli-core-rs
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.keli_core_rs_ref || 'main' }}
+          path: keli-core-rs
 
       - name: Install Rust
         run: |
@@ -53,7 +66,7 @@ jobs:
             exit 1
           fi
           echo "version=${version}" >> "${GITHUB_OUTPUT}"
-          echo "asset_prefix=kelinode-rs-${version}-linux-x86_64" >> "${GITHUB_OUTPUT}"
+          echo "asset_prefix=keli-native-node-${version}-linux-x86_64" >> "${GITHUB_OUTPUT}"
 
       - name: Cache cargo
         uses: actions/cache@v4
@@ -61,29 +74,66 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            target
-          key: ${{ runner.os }}-release-cargo-${{ hashFiles('Cargo.lock') }}
+            kelinode-rs/target
+            keli-core-rs/target
+          key: ${{ runner.os }}-release-cargo-${{ hashFiles('kelinode-rs/Cargo.lock', 'keli-core-rs/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-release-cargo-
             ${{ runner.os }}-cargo-
 
-      - name: Run tests
+      - name: Run kelinode-rs tests
+        working-directory: kelinode-rs
         run: cargo test --locked --all-targets -- --test-threads=1
 
-      - name: Build release binary
-        run: cargo build --release --locked
+      - name: Run keli-core-rs tests
+        working-directory: keli-core-rs
+        run: cargo test --locked --all-targets -- --test-threads=1
 
-      - name: Package artifact
+      - name: Build embedded native node binary
+        working-directory: kelinode-rs
+        run: cargo build --release --locked --features embedded-core
+
+      - name: Package native node artifact
         shell: bash
+        working-directory: kelinode-rs
         run: |
           set -euo pipefail
           version="${{ steps.meta.outputs.version }}"
           name="${{ steps.meta.outputs.asset_prefix }}"
-          mkdir -p "dist/${name}"
-          cp target/release/kelinode-rs "dist/${name}/"
+          mkdir -p "dist/${name}/bin" "dist/${name}/docs"
+          cp target/release/kelinode-rs "dist/${name}/bin/kelinode-rs"
+          cp target/release/kelinode-rs "dist/${name}/bin/v2node"
           cp README.md "dist/${name}/"
           cp docs/CONTRACT.md "dist/${name}/CONTRACT.md"
           cp docs/NATIVE_CORE_PARITY.md "dist/${name}/NATIVE_CORE_PARITY.md"
+          cp docs/NATIVE_CORE_GRAY_RELEASE.md "dist/${name}/NATIVE_CORE_GRAY_RELEASE.md"
+          cp ../keli-core-rs/docs/PARITY.md "dist/${name}/KELI_CORE_RS_PARITY.md"
+          cat > "dist/${name}/config.yml.example" <<'YAML'
+          kernel:
+            type: keli-core-rs
+            config_dir: "/etc/v2node"
+
+          machine:
+            enabled: true
+            continue_on_error: true
+            profiles:
+              - name: "default"
+                url: "https://panel.example.com"
+                token: "replace-me"
+                machine_id: 1
+          YAML
+          cat > "dist/${name}/install.sh" <<'SH'
+          #!/usr/bin/env sh
+          set -eu
+          install_dir="${1:-/usr/local/v2node}"
+          mkdir -p "$install_dir" /etc/v2node
+          cp bin/kelinode-rs "$install_dir/kelinode-rs"
+          cp bin/v2node /usr/local/bin/v2node
+          chmod +x "$install_dir/kelinode-rs" /usr/local/bin/v2node
+          echo "Installed Keli native node to $install_dir"
+          echo "Run: v2node server --config /etc/v2node/config.yml"
+          SH
+          chmod +x "dist/${name}/install.sh"
           tar -C dist -czf "dist/${name}.tar.gz" "${name}"
           (cd dist && sha256sum "${name}.tar.gz" > "${name}.tar.gz.sha256")
           sha256="$(cut -d ' ' -f 1 "dist/${name}.tar.gz.sha256")"
@@ -94,8 +144,12 @@ jobs:
             "platform": "linux-x86_64",
             "archive": "${name}.tar.gz",
             "sha256": "${sha256}",
-            "binary": "kelinode-rs",
-            "run_args": ["run", "<config.yml>"]
+            "binaries": {
+              "agent": "bin/kelinode-rs",
+              "legacy_agent": "bin/v2node"
+            },
+            "run_args": ["server", "--config", "<config.yml>"],
+            "default_core": "embedded-keli-core-rs"
           }
           JSON
 
@@ -104,9 +158,9 @@ jobs:
         with:
           name: ${{ steps.meta.outputs.asset_prefix }}
           path: |
-            dist/*.tar.gz
-            dist/*.sha256
-            dist/*.manifest.json
+            kelinode-rs/dist/*.tar.gz
+            kelinode-rs/dist/*.sha256
+            kelinode-rs/dist/*.manifest.json
           if-no-files-found: error
 
       - name: Upload GitHub release assets
@@ -114,10 +168,10 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.meta.outputs.version }}
-          name: kelinode-rs ${{ steps.meta.outputs.version }}
+          name: Keli native node ${{ steps.meta.outputs.version }}
           prerelease: true
           files: |
-            dist/*.tar.gz
-            dist/*.sha256
-            dist/*.manifest.json
+            kelinode-rs/dist/*.tar.gz
+            kelinode-rs/dist/*.sha256
+            kelinode-rs/dist/*.manifest.json
           fail_on_unmatched_files: true

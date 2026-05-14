@@ -41,9 +41,7 @@ fn run() -> Result<(), String> {
             );
         }
         "check-config" => {
-            let path = args
-                .next()
-                .unwrap_or_else(|| "/etc/v2node/config.yml".to_string());
+            let path = config_path_from_args(args, "/etc/v2node/config.yml")?;
             let config = AppConfig::load_from_path(path)?;
             let resolved = config.resolve_runtime()?;
             let bootstrap = Bootstrap::from_config(&config);
@@ -56,9 +54,7 @@ fn run() -> Result<(), String> {
             );
         }
         "gray-preflight" => {
-            let path = args
-                .next()
-                .unwrap_or_else(|| "/etc/v2node/config.yml".to_string());
+            let path = config_path_from_args(args, "/etc/v2node/config.yml")?;
             let runtime = tokio::runtime::Runtime::new()
                 .map_err(|err| format!("start tokio runtime: {err}"))?;
             let report = runtime.block_on(run_native_gray_preflight(&path))?;
@@ -67,10 +63,8 @@ fn run() -> Result<(), String> {
                 return Err("native gray preflight failed".to_string());
             }
         }
-        "run" => {
-            let path = args
-                .next()
-                .unwrap_or_else(|| "/etc/v2node/config.yml".to_string());
+        "run" | "server" => {
+            let path = config_path_from_args(args, "/etc/v2node/config.yml")?;
             let runtime = tokio::runtime::Runtime::new()
                 .map_err(|err| format!("start tokio runtime: {err}"))?;
             runtime.block_on(run_agent(&path))?;
@@ -83,6 +77,44 @@ fn run() -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+fn config_path_from_args(
+    args: impl IntoIterator<Item = String>,
+    default_path: &str,
+) -> Result<String, String> {
+    let mut path: Option<String> = None;
+    let mut iter = args.into_iter();
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
+            "--config" | "-c" => {
+                let value = iter
+                    .next()
+                    .ok_or_else(|| format!("{arg} requires a config path"))?;
+                path = Some(value);
+            }
+            value if value.starts_with("--config=") => {
+                path = Some(value.trim_start_matches("--config=").to_string());
+            }
+            value if value.starts_with("-c=") => {
+                path = Some(value.trim_start_matches("-c=").to_string());
+            }
+            "--" => {
+                if let Some(value) = iter.next() {
+                    path = Some(value);
+                }
+                break;
+            }
+            value if value.starts_with('-') => {
+                return Err(format!("unknown config option {value}"));
+            }
+            value => {
+                path = Some(value.to_string());
+            }
+        }
+    }
+
+    Ok(path.unwrap_or_else(|| default_path.to_string()))
 }
 
 async fn run_native_gray_preflight(path: &str) -> Result<NativeGrayPreflightReport, String> {
@@ -532,18 +564,18 @@ fn agent_version() -> String {
 fn print_help() {
     println!("kelinode-rs commands:");
     println!("  version    print version and API contract");
-    println!("  check-config [path]    load config and print resolved runtime shape");
+    println!("  check-config [path|--config path]    load config and print resolved runtime shape");
     println!(
-        "  gray-preflight [path]    check whether config is ready for native core gray release"
+        "  gray-preflight [path|--config path]    check whether config is ready for native core gray release"
     );
-    println!("  run [path]    start the node runtime loop");
+    println!("  run|server [path|--config path]    start the node runtime loop");
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        machine_panel_clients, native_gray_preflight_report, runtime_loop_options,
-        runtime_tick_interval, start_subscription_proxy_manager,
+        config_path_from_args, machine_panel_clients, native_gray_preflight_report,
+        runtime_loop_options, runtime_tick_interval, start_subscription_proxy_manager,
     };
     use kelinode_rs::config::{
         AgentConfig, MachineProfileConfig, NodeConfig, ResolvedConfig, ResolvedMachineConfig,
@@ -554,6 +586,32 @@ mod tests {
     use kelinode_rs::runtime::{build_runtime_bootstrap_plan, RuntimeBootstrapPlan};
     use serde_json::json;
     use std::time::Duration;
+
+    #[test]
+    fn config_path_parser_accepts_legacy_config_flags() {
+        assert_eq!(
+            config_path_from_args(Vec::<String>::new(), "/etc/v2node/config.yml").unwrap(),
+            "/etc/v2node/config.yml"
+        );
+        assert_eq!(
+            config_path_from_args(
+                vec!["--config".to_string(), "/tmp/a.yml".to_string()],
+                "/etc/v2node/config.yml",
+            )
+            .unwrap(),
+            "/tmp/a.yml"
+        );
+        assert_eq!(
+            config_path_from_args(vec!["-c=/tmp/b.yml".to_string()], "/etc/v2node/config.yml",)
+                .unwrap(),
+            "/tmp/b.yml"
+        );
+        assert_eq!(
+            config_path_from_args(vec!["/tmp/c.yml".to_string()], "/etc/v2node/config.yml",)
+                .unwrap(),
+            "/tmp/c.yml"
+        );
+    }
 
     #[test]
     fn runtime_loop_options_keep_binary_machine_reporting_enabled() {

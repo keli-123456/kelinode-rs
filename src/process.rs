@@ -4,6 +4,8 @@ use std::fs;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::{Child, Command};
+#[cfg(feature = "embedded-core")]
+use std::sync::{Arc, Mutex};
 
 use crate::core::{CoreKind, CorePlan};
 use crate::core_control::{KeliCoreControlClient, KELI_CORE_CONTROL_TOKEN_ENV};
@@ -50,6 +52,15 @@ pub trait ProcessSupervisor {
 pub struct SystemProcessSupervisor {
     children: BTreeMap<String, Child>,
     statuses: BTreeMap<String, ProcessStatus>,
+    #[cfg(feature = "embedded-core")]
+    embedded_cores: BTreeMap<String, EmbeddedCoreProcess>,
+}
+
+#[cfg(feature = "embedded-core")]
+#[derive(Debug)]
+struct EmbeddedCoreProcess {
+    controller: Arc<Mutex<keli_core_rs::CoreController>>,
+    control: keli_core_rs::ControlServerHandle,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -105,6 +116,11 @@ impl ProcessStatus {
 
 impl ProcessSupervisor for SystemProcessSupervisor {
     fn start(&mut self, spec: &ProcessSpec) -> Result<ProcessStatus, ProcessError> {
+        #[cfg(feature = "embedded-core")]
+        if should_start_embedded_core(spec) {
+            return self.start_embedded_core(spec);
+        }
+
         let current = self.status(&spec.name)?;
         if current.is_running() {
             return Ok(current);
@@ -132,6 +148,17 @@ impl ProcessSupervisor for SystemProcessSupervisor {
     }
 
     fn stop(&mut self, name: &str) -> Result<ProcessStatus, ProcessError> {
+        #[cfg(feature = "embedded-core")]
+        if let Some(mut embedded) = self.embedded_cores.remove(name) {
+            if let Ok(mut controller) = embedded.controller.lock() {
+                let _ = controller.handle(keli_core_rs::CoreCommand::Stop);
+            }
+            embedded.control.stop();
+            let status = ProcessStatus::stopped(name, "embedded keli-core-rs stopped");
+            self.statuses.insert(name.to_string(), status.clone());
+            return Ok(status);
+        }
+
         let Some(mut child) = self.children.remove(name) else {
             let status = ProcessStatus::stopped(name, "process is not running");
             self.statuses.insert(name.to_string(), status.clone());
@@ -166,6 +193,17 @@ impl ProcessSupervisor for SystemProcessSupervisor {
     }
 
     fn status(&mut self, name: &str) -> Result<ProcessStatus, ProcessError> {
+        #[cfg(feature = "embedded-core")]
+        if let Some(embedded) = self.embedded_cores.get(name) {
+            if embedded.control.is_stopped() {
+                self.embedded_cores.remove(name);
+                let status = ProcessStatus::stopped(name, "embedded keli-core-rs stopped");
+                self.statuses.insert(name.to_string(), status.clone());
+                return Ok(status);
+            }
+            return Ok(ProcessStatus::running(name, std::process::id()));
+        }
+
         let exit_code = if let Some(child) = self.children.get_mut(name) {
             match child
                 .try_wait()
@@ -190,6 +228,56 @@ impl ProcessSupervisor for SystemProcessSupervisor {
             .get(name)
             .cloned()
             .unwrap_or_else(|| ProcessStatus::stopped(name, "process was never started")))
+    }
+}
+
+#[cfg(feature = "embedded-core")]
+impl SystemProcessSupervisor {
+    fn start_embedded_core(&mut self, spec: &ProcessSpec) -> Result<ProcessStatus, ProcessError> {
+        let current = self.status(&spec.name)?;
+        if current.is_running() {
+            return Ok(current);
+        }
+
+        let config_path = embedded_core_config_path(spec)?;
+        let control_addr = embedded_core_control_addr(spec)?;
+        let config = keli_core_rs::load_core_config_json(&config_path).map_err(|err| {
+            ProcessError::new(format!(
+                "load embedded keli-core-rs config {}: {err}",
+                config_path.display()
+            ))
+        })?;
+        let mut controller = keli_core_rs::CoreController::new();
+        match controller.handle(keli_core_rs::CoreCommand::ApplyConfig { config }) {
+            keli_core_rs::CoreResponse::Applied { .. } => {}
+            keli_core_rs::CoreResponse::Error { message } => {
+                return Err(ProcessError::new(format!(
+                    "start embedded keli-core-rs: {message}"
+                )));
+            }
+            response => {
+                return Err(ProcessError::new(format!(
+                    "start embedded keli-core-rs: unexpected response {response:?}"
+                )));
+            }
+        }
+
+        let controller = Arc::new(Mutex::new(controller));
+        let token = spec.env.get(KELI_CORE_CONTROL_TOKEN_ENV).cloned();
+        let control =
+            keli_core_rs::start_control_server_with_token(&control_addr, controller.clone(), token)
+                .map_err(|err| ProcessError::new(format!("start embedded core control: {err}")))?;
+
+        self.embedded_cores.insert(
+            spec.name.clone(),
+            EmbeddedCoreProcess {
+                controller,
+                control,
+            },
+        );
+        let status = ProcessStatus::running(&spec.name, std::process::id());
+        self.statuses.insert(spec.name.clone(), status.clone());
+        Ok(status)
     }
 }
 
@@ -303,6 +391,47 @@ fn default_binary_command(binary_name: &str, install_dir: &Path) -> String {
     } else {
         binary_name.to_string()
     }
+}
+
+#[cfg(feature = "embedded-core")]
+fn should_start_embedded_core(spec: &ProcessSpec) -> bool {
+    spec.name == "core:keli-core-rs"
+        && spec.command == "keli-core-rs"
+        && std::env::var("KELINODE_DISABLE_EMBEDDED_CORE")
+            .map(|value| value.trim() != "1")
+            .unwrap_or(true)
+}
+
+#[cfg(feature = "embedded-core")]
+fn embedded_core_config_path(spec: &ProcessSpec) -> Result<PathBuf, ProcessError> {
+    if spec.args.first().map(String::as_str) != Some("run-config") {
+        return Err(ProcessError::new(
+            "embedded keli-core-rs process requires run-config args",
+        ));
+    }
+    spec.args
+        .get(1)
+        .map(PathBuf::from)
+        .ok_or_else(|| ProcessError::new("embedded keli-core-rs missing config path"))
+}
+
+#[cfg(feature = "embedded-core")]
+fn embedded_core_control_addr(spec: &ProcessSpec) -> Result<String, ProcessError> {
+    let mut args = spec.args.iter();
+    while let Some(arg) = args.next() {
+        if arg == "--control" {
+            return args
+                .next()
+                .cloned()
+                .ok_or_else(|| ProcessError::new("embedded keli-core-rs missing control address"));
+        }
+        if let Some(value) = arg.strip_prefix("--control=") {
+            return Ok(value.to_string());
+        }
+    }
+    Err(ProcessError::new(
+        "embedded keli-core-rs requires a control address",
+    ))
 }
 
 fn core_process_args(kind: &CoreKind, config_path: &PathBuf) -> Result<Vec<String>, ProcessError> {
@@ -478,6 +607,8 @@ mod tests {
     use crate::core::{CoreKind, CorePlan};
     use crate::core_control::{KeliCoreResponse, KELI_CORE_CONTROL_TOKEN_ENV};
 
+    #[cfg(feature = "embedded-core")]
+    use super::SystemProcessSupervisor;
     use super::{
         core_process_spec, default_binary_command, keli_core_rs_control_addr,
         keli_core_rs_control_client, keli_core_rs_control_token, keli_core_rs_control_token_path,
@@ -577,6 +708,72 @@ mod tests {
         let command = default_binary_command("keli-core-rs", &dir);
 
         assert_eq!(command, "keli-core-rs");
+        fs::remove_dir_all(dir).ok();
+    }
+
+    #[cfg(feature = "embedded-core")]
+    #[test]
+    fn system_supervisor_starts_embedded_keli_core_rs() {
+        let dir = temp_test_dir("embedded-core");
+        let config_path = dir.join("config.json");
+        let port = TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        fs::write(
+            &config_path,
+            json!({
+                "instance_id": "embedded-test",
+                "log_level": "error",
+                "dns": {"servers": []},
+                "inbounds": [{
+                    "tag": "node-a",
+                    "protocol": "socks",
+                    "listen": "127.0.0.1",
+                    "port": port,
+                    "users": [{
+                        "id": 1,
+                        "uuid": "user-a",
+                        "password": "user-a",
+                        "speed_limit": 0,
+                        "device_limit": 0
+                    }],
+                    "transport": {
+                        "network": "tcp",
+                        "path": null,
+                        "host": null,
+                        "service_name": null,
+                        "proxy_protocol": false
+                    },
+                    "tls": null,
+                    "sniffing": {"enabled": false, "dest_override": []},
+                    "routes": []
+                }],
+                "outbounds": [{"tag": "direct", "protocol": "freedom"}],
+                "routes": [],
+                "stats": {"enabled": true, "per_user": true}
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let plan = CorePlan {
+            kind: CoreKind::KeliCoreRs,
+            config_path: config_path.clone(),
+            listen_tags: Vec::new(),
+            inbounds: Vec::new(),
+        };
+        let spec = core_process_spec(&plan, None).unwrap();
+        let mut supervisor = SystemProcessSupervisor::default();
+
+        let status = supervisor.start(&spec).unwrap();
+        let running = supervisor.status(&spec.name).unwrap();
+        let stopped = supervisor.stop(&spec.name).unwrap();
+
+        assert_eq!(spec.command, "keli-core-rs");
+        assert_eq!(status.state, ProcessState::Running);
+        assert_eq!(running.state, ProcessState::Running);
+        assert_eq!(stopped.state, ProcessState::Stopped);
         fs::remove_dir_all(dir).ok();
     }
 
