@@ -664,7 +664,10 @@ mod tests {
         assert_eq!(payload.status["version"], json!("v0.4.0"));
         assert_eq!(payload.status["runtime"]["agent"], json!("kelinode-rs"));
         assert_eq!(payload.status["runtime"]["mode"], json!("machine_binding"));
-        assert_eq!(payload.status["runtime"]["node_statuses"][0]["node_id"], json!(7));
+        assert_eq!(
+            payload.status["runtime"]["node_statuses"][0]["node_id"],
+            json!(7)
+        );
         assert_eq!(
             payload.status["runtime"]["node_statuses"][0]["protocol"],
             json!("vless")
