@@ -8,7 +8,7 @@ use crate::core_control::KeliCoreResponse;
 use crate::health::{build_machine_status_payload, HealthReportInput};
 use crate::logging;
 use crate::machine::{MachineStatusPayload, MachineStatusResponse, MachineUpgradeCommand};
-use crate::panel::types::UserInfo;
+use crate::panel::types::{NodeInfo, Protocol, UserInfo};
 use crate::panel::PanelClient;
 use crate::port_forward::{
     inspect_hysteria_port_forward, repair_hysteria_port_forward, HysteriaPortForwardStatus,
@@ -130,7 +130,11 @@ where
     } else {
         inspect_hysteria_port_forward(&plan.node_infos, port_forward_executor)
     };
-    log_hy2_port_forward_status(&hy2_port_forward, options.repair_port_forward);
+    log_hy2_port_forward_status(
+        &hy2_port_forward,
+        options.repair_port_forward,
+        &plan.node_infos,
+    );
 
     let mut report_plan = plan.clone();
     report_plan.hy2_port_forward = hy2_port_forward.clone();
@@ -153,15 +157,23 @@ where
     })
 }
 
-fn log_hy2_port_forward_status(status: &HysteriaPortForwardStatus, repaired: bool) {
+fn log_hy2_port_forward_status(
+    status: &HysteriaPortForwardStatus,
+    repaired: bool,
+    infos: &[NodeInfo],
+) {
     if !status.enabled {
         return;
     }
-    if status.expected_rules.is_empty() && status.errors.is_empty() {
+    let hy2_nodes = infos
+        .iter()
+        .filter(|info| matches!(info.protocol, Protocol::Hysteria2))
+        .count();
+    if hy2_nodes == 0 && status.expected_rules.is_empty() && status.errors.is_empty() {
         return;
     }
 
-    let summary = hy2_port_forward_summary(status, repaired);
+    let summary = hy2_port_forward_summary(status, repaired, infos);
     if status.errors.is_empty() && total_hy2_missing_rules(status) == 0 {
         logging::info("rules", summary);
     } else {
@@ -169,7 +181,11 @@ fn log_hy2_port_forward_status(status: &HysteriaPortForwardStatus, repaired: boo
     }
 }
 
-fn hy2_port_forward_summary(status: &HysteriaPortForwardStatus, repaired: bool) -> String {
+fn hy2_port_forward_summary(
+    status: &HysteriaPortForwardStatus,
+    repaired: bool,
+    infos: &[NodeInfo],
+) -> String {
     let tool_summary = status
         .tools
         .iter()
@@ -196,21 +212,52 @@ fn hy2_port_forward_summary(status: &HysteriaPortForwardStatus, repaired: bool) 
         .first()
         .map(|rule| rule.spec.as_str())
         .unwrap_or("-");
+    let hy2_node_summary = hy2_port_forward_node_summary(infos);
+    let tool_display = if tool_summary.is_empty() {
+        "-"
+    } else {
+        tool_summary.as_str()
+    };
 
     format!(
-        "hy2 port-forward {} root={} expected={} missing={} errors={} first_rule={} tools={}",
+        "hy2 port-forward {} root={} expected={} missing={} errors={} first_rule={} nodes={} tools={}",
         if repaired { "repair" } else { "inspect" },
         status.running_as_root,
         status.expected_rules.len(),
         total_hy2_missing_rules(status),
         status.errors.len(),
         first_rule,
-        if tool_summary.is_empty() {
-            "-"
-        } else {
-            tool_summary.as_str()
-        }
+        hy2_node_summary,
+        tool_display
     )
+}
+
+fn hy2_port_forward_node_summary(infos: &[NodeInfo]) -> String {
+    let nodes = infos
+        .iter()
+        .filter(|info| matches!(info.protocol, Protocol::Hysteria2))
+        .map(|info| {
+            let port = info.common.port.0.trim();
+            let ports = info.common.ports.0.trim();
+            let external = if !port.is_empty() {
+                port
+            } else if !ports.is_empty() {
+                ports
+            } else {
+                "-"
+            };
+            format!(
+                "{}:server_port={} external={}",
+                info.id, info.common.server_port, external
+            )
+        })
+        .collect::<Vec<_>>();
+
+    if nodes.is_empty() {
+        "-".to_string()
+    } else {
+        nodes.join(",")
+    }
 }
 
 fn total_hy2_missing_rules(status: &HysteriaPortForwardStatus) -> usize {
@@ -669,13 +716,34 @@ mod tests {
             }],
             errors: Vec::new(),
         };
-        let summary = hy2_port_forward_summary(&status, false);
+        let mut node = test_node("hysteria2", 8);
+        node.common.server_port = 10088;
+        node.common.port.0 = "32000-32010".to_string();
+        let summary = hy2_port_forward_summary(&status, false, &[node]);
 
         assert!(summary.contains("hy2 port-forward inspect"));
         assert!(summary.contains("expected=1"));
         assert!(summary.contains("missing=1"));
         assert!(summary.contains("--dport 32000:32010"));
         assert!(summary.contains("--to-ports 10088"));
+        assert!(summary.contains("8:server_port=10088 external=32000-32010"));
+    }
+
+    #[test]
+    fn hy2_port_forward_summary_reports_direct_server_port_when_no_rules_exist() {
+        let status = HysteriaPortForwardStatus {
+            enabled: true,
+            running_as_root: true,
+            ..HysteriaPortForwardStatus::default()
+        };
+        let mut node = test_node("hysteria2", 8);
+        node.common.server_port = 10088;
+        let summary = hy2_port_forward_summary(&status, true, &[node]);
+
+        assert!(summary.contains("hy2 port-forward repair"));
+        assert!(summary.contains("expected=0"));
+        assert!(summary.contains("first_rule=-"));
+        assert!(summary.contains("8:server_port=10088 external=-"));
     }
 
     #[test]
