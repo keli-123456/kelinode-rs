@@ -452,7 +452,10 @@ pub fn execute_reconcile_port_forward_tool<E: PortForwardExecutor>(
         .command_output(&command(tool, vec!["-t", "nat", "-S", "PREROUTING"]))
         .unwrap_or_default();
     let chain_exists = executor
-        .command_output(&command(tool, vec!["-t", "nat", "-S", HYSTERIA_PORT_FORWARD_CHAIN]))
+        .command_output(&command(
+            tool,
+            vec!["-t", "nat", "-S", HYSTERIA_PORT_FORWARD_CHAIN],
+        ))
         .is_ok();
     execute_port_forward_commands(
         executor,
@@ -468,7 +471,10 @@ pub fn execute_cleanup_port_forward_tool<E: PortForwardExecutor>(
         .command_output(&command(tool, vec!["-t", "nat", "-S", "PREROUTING"]))
         .unwrap_or_default();
     let chain_exists = executor
-        .command_output(&command(tool, vec!["-t", "nat", "-S", HYSTERIA_PORT_FORWARD_CHAIN]))
+        .command_output(&command(
+            tool,
+            vec!["-t", "nat", "-S", HYSTERIA_PORT_FORWARD_CHAIN],
+        ))
         .is_ok();
     execute_port_forward_commands(
         executor,

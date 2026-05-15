@@ -814,13 +814,11 @@ mod tests {
             "/tmp/a.yml"
         );
         assert_eq!(
-            config_path_from_args(vec!["-c=/tmp/b.yml".to_string()], DEFAULT_CONFIG_FILE,)
-                .unwrap(),
+            config_path_from_args(vec!["-c=/tmp/b.yml".to_string()], DEFAULT_CONFIG_FILE,).unwrap(),
             "/tmp/b.yml"
         );
         assert_eq!(
-            config_path_from_args(vec!["/tmp/c.yml".to_string()], DEFAULT_CONFIG_FILE,)
-                .unwrap(),
+            config_path_from_args(vec!["/tmp/c.yml".to_string()], DEFAULT_CONFIG_FILE,).unwrap(),
             "/tmp/c.yml"
         );
     }
