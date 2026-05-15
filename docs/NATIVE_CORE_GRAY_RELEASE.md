@@ -53,9 +53,9 @@ sudo ./install.sh
 sudo kelinode server --config /etc/kelinode/config.yml
 ```
 
-`v2node server` is kept only as a compatibility alias for old operator habits. The native package
-installs the `kelinode` binary under `/usr/local/kelinode/kelinode`, creates `/usr/local/bin/kelinode`,
-and also creates `/usr/local/bin/v2node` as a legacy symlink to the same native binary.
+The native package installs the `kelinode` binary under `/usr/local/kelinode/kelinode` and creates
+`/usr/local/bin/kelinode`. It does not create a `v2node` command alias, so it will not overwrite an
+existing Go `v2node` command on mixed or rollback machines.
 
 For Docker gray releases, build the image from the `kelinode-rs` repository:
 

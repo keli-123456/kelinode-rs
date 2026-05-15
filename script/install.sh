@@ -25,7 +25,7 @@ LOCK_DIR="/tmp/keli-native-node-install.lock"
 usage() {
     cat <<'EOF'
 Usage:
-  install.sh [install] [--version v0.1.45] --machine-url URL --machine-id ID --machine-token TOKEN [--machine-name NAME]
+  install.sh [install] [--version v0.1.46] --machine-url URL --machine-id ID --machine-token TOKEN [--machine-name NAME]
   install.sh uninstall [--purge-config]
 
 Options:

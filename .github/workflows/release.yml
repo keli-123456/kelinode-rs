@@ -151,7 +151,6 @@ jobs:
           cp bin/kelinode "$install_dir/kelinode"
           chmod +x "$install_dir/kelinode"
           ln -sf "$install_dir/kelinode" /usr/local/bin/kelinode
-          ln -sf "$install_dir/kelinode" /usr/local/bin/v2node
           echo "Installed Keli native node to $install_dir"
           echo "Run: $install_dir/kelinode server --config /etc/kelinode/config.yml"
           SH
