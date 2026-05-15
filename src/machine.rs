@@ -276,6 +276,9 @@ pub fn resolve_machine_profiles(
             summary.subscription_proxy_only = true;
             return Ok(summary);
         }
+        if successes > 0 {
+            return Ok(summary);
+        }
         if !summary.failures.is_empty() {
             let details = summary
                 .failures
@@ -936,6 +939,30 @@ mod tests {
         assert!(summary.nodes.is_empty());
         assert!(summary.subscription_proxy_only);
         assert_eq!(summary.agent.subscription_proxy.profiles.len(), 1);
+    }
+
+    #[test]
+    fn allows_empty_machine_response_to_unload_nodes() {
+        let profile = MachineProfileConfig {
+            name: "offline".to_string(),
+            url: "https://panel.example.test".to_string(),
+            token: "token".to_string(),
+            machine_id: 7,
+            ..MachineProfileConfig::default()
+        };
+
+        let summary = resolve_machine_profiles(
+            vec![MachineProfileInput {
+                profile,
+                result: Ok(MachineNodesResponse::default()),
+            }],
+            true,
+        )
+        .unwrap();
+
+        assert!(summary.nodes.is_empty());
+        assert!(!summary.subscription_proxy_only);
+        assert!(summary.failures.is_empty());
     }
 
     fn machine_response(node_id: u32, site_id: &str) -> MachineNodesResponse {

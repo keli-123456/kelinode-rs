@@ -91,6 +91,10 @@ where
     let mut core_process = None;
     let mut sidecar_processes = Vec::new();
 
+    if options.start_core {
+        stop_unmanaged_core_processes(plan, process_supervisor, &options)?;
+    }
+
     if let Some(core_plan) = &plan.core_plan {
         let write_result = write_core_config(core_plan).map_err(|err| err.message)?;
         if options.start_core {
@@ -242,6 +246,72 @@ impl HotApplyError {
             fallback_reload: false,
         }
     }
+}
+
+fn stop_unmanaged_core_processes<P>(
+    plan: &RuntimeBootstrapPlan,
+    process_supervisor: &mut P,
+    options: &RuntimeControlOptions,
+) -> Result<(), String>
+where
+    P: ProcessSupervisor,
+{
+    let active_primary = plan
+        .core_plan
+        .as_ref()
+        .and_then(|core_plan| primary_core_process_name(&core_plan.kind));
+    for name in PRIMARY_CORE_PROCESS_NAMES {
+        if Some(*name) == active_primary {
+            continue;
+        }
+        stop_if_running(process_supervisor, name)?;
+    }
+
+    let active_sidecars = plan
+        .sidecar_core_plans
+        .iter()
+        .filter_map(|sidecar_plan| match &sidecar_plan.kind {
+            CoreKind::Sidecar(name) => Some(format!("core:sidecar-{name}")),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    for name in options.sidecar_processes.keys() {
+        let process_name = format!("core:sidecar-{name}");
+        if active_sidecars.iter().any(|active| active == &process_name) {
+            continue;
+        }
+        stop_if_running(process_supervisor, &process_name)?;
+    }
+
+    Ok(())
+}
+
+const PRIMARY_CORE_PROCESS_NAMES: &[&str] = &[
+    "core:xray",
+    "core:sing-box",
+    "core:mihomo",
+    "core:keli-core-rs",
+];
+
+fn primary_core_process_name(kind: &CoreKind) -> Option<&'static str> {
+    match kind {
+        CoreKind::Xray => Some("core:xray"),
+        CoreKind::SingBox => Some("core:sing-box"),
+        CoreKind::Mihomo => Some("core:mihomo"),
+        CoreKind::KeliCoreRs => Some("core:keli-core-rs"),
+        CoreKind::Sidecar(_) => None,
+    }
+}
+
+fn stop_if_running<P>(process_supervisor: &mut P, name: &str) -> Result<(), String>
+where
+    P: ProcessSupervisor,
+{
+    let status = process_supervisor.status(name).map_err(|err| err.message)?;
+    if status.is_running() {
+        process_supervisor.stop(name).map_err(|err| err.message)?;
+    }
+    Ok(())
 }
 
 fn configured_sidecar_process<'a>(
@@ -441,7 +511,9 @@ mod tests {
     use crate::panel::client::{PanelClient, PanelClientOptions};
     use crate::panel::types::{CommonNode, NodeInfo, UserInfo};
     use crate::port_forward::{PortForwardCommand, PortForwardExecutor};
-    use crate::process::{keli_core_rs_control_addr, MemoryProcessSupervisor};
+    use crate::process::{
+        keli_core_rs_control_addr, MemoryProcessSupervisor, ProcessSpec, ProcessSupervisor,
+    };
     use crate::runtime::{
         build_runtime_bootstrap_plan, build_runtime_bootstrap_plan_with_users, RuntimeBootstrapPlan,
     };
@@ -761,6 +833,50 @@ mod tests {
         assert!(result.core_process.is_none());
         assert!(process.starts.is_empty());
         assert_eq!(result.machine_status.machine_id, 9);
+    }
+
+    #[test]
+    fn machine_empty_plan_stops_stale_primary_core() {
+        let resolved = ResolvedConfig {
+            kernel: Default::default(),
+            realtime: Default::default(),
+            machine: ResolvedMachineConfig {
+                enabled: true,
+                continue_on_error: true,
+                profiles: Vec::new(),
+            },
+            agent: Default::default(),
+            nodes: Vec::new(),
+        };
+        let plan = build_runtime_bootstrap_plan(resolved, Vec::new(), Vec::new()).unwrap();
+        let mut process = MemoryProcessSupervisor::default();
+        process
+            .start(&ProcessSpec {
+                name: "core:keli-core-rs".to_string(),
+                command: "keli-core-rs".to_string(),
+                args: Vec::new(),
+                working_dir: None,
+                env: BTreeMap::new(),
+            })
+            .unwrap();
+        let mut port_forward = FakePortForwardExecutor::default();
+
+        let result = apply_runtime_plan(
+            &plan,
+            &mut process,
+            &mut port_forward,
+            RuntimeControlOptions {
+                machine_id: 9,
+                start_core: true,
+                repair_port_forward: false,
+                ..RuntimeControlOptions::default()
+            },
+        )
+        .unwrap();
+
+        assert!(result.core_config.is_none());
+        assert!(result.core_process.is_none());
+        assert_eq!(process.stops, vec!["core:keli-core-rs"]);
     }
 
     #[test]
