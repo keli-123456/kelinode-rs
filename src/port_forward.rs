@@ -381,16 +381,19 @@ pub fn reconcile_port_forward_commands(
     tool: &str,
     rules: &[PortForwardRule],
     prerouting_output: &str,
+    chain_exists: bool,
 ) -> Vec<PortForwardCommand> {
     let mut commands = delete_port_forward_commands(tool, prerouting_output);
-    commands.push(command(
-        tool,
-        vec!["-t", "nat", "-F", HYSTERIA_PORT_FORWARD_CHAIN],
-    ));
-    commands.push(command(
-        tool,
-        vec!["-t", "nat", "-X", HYSTERIA_PORT_FORWARD_CHAIN],
-    ));
+    if chain_exists {
+        commands.push(command(
+            tool,
+            vec!["-t", "nat", "-F", HYSTERIA_PORT_FORWARD_CHAIN],
+        ));
+        commands.push(command(
+            tool,
+            vec!["-t", "nat", "-X", HYSTERIA_PORT_FORWARD_CHAIN],
+        ));
+    }
 
     for rule in rules {
         let mut args = vec!["-t", "nat", "-A", "PREROUTING", "-p", "udp"]
@@ -424,16 +427,19 @@ pub fn reconcile_port_forward_commands(
 pub fn cleanup_port_forward_commands(
     tool: &str,
     prerouting_output: &str,
+    chain_exists: bool,
 ) -> Vec<PortForwardCommand> {
     let mut commands = delete_port_forward_commands(tool, prerouting_output);
-    commands.push(command(
-        tool,
-        vec!["-t", "nat", "-F", HYSTERIA_PORT_FORWARD_CHAIN],
-    ));
-    commands.push(command(
-        tool,
-        vec!["-t", "nat", "-X", HYSTERIA_PORT_FORWARD_CHAIN],
-    ));
+    if chain_exists {
+        commands.push(command(
+            tool,
+            vec!["-t", "nat", "-F", HYSTERIA_PORT_FORWARD_CHAIN],
+        ));
+        commands.push(command(
+            tool,
+            vec!["-t", "nat", "-X", HYSTERIA_PORT_FORWARD_CHAIN],
+        ));
+    }
     commands
 }
 
@@ -445,9 +451,12 @@ pub fn execute_reconcile_port_forward_tool<E: PortForwardExecutor>(
     let prerouting_output = executor
         .command_output(&command(tool, vec!["-t", "nat", "-S", "PREROUTING"]))
         .unwrap_or_default();
+    let chain_exists = executor
+        .command_output(&command(tool, vec!["-t", "nat", "-S", HYSTERIA_PORT_FORWARD_CHAIN]))
+        .is_ok();
     execute_port_forward_commands(
         executor,
-        &reconcile_port_forward_commands(tool, rules, &prerouting_output),
+        &reconcile_port_forward_commands(tool, rules, &prerouting_output, chain_exists),
     )
 }
 
@@ -458,9 +467,12 @@ pub fn execute_cleanup_port_forward_tool<E: PortForwardExecutor>(
     let prerouting_output = executor
         .command_output(&command(tool, vec!["-t", "nat", "-S", "PREROUTING"]))
         .unwrap_or_default();
+    let chain_exists = executor
+        .command_output(&command(tool, vec!["-t", "nat", "-S", HYSTERIA_PORT_FORWARD_CHAIN]))
+        .is_ok();
     execute_port_forward_commands(
         executor,
-        &cleanup_port_forward_commands(tool, &prerouting_output),
+        &cleanup_port_forward_commands(tool, &prerouting_output, chain_exists),
     )
 }
 
@@ -1169,7 +1181,7 @@ mod tests {
         ]
         .join("\n");
 
-        let commands = reconcile_port_forward_commands("iptables", &rules, &output);
+        let commands = reconcile_port_forward_commands("iptables", &rules, &output, true);
         let got = commands
             .iter()
             .map(|command| {
@@ -1265,6 +1277,44 @@ mod tests {
                 "8443",
             ],
         ]);
+
+        assert_eq!(got, want);
+    }
+
+    #[test]
+    fn reconcile_commands_skip_missing_stale_chain_cleanup() {
+        let infos = vec![node(1, 443, "30000-30002", "")];
+        let (rules, errors) = build_hysteria_port_forward_rules(&infos);
+        assert!(errors.is_empty());
+
+        let commands = reconcile_port_forward_commands("iptables", &rules, "", false);
+        let got = commands
+            .iter()
+            .map(|command| {
+                let mut row = vec![command.tool.clone()];
+                row.extend(command.args.clone());
+                row
+            })
+            .collect::<Vec<_>>();
+        let want = string_rows(vec![vec![
+            "iptables",
+            "-t",
+            "nat",
+            "-A",
+            "PREROUTING",
+            "-p",
+            "udp",
+            "--dport",
+            "30000:30002",
+            "-m",
+            "comment",
+            "--comment",
+            "V2NODE-HY2",
+            "-j",
+            "REDIRECT",
+            "--to-ports",
+            "443",
+        ]]);
 
         assert_eq!(got, want);
     }
