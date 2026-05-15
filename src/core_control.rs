@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 pub const KELI_CORE_CONTROL_TOKEN_ENV: &str = "KELI_CORE_CONTROL_TOKEN";
+pub const KELI_CORE_APPLY_CONTROL_TIMEOUT: Duration = Duration::from_secs(120);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct KeliCoreControlClient {

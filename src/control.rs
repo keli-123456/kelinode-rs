@@ -4,7 +4,7 @@ use crate::config::SidecarProcessConfig;
 use crate::core::{
     render_core_config, write_core_config, CoreConfigWriteResult, CoreKind, CorePlan,
 };
-use crate::core_control::KeliCoreResponse;
+use crate::core_control::{KeliCoreResponse, KELI_CORE_APPLY_CONTROL_TIMEOUT};
 use crate::health::{build_machine_status_payload, HealthReportInput};
 use crate::logging;
 use crate::machine::{MachineStatusPayload, MachineStatusResponse, MachineUpgradeCommand};
@@ -328,7 +328,8 @@ where
 
     let config = render_core_config(core_plan).map_err(|err| HotApplyError::fatal(err.message))?;
     let client = keli_core_rs_control_client(&core_plan.config_path)
-        .map_err(|err| HotApplyError::fallback(err.message))?;
+        .map_err(|err| HotApplyError::fallback(err.message))?
+        .with_timeout(KELI_CORE_APPLY_CONTROL_TIMEOUT);
     match client.apply_config_response(config) {
         Ok(KeliCoreResponse::Applied { decision, .. }) => {
             let mut status = current;

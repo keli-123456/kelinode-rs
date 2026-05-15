@@ -9,6 +9,7 @@ use crate::control::{
     RuntimeControlOptions, RuntimeLoopSignal, RuntimeTickOptions,
 };
 use crate::core::CoreKind;
+use crate::core_control::KELI_CORE_APPLY_CONTROL_TIMEOUT;
 use crate::health::ResourceSnapshot;
 use crate::logging;
 use crate::panel::client::{PanelClient, PanelClientOptions};
@@ -554,7 +555,7 @@ fn try_apply_keli_core_rs_user_deltas(
     }
 
     let client = match keli_core_rs_control_client(&core_plan.config_path) {
-        Ok(client) => client,
+        Ok(client) => client.with_timeout(KELI_CORE_APPLY_CONTROL_TIMEOUT),
         Err(_) => return false,
     };
     for node_tag in users_by_node_tag.keys() {
@@ -617,7 +618,7 @@ fn try_establish_keli_core_rs_revision_baseline(
         return false;
     }
     let client = match keli_core_rs_control_client(&core_plan.config_path) {
-        Ok(client) => client,
+        Ok(client) => client.with_timeout(KELI_CORE_APPLY_CONTROL_TIMEOUT),
         Err(error) => {
             logging::warn(
                 "core",
