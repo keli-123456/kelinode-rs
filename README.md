@@ -142,6 +142,10 @@ agent process. The package keeps the old Go-compatible entry name as the only sh
 bin/v2node
 ```
 
+Linux release packages are built as static `x86_64-unknown-linux-musl` binaries under the
+`linux-x86_64` asset name. They do not depend on the host glibc version, which keeps binary installs
+compatible with older distributions.
+
 After extracting the release package on Linux:
 
 ```bash

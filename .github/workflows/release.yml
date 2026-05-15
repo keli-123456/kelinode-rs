@@ -50,6 +50,12 @@ jobs:
         run: |
           rustup toolchain install stable --profile minimal
           rustup default stable
+          rustup target add x86_64-unknown-linux-musl
+
+      - name: Install Linux compatibility toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools file
 
       - name: Resolve release metadata
         id: meta
@@ -91,7 +97,23 @@ jobs:
 
       - name: Build embedded native node binary
         working-directory: kelinode-rs
-        run: cargo build --release --locked --features embedded-core
+        env:
+          CC_x86_64_unknown_linux_musl: musl-gcc
+        run: cargo build --release --locked --features embedded-core --target x86_64-unknown-linux-musl
+
+      - name: Verify Linux binary compatibility
+        working-directory: kelinode-rs
+        run: |
+          set -euo pipefail
+          file target/x86_64-unknown-linux-musl/release/kelinode-rs
+          ldd_output="$(ldd target/x86_64-unknown-linux-musl/release/kelinode-rs 2>&1 || true)"
+          if printf '%s\n' "$ldd_output" | grep -Eq 'not a dynamic executable|statically linked'; then
+            echo "Static musl binary verified."
+          else
+            echo "Expected a static musl binary; ldd output:" >&2
+            printf '%s\n' "$ldd_output" >&2
+            exit 1
+          fi
 
       - name: Package native node artifact
         shell: bash
@@ -101,7 +123,7 @@ jobs:
           version="${{ steps.meta.outputs.version }}"
           name="${{ steps.meta.outputs.asset_prefix }}"
           mkdir -p "dist/${name}/bin" "dist/${name}/docs"
-          cp target/release/kelinode-rs "dist/${name}/bin/v2node"
+          cp target/x86_64-unknown-linux-musl/release/kelinode-rs "dist/${name}/bin/v2node"
           cp README.md "dist/${name}/"
           cp docs/CONTRACT.md "dist/${name}/CONTRACT.md"
           cp docs/NATIVE_CORE_PARITY.md "dist/${name}/NATIVE_CORE_PARITY.md"

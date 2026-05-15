@@ -21,7 +21,7 @@ LOCK_DIR="/tmp/keli-native-node-install.lock"
 usage() {
     cat <<'EOF'
 Usage:
-  install.sh [install] [--version v0.1.31] --machine-url URL --machine-id ID --machine-token TOKEN [--machine-name NAME]
+  install.sh [install] [--version v0.1.32] --machine-url URL --machine-id ID --machine-token TOKEN [--machine-name NAME]
   install.sh uninstall [--purge-config]
 
 Options:
@@ -345,6 +345,17 @@ install_native_node() {
     (cd "$WORK_DIR" && sh ./install.sh "$INSTALL_DIR")
 }
 
+verify_installed_binary() {
+    if "${INSTALL_DIR}/v2node" version >/dev/null 2>&1; then
+        return
+    fi
+
+    echo -e "${red}Installed binary cannot run on this system.${plain}" >&2
+    echo -e "${yellow}If the error mentions GLIBC, install v0.1.32 or newer so the static Linux binary is used.${plain}" >&2
+    "${INSTALL_DIR}/v2node" version 2>&1 || true
+    exit 1
+}
+
 WORK_DIR=""
 
 main() {
@@ -371,6 +382,7 @@ main() {
     fi
 
     install_native_node "$version" "$target"
+    verify_installed_binary
     write_machine_config
     install_service
 

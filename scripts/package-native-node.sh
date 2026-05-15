@@ -6,9 +6,11 @@ AGENT_DIR="${KELINODE_RS_DIR:-$(CDPATH= cd -- "${SCRIPT_DIR}/.." && pwd)}"
 CORE_DIR="${KELI_CORE_RS_DIR:-$(CDPATH= cd -- "${AGENT_DIR}/../keli-core-rs" && pwd)}"
 VERSION="${VERSION:-$(sed -n 's/^version = "\(.*\)"/\1/p' "${AGENT_DIR}/Cargo.toml" | head -n 1)}"
 TARGET_NAME="${TARGET_NAME:-linux-x86_64}"
+BUILD_TARGET="${BUILD_TARGET:-x86_64-unknown-linux-musl}"
 DIST_ROOT="${DIST_ROOT:-${AGENT_DIR}/dist}"
 PACKAGE_NAME="keli-native-node-v${VERSION}-${TARGET_NAME}"
 PACKAGE_DIR="${DIST_ROOT}/${PACKAGE_NAME}"
+TARGET_DIR="${AGENT_DIR}/target/${BUILD_TARGET}/release"
 
 if [ ! -f "${CORE_DIR}/Cargo.toml" ]; then
 	echo "keli-core-rs source not found at ${CORE_DIR}; set KELI_CORE_RS_DIR." >&2
@@ -17,12 +19,18 @@ fi
 
 cargo test --manifest-path "${CORE_DIR}/Cargo.toml" --locked --all-targets -- --test-threads=1
 cargo test --manifest-path "${AGENT_DIR}/Cargo.toml" --locked --all-targets --features embedded-core -- --test-threads=1
-cargo build --manifest-path "${AGENT_DIR}/Cargo.toml" --release --locked --features embedded-core
+rustup target add "${BUILD_TARGET}" >/dev/null 2>&1 || true
+if [ "${BUILD_TARGET}" = "x86_64-unknown-linux-musl" ] && command -v musl-gcc >/dev/null 2>&1; then
+	CC_x86_64_unknown_linux_musl="${CC_x86_64_unknown_linux_musl:-musl-gcc}" \
+		cargo build --manifest-path "${AGENT_DIR}/Cargo.toml" --release --locked --features embedded-core --target "${BUILD_TARGET}"
+else
+	cargo build --manifest-path "${AGENT_DIR}/Cargo.toml" --release --locked --features embedded-core --target "${BUILD_TARGET}"
+fi
 
 rm -rf "${PACKAGE_DIR}"
 mkdir -p "${PACKAGE_DIR}/bin" "${PACKAGE_DIR}/docs"
 
-cp "${AGENT_DIR}/target/release/kelinode-rs" "${PACKAGE_DIR}/bin/v2node"
+cp "${TARGET_DIR}/kelinode-rs" "${PACKAGE_DIR}/bin/v2node"
 cp "${AGENT_DIR}/README.md" "${PACKAGE_DIR}/README.md"
 cp "${AGENT_DIR}/docs/CONTRACT.md" "${PACKAGE_DIR}/docs/CONTRACT.md"
 cp "${AGENT_DIR}/docs/NATIVE_CORE_GRAY_RELEASE.md" "${PACKAGE_DIR}/docs/NATIVE_CORE_GRAY_RELEASE.md"
