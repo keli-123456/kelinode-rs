@@ -226,16 +226,25 @@ When `V2NODE_NODE_ID` is present, the entrypoint asks the panel for the configur
 and downloads the files there. In machine or multi-node mode, pass explicit
 `V2NODE_TLS_CERT_FILE` and `V2NODE_TLS_KEY_FILE`, or mount the certificate directory directly.
 
-For native `geoip:` and `geosite:` route rules, place optional text rule files next to the generated core config:
+For native `geoip:` and `geosite:` route rules, the one-click installer downloads common text
+rule files into the generated core config directory by default. Use `--skip-geo-rules` if the
+server cannot access GitHub raw content, or set `KELI_GEOSITE_RULES`, `KELI_GEOIP_RULES`,
+`KELI_GEOSITE_SOURCE_BASE`, and `KELI_GEOIP_SOURCE_BASE` before running the installer to use a
+custom mirror/list.
+
+Rule files live next to the generated core config:
 
 ```text
 /etc/v2node/geoip/<rule>.txt
 /etc/v2node/geosite/<rule>.txt
 ```
 
-For example, `geosite:openai` reads `/etc/v2node/geosite/openai.txt` when that file exists. Multi-node deployments that use per-node config directories keep their rule files under each node's generated config directory.
-Built-in `geoip:private` and `geosite:private` work without files. External `.dat` files from Xray
-are not parsed by the native Rust core; use one text file per rule group for native gray releases.
+For example, `geosite:apple` reads `/etc/v2node/geosite/apple.txt` and recursively follows
+`include:` lines when those included rule files are present. Multi-node deployments that use
+per-node config directories keep their rule files under each node's generated config directory.
+Built-in `geoip:private`, `geosite:private`, and a small set of common domains such as
+`geosite:apple` work without files. External `.dat` files from Xray are not parsed by the native
+Rust core; use one text file per rule group for native gray releases.
 For Docker, mount those folders together with `/etc/v2node` or a custom `kernel.config_dir`.
 
 ## Sidecar Process Example

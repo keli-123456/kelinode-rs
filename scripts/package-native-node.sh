@@ -59,6 +59,7 @@ install_dir="${1:-/usr/local/v2node}"
 mkdir -p "$install_dir" /etc/v2node /usr/local/bin
 cp bin/v2node "$install_dir/v2node"
 chmod +x "$install_dir/v2node"
+mkdir -p /etc/v2node/geoip /etc/v2node/geosite
 ln -sf "$install_dir/v2node" /usr/local/bin/v2node
 echo "Installed Keli native node to $install_dir"
 echo "Run: $install_dir/v2node server --config /etc/v2node/config.yml"

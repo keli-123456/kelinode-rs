@@ -76,8 +76,12 @@ clearly malformed, the agent generates a self-signed fallback certificate using 
 domain before writing the core config. Treat that as a startup safety net only; widening gray traffic
 should still require trusted certificates to be mounted or downloaded successfully.
 
-Native `geoip:` and `geosite:` rules read optional text files from `geoip/<rule>.txt` and
-`geosite/<rule>.txt` below `kernel.config_dir`. Built-in private rules work without files. Xray
+Native `geoip:` and `geosite:` rules read text files from `geoip/<rule>.txt` and
+`geosite/<rule>.txt` below `kernel.config_dir`. The one-click installer downloads common rule
+groups by default, including `geosite:apple` and `geoip:cn`; use `--skip-geo-rules` or the
+`KELI_GEOSITE_RULES` / `KELI_GEOIP_RULES` environment variables to customize that bootstrap. The
+native core follows v2fly-style `include:` lines and strips attributes such as `@cn` from geosite
+text files. Built-in private rules and a small common-domain fallback work without files. Xray
 `.dat` files are not parsed by the native Rust core.
 
 Recommended rollout:

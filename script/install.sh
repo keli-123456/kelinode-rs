@@ -16,6 +16,7 @@ MACHINE_TOKEN_ARG=""
 MACHINE_NAME_ARG=""
 ACTION="install"
 PURGE_CONFIG="false"
+SKIP_GEO_RULES="false"
 LOCK_DIR="/tmp/keli-native-node-install.lock"
 
 usage() {
@@ -30,6 +31,7 @@ Options:
   --machine-id ID         server machine ID.
   --machine-token TOKEN   server machine token.
   --machine-name NAME     local profile name.
+  --skip-geo-rules        do not download default geoip/geosite text route rules.
   --purge-config          uninstall only: also remove /etc/v2node.
 EOF
 }
@@ -56,6 +58,8 @@ parse_args() {
                 MACHINE_TOKEN_ARG="${2:-}"; shift 2 ;;
             --machine-name)
                 MACHINE_NAME_ARG="${2:-}"; shift 2 ;;
+            --skip-geo-rules)
+                SKIP_GEO_RULES="true"; shift ;;
             --purge-config)
                 PURGE_CONFIG="true"; shift ;;
             --uninstall|--remove)
@@ -206,6 +210,81 @@ write_machine_config() {
     } > "$CONFIG_FILE"
     chmod 600 "$CONFIG_FILE" 2>/dev/null || true
     echo -e "${green}Wrote ${CONFIG_FILE}${plain}"
+}
+
+geo_rule_safe_name() {
+    [[ "$1" =~ ^[A-Za-z0-9._-]+$ ]]
+}
+
+GEOSITE_DOWNLOADED=" "
+
+download_geosite_rule() {
+    local rule="$1"
+    local base="${KELI_GEOSITE_SOURCE_BASE:-https://raw.githubusercontent.com/v2fly/domain-list-community/master/data}"
+    local target_dir="${CONFIG_DIR}/geosite"
+    local target="${target_dir}/${rule}.txt"
+    local tmp="${target}.tmp"
+
+    geo_rule_safe_name "$rule" || return 0
+    case "$GEOSITE_DOWNLOADED" in
+        *" ${rule} "*) return 0 ;;
+    esac
+    GEOSITE_DOWNLOADED="${GEOSITE_DOWNLOADED}${rule} "
+
+    if ! curl -fsSL --retry 2 --connect-timeout 10 "${base}/${rule}" -o "$tmp"; then
+        rm -f "$tmp"
+        echo -e "${yellow}Warning: failed to download geosite:${rule}; route will rely on built-ins or existing files.${plain}" >&2
+        return 0
+    fi
+    mv "$tmp" "$target"
+
+    local line clean include
+    while IFS= read -r line; do
+        clean="${line%%#*}"
+        clean="${clean#"${clean%%[![:space:]]*}"}"
+        clean="${clean%%[[:space:]]*}"
+        if [[ "$clean" == include:* ]]; then
+            include="${clean#include:}"
+            geo_rule_safe_name "$include" && download_geosite_rule "$include"
+        fi
+    done < "$target"
+}
+
+download_geoip_rule() {
+    local rule="$1"
+    local base="${KELI_GEOIP_SOURCE_BASE:-https://raw.githubusercontent.com/Loyalsoldier/geoip/release/text}"
+    local target_dir="${CONFIG_DIR}/geoip"
+    local target="${target_dir}/${rule}.txt"
+    local tmp="${target}.tmp"
+
+    geo_rule_safe_name "$rule" || return 0
+    if ! curl -fsSL --retry 2 --connect-timeout 10 "${base}/${rule}.txt" -o "$tmp"; then
+        rm -f "$tmp"
+        echo -e "${yellow}Warning: failed to download geoip:${rule}; route will rely on built-ins or existing files.${plain}" >&2
+        return 0
+    fi
+    mv "$tmp" "$target"
+}
+
+download_geo_route_rules() {
+    if [[ "$SKIP_GEO_RULES" == "true" ]]; then
+        echo -e "${yellow}Skipping geoip/geosite route rule download.${plain}"
+        return
+    fi
+
+    mkdir -p "${CONFIG_DIR}/geoip" "${CONFIG_DIR}/geosite"
+
+    local rule
+    local geosite_rules="${KELI_GEOSITE_RULES:-apple google openai telegram netflix microsoft github youtube}"
+    local geoip_rules="${KELI_GEOIP_RULES:-cn private}"
+
+    echo -e "${green}Downloading geoip/geosite text route rules...${plain}"
+    for rule in $geosite_rules; do
+        download_geosite_rule "$rule"
+    done
+    for rule in $geoip_rules; do
+        download_geoip_rule "$rule"
+    done
 }
 
 stop_existing_service() {
@@ -384,6 +463,7 @@ main() {
     install_native_node "$version" "$target"
     verify_installed_binary
     write_machine_config
+    download_geo_route_rules
     install_service
 
     echo "------------------------------------------"
