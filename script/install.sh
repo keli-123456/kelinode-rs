@@ -22,7 +22,7 @@ LOCK_DIR="/tmp/keli-native-node-install.lock"
 usage() {
     cat <<'EOF'
 Usage:
-  install.sh [install] [--version v0.1.39] --machine-url URL --machine-id ID --machine-token TOKEN [--machine-name NAME]
+  install.sh [install] [--version v0.1.40] --machine-url URL --machine-id ID --machine-token TOKEN [--machine-name NAME]
   install.sh uninstall [--purge-config]
 
 Options:
@@ -278,12 +278,16 @@ ensure_native_kernel_config() {
                 next
             }
             if (in_kernel && $0 ~ /^[[:space:]]{2}type:[[:space:]]*/) {
-                print "  type: keli-core-rs"
+                if (!saw_kernel_type) {
+                    print "  type: keli-core-rs"
+                }
                 saw_kernel_type = 1
                 next
             }
             if (in_kernel && $0 ~ /^[[:space:]]{2}config_dir:[[:space:]]*/) {
-                print "  config_dir: " config_dir
+                if (!saw_kernel_config_dir) {
+                    print "  config_dir: " config_dir
+                }
                 saw_kernel_config_dir = 1
                 next
             }
