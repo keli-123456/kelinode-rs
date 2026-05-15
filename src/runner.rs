@@ -338,6 +338,7 @@ where
         mut options: RuntimeTickOptions,
     ) -> RuntimeLoopFuture<'a, Result<RuntimeLoopSignal, String>> {
         Box::pin(async move {
+            let mut startup_full_snapshot_tags = Vec::new();
             if !options.users_by_node_tag.is_empty() {
                 let user_change_tags = options
                     .users_by_node_tag
@@ -390,6 +391,9 @@ where
                                 user_change_tags.len()
                             ),
                         );
+                    }
+                    if native_core_running == Some(false) {
+                        startup_full_snapshot_tags = user_change_tags.clone();
                     }
                     self.user_delta_metrics.record_full_rebuild();
                     self.plan =
@@ -456,6 +460,13 @@ where
                 options,
             )
             .await?;
+            if !startup_full_snapshot_tags.is_empty() {
+                try_establish_keli_core_rs_revision_baseline(
+                    &self.plan,
+                    &self.user_sync,
+                    &startup_full_snapshot_tags,
+                );
+            }
             if report_to_panel {
                 let action =
                     report_runtime_apply_result_to_panels(&self.panel_clients, &result.apply)
@@ -563,6 +574,56 @@ fn try_apply_keli_core_rs_user_deltas(
         }
     }
     true
+}
+
+fn try_establish_keli_core_rs_revision_baseline(
+    plan: &RuntimeBootstrapPlan,
+    sync_state: &BTreeMap<String, RuntimeUserSyncEntry>,
+    node_tags: &[String],
+) -> bool {
+    let Some(core_plan) = plan.core_plan.as_ref() else {
+        return false;
+    };
+    if core_plan.kind != CoreKind::KeliCoreRs {
+        return false;
+    }
+    let client = match keli_core_rs_control_client(&core_plan.config_path) {
+        Ok(client) => client,
+        Err(error) => {
+            logging::warn(
+                "core",
+                format!("revision baseline skipped: {}", error.message),
+            );
+            return false;
+        }
+    };
+    let mut applied = 0usize;
+    for node_tag in node_tags {
+        let Some(entry) = sync_state.get(node_tag) else {
+            continue;
+        };
+        let delta = keli_core_user_full_snapshot_payload(node_tag, entry);
+        match client.apply_user_delta(node_tag.clone(), delta) {
+            Ok(_) => applied += 1,
+            Err(error) => {
+                logging::warn(
+                    "core",
+                    format!(
+                        "revision baseline full snapshot failed node_tag={node_tag} error={}",
+                        error.message
+                    ),
+                );
+                return false;
+            }
+        }
+    }
+    if applied > 0 {
+        logging::info(
+            "core",
+            format!("revision baseline established full_snapshots={applied}"),
+        );
+    }
+    applied > 0
 }
 
 fn keli_core_rs_process_is_running<P>(
@@ -2265,6 +2326,184 @@ mod tests {
         assert_eq!(signal, RuntimeLoopSignal::Continue);
         assert!(saved.contains("55555555-5555-5555-5555-555555555555"));
         assert_eq!(runner.process_supervisor.starts.len(), 1);
+        assert_eq!(
+            runner
+                .user_delta_metrics
+                .kelinode_user_delta_native_apply_failed_total,
+            0
+        );
+        assert_eq!(
+            runner
+                .user_delta_metrics
+                .kelinode_user_delta_full_rebuild_total,
+            1
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn panel_runtime_loop_establishes_revision_baseline_after_startup_rebuild() {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = temp_test_dir(&format!("panel-runtime-loop-native-baseline-{nanos}"));
+        let mut resolved = ResolvedConfig {
+            kernel: Default::default(),
+            realtime: Default::default(),
+            machine: ResolvedMachineConfig {
+                enabled: true,
+                continue_on_error: true,
+                profiles: Vec::new(),
+            },
+            agent: Default::default(),
+            nodes: vec![NodeConfig {
+                url: "https://panel.example.test".to_string(),
+                token: "token".to_string(),
+                node_id: 10,
+                machine_id: 10,
+                ..NodeConfig::default()
+            }],
+        };
+        resolved.kernel.r#type = "keli-core-rs".to_string();
+        resolved.kernel.config_dir = dir.join("v2node").display().to_string();
+        let node = test_node_with_host("https://panel.example.test", "vless", 10);
+        let tag = node.tag.clone();
+        let plan = build_runtime_bootstrap_plan(resolved, vec![node], Vec::new()).unwrap();
+        let config_path = plan.core_plan.as_ref().unwrap().config_path.clone();
+        let mut process = MemoryProcessSupervisor::default();
+        let mut port_forward = FakePortForwardExecutor::default();
+        let mut runner = PanelRuntimeLoop::new(plan, &mut process, &mut port_forward, None);
+        let user = UserInfo {
+            id: 10,
+            uuid: "66666666-6666-6666-6666-666666666666".to_string(),
+            speed_limit: 0,
+            device_limit: 0,
+        };
+        runner.user_sync.insert(
+            tag.clone(),
+            RuntimeUserSyncEntry {
+                state: UserSyncState {
+                    revision: 77,
+                    users: vec![user.clone()],
+                    updated_at: None,
+                },
+                delta_supported: true,
+                path: String::new(),
+                last_change: Some(RuntimeUserDeltaChange {
+                    full: true,
+                    base_revision: 77,
+                    revision: 77,
+                    diff: UserListDiff {
+                        added: vec![user.clone()],
+                        updated: Vec::new(),
+                        deleted: Vec::new(),
+                    },
+                }),
+            },
+        );
+        let control_addr = keli_core_rs_control_addr(&config_path);
+        let listener = TcpListener::bind(&control_addr).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let tag_for_thread = tag.clone();
+        let user_uuid_for_thread = user.uuid.clone();
+        let control_thread = thread::spawn(move || {
+            for index in 0..2 {
+                let deadline = Instant::now() + Duration::from_secs(2);
+                let (mut stream, _) = loop {
+                    match listener.accept() {
+                        Ok(accepted) => break accepted,
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            if Instant::now() >= deadline {
+                                panic!(
+                                    "revision baseline control command {index} was not received"
+                                );
+                            }
+                            thread::sleep(Duration::from_millis(10));
+                        }
+                        Err(error) => panic!("accept keli-core-rs control command: {error}"),
+                    }
+                };
+                let mut command = String::new();
+                BufReader::new(stream.try_clone().unwrap())
+                    .read_line(&mut command)
+                    .unwrap();
+                let command = serde_json::from_str::<serde_json::Value>(command.trim()).unwrap();
+                if index == 0 {
+                    assert_eq!(command["type"], "metrics");
+                    writeln!(
+                        stream,
+                        "{}",
+                        json!({
+                            "type": "metrics",
+                            "metrics": {
+                                "keli_core_user_delta_apply_total": 0,
+                                "keli_core_user_delta_apply_error_total": 0,
+                                "keli_core_user_delta_incremental_total": 0,
+                                "keli_core_user_delta_full_snapshot_total": 0,
+                                "keli_core_user_delta_revision_mismatch_total": 0,
+                                "keli_core_user_delta_current_revision_missing_total": 0,
+                                "keli_core_user_delta_apply_duration_ms": {
+                                    "count": 0,
+                                    "total_ms": 0,
+                                    "last_ms": 0,
+                                    "max_ms": 0,
+                                    "buckets": {}
+                                },
+                                "keli_core_user_delta_active_users": {}
+                            }
+                        })
+                    )
+                    .unwrap();
+                    continue;
+                }
+                assert_eq!(command["type"], "apply_user_delta");
+                assert_eq!(command["node_tag"], tag_for_thread);
+                assert_eq!(command["delta"]["revision"], "77");
+                assert_eq!(command["delta"]["full"][0]["uuid"], user_uuid_for_thread);
+                writeln!(
+                    stream,
+                    "{}",
+                    json!({
+                        "type": "user_delta_applied",
+                        "node_tag": tag_for_thread,
+                        "result": {
+                            "added": 0,
+                            "updated": 0,
+                            "deleted": 0,
+                            "missing_updated": 0,
+                            "missing_deleted": 0,
+                            "active_users": 1,
+                            "full_applied": true
+                        },
+                        "status": "running",
+                        "listeners": []
+                    })
+                )
+                .unwrap();
+            }
+        });
+
+        let mut users_by_node_tag = BTreeMap::new();
+        users_by_node_tag.insert(tag, vec![user]);
+        let signal = AsyncRuntimeLoopCallbacks::run_tick(
+            &mut runner,
+            RuntimeTickOptions {
+                control: RuntimeControlOptions {
+                    machine_id: 10,
+                    start_core: true,
+                    ..RuntimeControlOptions::default()
+                },
+                report_to_panel: false,
+                users_by_node_tag,
+            },
+        )
+        .await
+        .unwrap();
+        control_thread.join().unwrap();
+
+        assert_eq!(signal, RuntimeLoopSignal::Continue);
         assert_eq!(
             runner
                 .user_delta_metrics
