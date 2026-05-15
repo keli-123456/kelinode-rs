@@ -22,7 +22,7 @@ LOCK_DIR="/tmp/keli-native-node-install.lock"
 usage() {
     cat <<'EOF'
 Usage:
-  install.sh [install] [--version v0.1.32] --machine-url URL --machine-id ID --machine-token TOKEN [--machine-name NAME]
+  install.sh [install] [--version v0.1.36] --machine-url URL --machine-id ID --machine-token TOKEN [--machine-name NAME]
   install.sh uninstall [--purge-config]
 
 Options:
@@ -187,12 +187,43 @@ yaml_quote() {
 }
 
 write_machine_config() {
+    mkdir -p "$CONFIG_DIR"
+
+    if [[ ! -f "$CONFIG_FILE" ]]; then
+        write_new_machine_config
+        return
+    fi
+
+    if machine_profile_exists; then
+        chmod 600 "$CONFIG_FILE" 2>/dev/null || true
+        echo -e "${green}Machine profile already exists in ${CONFIG_FILE}; keeping existing config.${plain}"
+        return
+    fi
+
+    append_machine_profile
+}
+
+machine_profile_name() {
     local name="$MACHINE_NAME_ARG"
     if [[ -z "$name" ]]; then
         name="machine-${MACHINE_ID_ARG}"
     fi
+    printf '%s' "$name"
+}
 
-    mkdir -p "$CONFIG_DIR"
+machine_profile_block() {
+    local name
+    name="$(machine_profile_name)"
+    {
+        echo "    - name: $(yaml_quote "$name")"
+        echo "      url: $(yaml_quote "$MACHINE_URL_ARG")"
+        echo "      token: $(yaml_quote "$MACHINE_TOKEN_ARG")"
+        echo "      machine_id: ${MACHINE_ID_ARG}"
+        echo "      config_dir: $(yaml_quote "$CONFIG_DIR")"
+    }
+}
+
+write_new_machine_config() {
     {
         echo "kernel:"
         echo "  type: keli-core-rs"
@@ -202,14 +233,81 @@ write_machine_config() {
         echo "  enabled: true"
         echo "  continue_on_error: true"
         echo "  profiles:"
-        echo "    - name: $(yaml_quote "$name")"
-        echo "      url: $(yaml_quote "$MACHINE_URL_ARG")"
-        echo "      token: $(yaml_quote "$MACHINE_TOKEN_ARG")"
-        echo "      machine_id: ${MACHINE_ID_ARG}"
-        echo "      config_dir: $(yaml_quote "$CONFIG_DIR")"
+        machine_profile_block
     } > "$CONFIG_FILE"
     chmod 600 "$CONFIG_FILE" 2>/dev/null || true
     echo -e "${green}Wrote ${CONFIG_FILE}${plain}"
+}
+
+machine_profile_exists() {
+    local url_line
+    url_line="url: $(yaml_quote "$MACHINE_URL_ARG")"
+    grep -F "machine_id: ${MACHINE_ID_ARG}" "$CONFIG_FILE" >/dev/null 2>&1 \
+        && grep -F "$url_line" "$CONFIG_FILE" >/dev/null 2>&1
+}
+
+append_machine_profile() {
+    local backup tmp block
+    backup="${CONFIG_FILE}.bak.$(date +%Y%m%d%H%M%S)"
+    tmp="${CONFIG_FILE}.tmp.$$"
+    block="$(machine_profile_block)"
+
+    cp "$CONFIG_FILE" "$backup"
+
+    if grep -Eq '^machine:[[:space:]]*$' "$CONFIG_FILE" \
+        && grep -Eq '^[[:space:]]{2}profiles:[[:space:]]*$' "$CONFIG_FILE"; then
+        awk -v block="$block" '
+            BEGIN {
+                in_machine = 0
+                in_profiles = 0
+                inserted = 0
+            }
+            {
+                if (in_profiles && !inserted && $0 !~ /^([[:space:]]{4}|[[:space:]]*$|[[:space:]]*#)/) {
+                    print block
+                    inserted = 1
+                    in_profiles = 0
+                }
+                print
+                if ($0 ~ /^machine:[[:space:]]*$/) {
+                    in_machine = 1
+                    next
+                }
+                if (in_machine && $0 ~ /^[^[:space:]#][^:]*:/ && $0 !~ /^machine:/) {
+                    in_machine = 0
+                    in_profiles = 0
+                }
+                if (in_machine && $0 ~ /^[[:space:]]{2}profiles:[[:space:]]*$/) {
+                    in_profiles = 1
+                }
+            }
+            END {
+                if (in_profiles && !inserted) {
+                    print block
+                }
+            }
+        ' "$CONFIG_FILE" > "$tmp"
+    elif ! grep -Eq '^machine:[[:space:]]*$' "$CONFIG_FILE"; then
+        {
+            cat "$CONFIG_FILE"
+            echo
+            echo "machine:"
+            echo "  enabled: true"
+            echo "  continue_on_error: true"
+            echo "  profiles:"
+            printf '%s\n' "$block"
+        } > "$tmp"
+    else
+        echo -e "${yellow}Existing ${CONFIG_FILE} has a machine section without profiles; keeping a backup and rewriting generated config.${plain}" >&2
+        write_new_machine_config
+        echo -e "${yellow}Previous config backup: ${backup}${plain}"
+        return
+    fi
+
+    mv "$tmp" "$CONFIG_FILE"
+    chmod 600 "$CONFIG_FILE" 2>/dev/null || true
+    echo -e "${green}Appended machine profile to ${CONFIG_FILE}${plain}"
+    echo -e "${yellow}Previous config backup: ${backup}${plain}"
 }
 
 geo_rule_safe_name() {
@@ -470,6 +568,8 @@ main() {
     echo -e "${green}Keli native node installed.${plain}"
     echo "Config: ${CONFIG_FILE}"
     echo "Command: v2node server --config ${CONFIG_FILE}"
+    echo "Logs: v2node log"
+    echo "      journalctl -u v2node -n 200 --no-pager -f"
     echo "------------------------------------------"
 }
 

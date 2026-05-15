@@ -23,6 +23,7 @@ use kelinode_rs::subscription_proxy::{
 use kelinode_rs::upgrade::{SystemUpgradeExecutor, UpgradeManager};
 use serde_json::Value;
 use std::collections::BTreeSet;
+use std::process::{Command, Stdio};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 fn main() {
@@ -77,6 +78,18 @@ fn run() -> Result<(), String> {
             if !status.errors.is_empty() {
                 return Err("HY2 port forwarding has errors".to_string());
             }
+        }
+        "log" | "logs" => {
+            let args = args.collect::<Vec<_>>();
+            if args
+                .iter()
+                .any(|arg| matches!(arg.as_str(), "--help" | "-h"))
+            {
+                print_log_help();
+                return Ok(());
+            }
+            let options = parse_log_args(args)?;
+            run_log_command(options)?;
         }
         "run" | "server" => {
             let path = config_path_from_args(args, "/etc/v2node/config.yml")?;
@@ -139,6 +152,12 @@ enum RulesAction {
     Cleanup,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct LogOptions {
+    tail: usize,
+    follow: bool,
+}
+
 fn parse_rules_args(args: &[String]) -> Result<(RulesAction, Vec<String>), String> {
     let Some(first) = args.first() else {
         return Ok((RulesAction::Status, Vec::new()));
@@ -154,6 +173,72 @@ fn parse_rules_args(args: &[String]) -> Result<(RulesAction, Vec<String>), Strin
         other => return Err(format!("unknown rules action: {other}")),
     };
     Ok((action, args[1..].to_vec()))
+}
+
+fn parse_log_args(args: impl IntoIterator<Item = String>) -> Result<LogOptions, String> {
+    let mut options = LogOptions {
+        tail: 200,
+        follow: true,
+    };
+    let mut iter = args.into_iter();
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
+            "--tail" | "-n" => {
+                let value = iter
+                    .next()
+                    .ok_or_else(|| format!("{arg} requires a line count"))?;
+                options.tail = value
+                    .parse::<usize>()
+                    .map_err(|_| format!("{arg} requires a positive integer"))?;
+                if options.tail == 0 {
+                    return Err(format!("{arg} requires a positive integer"));
+                }
+            }
+            value if value.starts_with("--tail=") => {
+                let value = value.trim_start_matches("--tail=");
+                options.tail = value
+                    .parse::<usize>()
+                    .map_err(|_| "--tail requires a positive integer".to_string())?;
+                if options.tail == 0 {
+                    return Err("--tail requires a positive integer".to_string());
+                }
+            }
+            "--no-follow" => options.follow = false,
+            "--follow" | "-f" => options.follow = true,
+            other => return Err(format!("unknown log option {other}")),
+        }
+    }
+    Ok(options)
+}
+
+fn run_log_command(options: LogOptions) -> Result<(), String> {
+    let mut command = Command::new("journalctl");
+    command
+        .arg("-u")
+        .arg("v2node")
+        .arg("-n")
+        .arg(options.tail.to_string())
+        .arg("--no-pager")
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit());
+    if options.follow {
+        command.arg("-f");
+    }
+
+    match command.status() {
+        Ok(status) if status.success() => Ok(()),
+        Ok(status) => Err(format!(
+            "journalctl exited with status {status}; try: journalctl -u v2node -n {} --no-pager{}",
+            options.tail,
+            if options.follow { " -f" } else { "" }
+        )),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Err(
+            "journalctl is not available on this system; use your service manager logs, or run v2node server --config /etc/v2node/config.yml in the foreground"
+                .to_string(),
+        ),
+        Err(err) => Err(format!("run journalctl: {err}")),
+    }
 }
 
 async fn run_rules_command(
@@ -656,15 +741,23 @@ fn print_help() {
     println!(
         "  rules [status|repair|cleanup] [path|--config path]    inspect or reconcile HY2 iptables rules"
     );
+    println!("  log [--tail N] [--no-follow]    show v2node service logs through journalctl");
     println!("  run|server [path|--config path]    start the node runtime loop");
+}
+
+fn print_log_help() {
+    println!("kelinode-rs log command:");
+    println!("  v2node log                 show and follow the last 200 service log lines");
+    println!("  v2node log --tail 500      show and follow the last 500 service log lines");
+    println!("  v2node log --no-follow     print recent logs and exit");
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        config_path_from_args, machine_panel_clients, native_gray_preflight_report,
+        config_path_from_args, machine_panel_clients, native_gray_preflight_report, parse_log_args,
         parse_rules_args, runtime_loop_options, runtime_tick_interval,
-        start_subscription_proxy_manager, RulesAction,
+        start_subscription_proxy_manager, LogOptions, RulesAction,
     };
     use kelinode_rs::config::{
         AgentConfig, MachineProfileConfig, NodeConfig, ResolvedConfig, ResolvedMachineConfig,
@@ -731,6 +824,33 @@ mod tests {
             parse_rules_args(&["cleanup".to_string()]).unwrap(),
             (RulesAction::Cleanup, Vec::<String>::new())
         );
+    }
+
+    #[test]
+    fn log_args_parse_tail_and_follow_options() {
+        assert_eq!(
+            parse_log_args(Vec::<String>::new()).unwrap(),
+            LogOptions {
+                tail: 200,
+                follow: true,
+            }
+        );
+        assert_eq!(
+            parse_log_args(vec!["--tail".to_string(), "500".to_string()]).unwrap(),
+            LogOptions {
+                tail: 500,
+                follow: true,
+            }
+        );
+        assert_eq!(
+            parse_log_args(vec!["--tail=50".to_string(), "--no-follow".to_string()]).unwrap(),
+            LogOptions {
+                tail: 50,
+                follow: false,
+            }
+        );
+        assert!(parse_log_args(vec!["--tail".to_string(), "0".to_string()]).is_err());
+        assert!(parse_log_args(vec!["--bad".to_string()]).is_err());
     }
 
     #[test]

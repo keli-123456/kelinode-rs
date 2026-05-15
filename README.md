@@ -161,6 +161,19 @@ v2node server -c /etc/v2node/config.yml
 /usr/local/v2node/v2node run /etc/v2node/config.yml
 ```
 
+Installed systemd services can be inspected with the compatibility log command:
+
+```bash
+v2node log
+v2node log --tail 500 --no-follow
+journalctl -u v2node -n 200 --no-pager -f
+```
+
+Running the one-click installer again with a different `--machine-url` or `--machine-id` appends a
+new machine profile to `/etc/v2node/config.yml` instead of replacing the previous site. The installer
+keeps a timestamped backup beside the config before editing it. If the same URL and machine ID are
+already present, it leaves the existing profile in place to avoid duplicate reports.
+
 For machine-bound native testing, keep the config explicit:
 
 ```yaml
