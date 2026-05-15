@@ -175,6 +175,7 @@ jobs:
           JSON
 
       - name: Upload artifact
+        continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
           name: ${{ steps.meta.outputs.asset_prefix }}
