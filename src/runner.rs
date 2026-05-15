@@ -344,12 +344,21 @@ where
                     .keys()
                     .cloned()
                     .collect::<Vec<_>>();
-                let applied_user_delta = try_apply_keli_core_rs_user_deltas(
+                let native_core_running = keli_core_rs_process_is_running(
                     &self.plan,
-                    &self.user_sync,
-                    &options.users_by_node_tag,
-                    &mut self.user_delta_metrics,
-                );
+                    &mut *self.process_supervisor,
+                    options.control.core_command.as_deref(),
+                )?;
+                let applied_user_delta = if native_core_running.unwrap_or(true) {
+                    try_apply_keli_core_rs_user_deltas(
+                        &self.plan,
+                        &self.user_sync,
+                        &options.users_by_node_tag,
+                        &mut self.user_delta_metrics,
+                    )
+                } else {
+                    false
+                };
                 if applied_user_delta {
                     logging::info(
                         "core",
@@ -365,13 +374,23 @@ where
                         &user_change_tags,
                     );
                 } else {
-                    logging::warn(
-                        "core",
-                        format!(
-                            "user delta fell back to full runtime rebuild tags={}",
-                            user_change_tags.len()
-                        ),
-                    );
+                    if native_core_running == Some(false) {
+                        logging::info(
+                            "core",
+                            format!(
+                                "user delta uses full runtime rebuild because native core is not running tags={}",
+                                user_change_tags.len()
+                            ),
+                        );
+                    } else {
+                        logging::warn(
+                            "core",
+                            format!(
+                                "user delta fell back to full runtime rebuild tags={}",
+                                user_change_tags.len()
+                            ),
+                        );
+                    }
                     self.user_delta_metrics.record_full_rebuild();
                     self.plan =
                         rebuild_runtime_plan_with_users(&self.plan, &options.users_by_node_tag)?;
@@ -544,6 +563,29 @@ fn try_apply_keli_core_rs_user_deltas(
         }
     }
     true
+}
+
+fn keli_core_rs_process_is_running<P>(
+    plan: &RuntimeBootstrapPlan,
+    process_supervisor: &mut P,
+    core_command: Option<&str>,
+) -> Result<Option<bool>, String>
+where
+    P: ProcessSupervisor,
+{
+    let Some(core_plan) = plan.core_plan.as_ref() else {
+        return Ok(None);
+    };
+    if core_plan.kind != CoreKind::KeliCoreRs {
+        return Ok(None);
+    }
+    let spec = core_process_spec(core_plan, core_command).map_err(|err| err.message)?;
+    Ok(Some(
+        process_supervisor
+            .status(&spec.name)
+            .map_err(|err| err.message)?
+            .is_running(),
+    ))
 }
 
 fn keli_core_user_delta_requires_full_snapshot(error: &str) -> bool {
@@ -2161,6 +2203,80 @@ mod tests {
 
         assert_eq!(signal, RuntimeLoopSignal::Continue);
         assert!(saved.contains("44444444-4444-4444-4444-444444444444"));
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn panel_runtime_loop_does_not_try_native_delta_before_core_is_running() {
+        let dir = temp_test_dir("panel-runtime-loop-native-delta-startup");
+        let mut resolved = ResolvedConfig {
+            kernel: Default::default(),
+            realtime: Default::default(),
+            machine: ResolvedMachineConfig {
+                enabled: true,
+                continue_on_error: true,
+                profiles: Vec::new(),
+            },
+            agent: Default::default(),
+            nodes: vec![NodeConfig {
+                url: "https://panel.example.test".to_string(),
+                token: "token".to_string(),
+                node_id: 10,
+                machine_id: 10,
+                ..NodeConfig::default()
+            }],
+        };
+        resolved.kernel.r#type = "keli-core-rs".to_string();
+        resolved.kernel.config_dir = dir.join("v2node").display().to_string();
+        let node = test_node_with_host("https://panel.example.test", "vless", 10);
+        let tag = node.tag.clone();
+        let plan = build_runtime_bootstrap_plan(resolved, vec![node], Vec::new()).unwrap();
+        let mut process = MemoryProcessSupervisor::default();
+        let mut port_forward = FakePortForwardExecutor::default();
+        let mut runner = PanelRuntimeLoop::new(plan, &mut process, &mut port_forward, None);
+        let mut users_by_node_tag = BTreeMap::new();
+        users_by_node_tag.insert(
+            tag,
+            vec![UserInfo {
+                id: 10,
+                uuid: "55555555-5555-5555-5555-555555555555".to_string(),
+                speed_limit: 0,
+                device_limit: 0,
+            }],
+        );
+
+        let signal = AsyncRuntimeLoopCallbacks::run_tick(
+            &mut runner,
+            RuntimeTickOptions {
+                control: RuntimeControlOptions {
+                    machine_id: 10,
+                    start_core: true,
+                    ..RuntimeControlOptions::default()
+                },
+                report_to_panel: false,
+                users_by_node_tag,
+            },
+        )
+        .await
+        .unwrap();
+        let saved = fs::read_to_string(dir.join("v2node").join("config.json")).unwrap();
+
+        assert_eq!(signal, RuntimeLoopSignal::Continue);
+        assert!(saved.contains("55555555-5555-5555-5555-555555555555"));
+        assert_eq!(runner.process_supervisor.starts.len(), 1);
+        assert_eq!(
+            runner
+                .user_delta_metrics
+                .kelinode_user_delta_native_apply_failed_total,
+            0
+        );
+        assert_eq!(
+            runner
+                .user_delta_metrics
+                .kelinode_user_delta_full_rebuild_total,
+            1
+        );
 
         let _ = fs::remove_dir_all(dir);
     }
