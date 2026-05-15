@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::env;
 use std::fs;
 use std::net::{Ipv4Addr, Ipv6Addr};
@@ -266,9 +267,14 @@ pub fn parse_linux_net_dev(input: &str) -> Option<Value> {
 }
 
 pub fn parse_linux_net_dev_snapshot(input: &str) -> Option<NetworkSnapshot> {
-    let mut rx_bytes = 0u64;
-    let mut tx_bytes = 0u64;
-    let mut interfaces = Vec::new();
+    parse_linux_net_dev_snapshot_for_interfaces(input, &BTreeSet::new())
+}
+
+pub fn parse_linux_net_dev_snapshot_for_interfaces(
+    input: &str,
+    selected_interfaces: &BTreeSet<String>,
+) -> Option<NetworkSnapshot> {
+    let mut parsed = Vec::new();
 
     for line in input.lines().skip(2) {
         let Some((name, rest)) = line.split_once(':') else {
@@ -284,12 +290,48 @@ pub fn parse_linux_net_dev_snapshot(input: &str) -> Option<NetworkSnapshot> {
         }
         let rx = fields[0].parse::<u64>().unwrap_or(0);
         let tx = fields[8].parse::<u64>().unwrap_or(0);
-        rx_bytes = rx_bytes.saturating_add(rx);
-        tx_bytes = tx_bytes.saturating_add(tx);
+        parsed.push((name.to_string(), rx, tx));
+    }
+
+    if parsed.is_empty() {
+        return None;
+    }
+
+    let selected = if selected_interfaces.is_empty() {
+        Vec::new()
+    } else {
+        parsed
+            .iter()
+            .filter(|(name, _, _)| selected_interfaces.contains(name))
+            .collect::<Vec<_>>()
+    };
+    let fallback = if selected.is_empty() {
+        parsed
+            .iter()
+            .filter(|(name, _, _)| !is_container_or_bridge_interface(name))
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+    let chosen = if !selected.is_empty() {
+        selected
+    } else if !fallback.is_empty() {
+        fallback
+    } else {
+        parsed.iter().collect::<Vec<_>>()
+    };
+
+    let mut rx_bytes = 0u64;
+    let mut tx_bytes = 0u64;
+    let mut interfaces = Vec::new();
+
+    for (name, rx, tx) in chosen {
+        rx_bytes = rx_bytes.saturating_add(*rx);
+        tx_bytes = tx_bytes.saturating_add(*tx);
         interfaces.push(json!({
             "name": name,
-            "rx_bytes": rx,
-            "tx_bytes": tx
+            "rx_bytes": *rx,
+            "tx_bytes": *tx
         }));
     }
 
@@ -301,6 +343,55 @@ pub fn parse_linux_net_dev_snapshot(input: &str) -> Option<NetworkSnapshot> {
             interfaces,
         })
     }
+}
+
+pub fn parse_linux_ipv4_default_route_interfaces(input: &str) -> BTreeSet<String> {
+    input
+        .lines()
+        .skip(1)
+        .filter_map(|line| {
+            let fields = line.split_whitespace().collect::<Vec<_>>();
+            if fields.len() < 2 || fields[1] != "00000000" {
+                return None;
+            }
+            Some(fields[0].to_string())
+        })
+        .collect()
+}
+
+pub fn parse_linux_ipv6_default_route_interfaces(input: &str) -> BTreeSet<String> {
+    input
+        .lines()
+        .filter_map(|line| {
+            let fields = line.split_whitespace().collect::<Vec<_>>();
+            if fields.len() < 10 || !is_zero_hex(fields[0]) || parse_hex_u32(fields[1]) != Some(0) {
+                return None;
+            }
+            fields.last().map(|iface| (*iface).to_string())
+        })
+        .collect()
+}
+
+fn is_container_or_bridge_interface(name: &str) -> bool {
+    name.starts_with("docker")
+        || name.starts_with("br-")
+        || name.starts_with("veth")
+        || name.starts_with("virbr")
+        || name.starts_with("vnet")
+        || name.starts_with("cni")
+        || name.starts_with("flannel")
+        || name.starts_with("cilium")
+        || name.starts_with("kube")
+        || name.starts_with("ifb")
+        || name.starts_with("dummy")
+}
+
+fn is_zero_hex(value: &str) -> bool {
+    !value.is_empty() && value.bytes().all(|byte| byte == b'0')
+}
+
+fn parse_hex_u32(value: &str) -> Option<u32> {
+    u32::from_str_radix(value, 16).ok()
 }
 
 fn network_status_value(snapshot: NetworkSnapshot, rx_rate: f64, tx_rate: f64) -> Value {
@@ -473,12 +564,24 @@ fn read_local_ip_snapshot() -> Option<Value> {
 
 fn read_linux_net_snapshot() -> Option<NetworkSnapshot> {
     let content = fs::read_to_string("/proc/net/dev").ok()?;
-    parse_linux_net_dev_snapshot(&content)
+    let selected_interfaces = read_linux_default_route_interfaces();
+    parse_linux_net_dev_snapshot_for_interfaces(&content, &selected_interfaces)
 }
 
 fn read_linux_uptime_seconds() -> Option<u64> {
     let content = fs::read_to_string("/proc/uptime").ok()?;
     parse_linux_uptime_seconds(&content)
+}
+
+fn read_linux_default_route_interfaces() -> BTreeSet<String> {
+    let mut interfaces = BTreeSet::new();
+    if let Ok(content) = fs::read_to_string("/proc/net/route") {
+        interfaces.extend(parse_linux_ipv4_default_route_interfaces(&content));
+    }
+    if let Ok(content) = fs::read_to_string("/proc/net/ipv6_route") {
+        interfaces.extend(parse_linux_ipv6_default_route_interfaces(&content));
+    }
+    interfaces
 }
 
 fn meminfo_kib(input: &str, key: &str) -> Option<u64> {
@@ -508,13 +611,17 @@ fn unix_now_seconds() -> f64 {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
     use serde_json::json;
 
     use super::{
         enrich_public_ip_snapshot, parse_df_portable_bytes, parse_hostname_i_addresses,
+        parse_linux_ipv4_default_route_interfaces, parse_linux_ipv6_default_route_interfaces,
         parse_linux_loadavg_cpu_percent, parse_linux_meminfo, parse_linux_net_dev,
-        parse_linux_proc_stat_cpu, parse_linux_uptime_seconds, system_info_value, CpuCounters,
-        NetworkCounters, NetworkSnapshot, PublicIpFamily, PublicIpProbe, ResourceSampler,
+        parse_linux_net_dev_snapshot_for_interfaces, parse_linux_proc_stat_cpu,
+        parse_linux_uptime_seconds, system_info_value, CpuCounters, NetworkCounters,
+        NetworkSnapshot, PublicIpFamily, PublicIpProbe, ResourceSampler,
     };
 
     #[test]
@@ -613,6 +720,68 @@ Inter-|   Receive                                                |  Transmit
         assert_eq!(value["rx_rate"], json!(0.0));
         assert_eq!(value["tx_rate"], json!(0.0));
         assert_eq!(value["interfaces"][0]["name"], json!("eth0"));
+    }
+
+    #[test]
+    fn parses_linux_net_dev_ignores_container_interfaces_when_no_route_hint() {
+        let value = parse_linux_net_dev(
+            r#"
+Inter-|   Receive                                                |  Transmit
+ face |bytes    packets errs drop fifo frame compressed multicast|bytes    packets errs drop fifo colls carrier compressed
+    lo: 10 0 0 0 0 0 0 0 20 0 0 0 0 0 0 0
+  eth0: 1000 0 0 0 0 0 0 0 2000 0 0 0 0 0 0 0
+docker0: 3000 0 0 0 0 0 0 0 4000 0 0 0 0 0 0 0
+ br-ab: 5000 0 0 0 0 0 0 0 6000 0 0 0 0 0 0 0
+veth12: 7000 0 0 0 0 0 0 0 8000 0 0 0 0 0 0 0
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(value["rx_bytes"], json!(1000));
+        assert_eq!(value["tx_bytes"], json!(2000));
+        assert_eq!(value["interfaces"].as_array().unwrap().len(), 1);
+        assert_eq!(value["interfaces"][0]["name"], json!("eth0"));
+    }
+
+    #[test]
+    fn parses_linux_net_dev_prefers_default_route_interfaces() {
+        let selected = BTreeSet::from(["ens3".to_string()]);
+        let snapshot = parse_linux_net_dev_snapshot_for_interfaces(
+            r#"
+Inter-|   Receive                                                |  Transmit
+ face |bytes    packets errs drop fifo frame compressed multicast|bytes    packets errs drop fifo colls carrier compressed
+  eth0: 1000 0 0 0 0 0 0 0 2000 0 0 0 0 0 0 0
+  ens3: 3000 0 0 0 0 0 0 0 4000 0 0 0 0 0 0 0
+docker0: 5000 0 0 0 0 0 0 0 6000 0 0 0 0 0 0 0
+"#,
+            &selected,
+        )
+        .unwrap();
+
+        assert_eq!(snapshot.counters.rx_bytes, 3000);
+        assert_eq!(snapshot.counters.tx_bytes, 4000);
+        assert_eq!(snapshot.interfaces.len(), 1);
+        assert_eq!(snapshot.interfaces[0]["name"], json!("ens3"));
+    }
+
+    #[test]
+    fn parses_default_route_interfaces_from_proc_files() {
+        let ipv4 = parse_linux_ipv4_default_route_interfaces(
+            r#"
+Iface	Destination	Gateway 	Flags	RefCnt	Use	Metric	Mask	MTU	Window	IRTT
+eth0	00000000	01020304	0003	0	0	100	00000000	0	0	0
+docker0	0002A8C0	00000000	0001	0	0	0	00FFFFFF	0	0	0
+"#,
+        );
+        let ipv6 = parse_linux_ipv6_default_route_interfaces(
+            r#"
+00000000000000000000000000000000 00 00000000000000000000000000000000 00 fe800000000000000000000000000001 00000400 00000000 00000000 00000003 eth0
+2607f358001a000e0000000000000000 40 00000000000000000000000000000000 00 00000000000000000000000000000000 00000100 00000000 00000000 00000001 eth0
+"#,
+        );
+
+        assert_eq!(ipv4, BTreeSet::from(["eth0".to_string()]));
+        assert_eq!(ipv6, BTreeSet::from(["eth0".to_string()]));
     }
 
     #[test]
