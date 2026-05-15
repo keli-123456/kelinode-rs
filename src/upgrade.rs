@@ -36,6 +36,7 @@ pub struct UpgradeLaunchPlan {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ReleaseUpgradeSpec {
     pub name: String,
+    pub asset_name: String,
     pub owner: String,
     pub repository: String,
     pub binary: String,
@@ -208,11 +209,12 @@ impl ReleaseUpgradeSpec {
     pub fn native_node() -> Self {
         Self {
             name: "kelinode-rs".to_string(),
+            asset_name: "keli-native-node".to_string(),
             owner: DEFAULT_RELEASE_OWNER.to_string(),
             repository: "kelinode-rs".to_string(),
-            binary: "v2node".to_string(),
-            install_dir: "/usr/local/v2node".to_string(),
-            service_name: "v2node".to_string(),
+            binary: "kelinode".to_string(),
+            install_dir: "/usr/local/kelinode".to_string(),
+            service_name: "kelinode".to_string(),
             platform: DEFAULT_RELEASE_PLATFORM.to_string(),
         }
     }
@@ -220,17 +222,18 @@ impl ReleaseUpgradeSpec {
     pub fn native_core() -> Self {
         Self {
             name: "keli-core-rs".to_string(),
+            asset_name: "keli-core-rs".to_string(),
             owner: DEFAULT_RELEASE_OWNER.to_string(),
             repository: "keli-core-rs".to_string(),
             binary: "keli-core-rs".to_string(),
-            install_dir: "/usr/local/v2node".to_string(),
-            service_name: "v2node".to_string(),
+            install_dir: "/usr/local/kelinode".to_string(),
+            service_name: "kelinode".to_string(),
             platform: DEFAULT_RELEASE_PLATFORM.to_string(),
         }
     }
 
     fn asset_prefix(&self, target_version: &str) -> String {
-        format!("{}-{}-{}", self.name, target_version, self.platform)
+        format!("{}-{}-{}", self.asset_name, target_version, self.platform)
     }
 
     fn release_asset_url(&self, target_version: &str, suffix: &str) -> String {
@@ -630,9 +633,11 @@ mod tests {
         let script = release_upgrade_shell_script("v1.2.5", &ReleaseUpgradeSpec::native_node());
 
         assert!(script.contains("restore_backup()"));
-        assert!(script.contains("kelinode-rs-v1.2.5-linux-x86_64.manifest.json"));
-        assert!(script.contains("kelinode-rs-v1.2.5-linux-x86_64.tar.gz"));
-        assert!(script.contains("binary_name='v2node'"));
+        assert!(script.contains("keli-native-node-v1.2.5-linux-x86_64.manifest.json"));
+        assert!(script.contains("keli-native-node-v1.2.5-linux-x86_64.tar.gz"));
+        assert!(script.contains("binary_name='kelinode'"));
+        assert!(script.contains("install_dir='/usr/local/kelinode'"));
+        assert!(script.contains("service_name='kelinode'"));
         assert!(script.contains("manifest_sha=$(sed"));
         assert!(script.contains("sha256sum -c -"));
         assert!(script.contains("tar -xzf \"$archive_file\""));

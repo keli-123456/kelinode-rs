@@ -27,6 +27,9 @@ use std::collections::BTreeSet;
 use std::process::{Command, Stdio};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+const DEFAULT_CONFIG_FILE: &str = "/etc/kelinode/config.yml";
+const DEFAULT_SERVICE_NAME: &str = "kelinode";
+
 fn main() {
     if let Err(err) = run() {
         logging::error("agent", err);
@@ -46,7 +49,7 @@ fn run() -> Result<(), String> {
             );
         }
         "check-config" => {
-            let path = config_path_from_args(args, "/etc/v2node/config.yml")?;
+            let path = config_path_from_args(args, DEFAULT_CONFIG_FILE)?;
             let config = AppConfig::load_from_path(path)?;
             let resolved = config.resolve_runtime()?;
             let bootstrap = Bootstrap::from_config(&config);
@@ -59,7 +62,7 @@ fn run() -> Result<(), String> {
             );
         }
         "gray-preflight" => {
-            let path = config_path_from_args(args, "/etc/v2node/config.yml")?;
+            let path = config_path_from_args(args, DEFAULT_CONFIG_FILE)?;
             let runtime = tokio::runtime::Runtime::new()
                 .map_err(|err| format!("start tokio runtime: {err}"))?;
             let report = runtime.block_on(run_native_gray_preflight(&path))?;
@@ -71,7 +74,7 @@ fn run() -> Result<(), String> {
         "rules" => {
             let args = args.collect::<Vec<_>>();
             let (action, config_args) = parse_rules_args(&args)?;
-            let path = config_path_from_args(config_args, "/etc/v2node/config.yml")?;
+            let path = config_path_from_args(config_args, DEFAULT_CONFIG_FILE)?;
             let runtime = tokio::runtime::Runtime::new()
                 .map_err(|err| format!("start tokio runtime: {err}"))?;
             let status = runtime.block_on(run_rules_command(&path, action))?;
@@ -93,7 +96,7 @@ fn run() -> Result<(), String> {
             run_log_command(options)?;
         }
         "run" | "server" => {
-            let path = config_path_from_args(args, "/etc/v2node/config.yml")?;
+            let path = config_path_from_args(args, DEFAULT_CONFIG_FILE)?;
             let runtime = tokio::runtime::Runtime::new()
                 .map_err(|err| format!("start tokio runtime: {err}"))?;
             runtime.block_on(run_agent(&path))?;
@@ -219,7 +222,7 @@ fn run_log_command(options: LogOptions) -> Result<(), String> {
     let mut command = Command::new("journalctl");
     command
         .arg("-u")
-        .arg("v2node")
+        .arg(DEFAULT_SERVICE_NAME)
         .arg("-n")
         .arg(options.tail.to_string())
         .arg("--no-pager")
@@ -236,13 +239,13 @@ fn run_log_command(options: LogOptions) -> Result<(), String> {
     match command.status() {
         Ok(status) if status.success() => Ok(()),
         Ok(status) => Err(format!(
-            "journalctl exited with status {status}; try: journalctl -u v2node -n {} --no-pager{}{}",
+            "journalctl exited with status {status}; try: journalctl -u {DEFAULT_SERVICE_NAME} -n {} --no-pager{}{}",
             options.tail,
             if options.raw { "" } else { " --output cat" },
             if options.follow { " -f" } else { "" }
         )),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Err(
-            "journalctl is not available on this system; use your service manager logs, or run v2node server --config /etc/v2node/config.yml in the foreground"
+            format!("journalctl is not available on this system; use your service manager logs, or run kelinode server --config {DEFAULT_CONFIG_FILE} in the foreground")
                 .to_string(),
         ),
         Err(err) => Err(format!("run journalctl: {err}")),
@@ -758,7 +761,7 @@ fn agent_version() -> String {
 }
 
 fn print_help() {
-    println!("kelinode-rs commands:");
+    println!("kelinode commands:");
     println!("  version    print version and API contract");
     println!("  check-config [path|--config path]    load config and print resolved runtime shape");
     println!(
@@ -767,16 +770,16 @@ fn print_help() {
     println!(
         "  rules [status|repair|cleanup] [path|--config path]    inspect or reconcile HY2 iptables rules"
     );
-    println!("  log [--tail N] [--no-follow] [--raw]    show v2node service logs");
+    println!("  log [--tail N] [--no-follow] [--raw]    show kelinode service logs");
     println!("  run|server [path|--config path]    start the node runtime loop");
 }
 
 fn print_log_help() {
-    println!("kelinode-rs log command:");
-    println!("  v2node log                 show and follow the last 200 service log lines");
-    println!("  v2node log --tail 500      show and follow the last 500 service log lines");
-    println!("  v2node log --no-follow     print recent logs and exit");
-    println!("  v2node log --raw           show raw journalctl metadata");
+    println!("kelinode log command:");
+    println!("  kelinode log                 show and follow the last 200 service log lines");
+    println!("  kelinode log --tail 500      show and follow the last 500 service log lines");
+    println!("  kelinode log --no-follow     print recent logs and exit");
+    println!("  kelinode log --raw           show raw journalctl metadata");
 }
 
 #[cfg(test)]
@@ -784,7 +787,7 @@ mod tests {
     use super::{
         config_path_from_args, machine_panel_clients, native_gray_preflight_report, parse_log_args,
         parse_rules_args, runtime_loop_options, runtime_tick_interval,
-        start_subscription_proxy_manager, LogOptions, RulesAction,
+        start_subscription_proxy_manager, LogOptions, RulesAction, DEFAULT_CONFIG_FILE,
     };
     use kelinode_rs::config::{
         AgentConfig, MachineProfileConfig, NodeConfig, ResolvedConfig, ResolvedMachineConfig,
@@ -799,24 +802,24 @@ mod tests {
     #[test]
     fn config_path_parser_accepts_legacy_config_flags() {
         assert_eq!(
-            config_path_from_args(Vec::<String>::new(), "/etc/v2node/config.yml").unwrap(),
-            "/etc/v2node/config.yml"
+            config_path_from_args(Vec::<String>::new(), DEFAULT_CONFIG_FILE).unwrap(),
+            DEFAULT_CONFIG_FILE
         );
         assert_eq!(
             config_path_from_args(
                 vec!["--config".to_string(), "/tmp/a.yml".to_string()],
-                "/etc/v2node/config.yml",
+                DEFAULT_CONFIG_FILE,
             )
             .unwrap(),
             "/tmp/a.yml"
         );
         assert_eq!(
-            config_path_from_args(vec!["-c=/tmp/b.yml".to_string()], "/etc/v2node/config.yml",)
+            config_path_from_args(vec!["-c=/tmp/b.yml".to_string()], DEFAULT_CONFIG_FILE,)
                 .unwrap(),
             "/tmp/b.yml"
         );
         assert_eq!(
-            config_path_from_args(vec!["/tmp/c.yml".to_string()], "/etc/v2node/config.yml",)
+            config_path_from_args(vec!["/tmp/c.yml".to_string()], DEFAULT_CONFIG_FILE,)
                 .unwrap(),
             "/tmp/c.yml"
         );

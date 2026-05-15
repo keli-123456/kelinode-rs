@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Deserializer};
 
-pub const DEFAULT_CONFIG_DIR: &str = "/etc/v2node";
+pub const DEFAULT_CONFIG_DIR: &str = "/etc/kelinode";
 pub const DEFAULT_TIMEOUT_SECS: u64 = 30;
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]

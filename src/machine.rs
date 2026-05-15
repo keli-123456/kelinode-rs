@@ -756,7 +756,7 @@ mod tests {
         assert_eq!(result.nodes[0].url, "https://panel.example.test");
         assert_eq!(result.nodes[0].node_id, 10);
         assert_eq!(result.nodes[0].machine_id, 3);
-        assert_eq!(result.nodes[0].config_dir, "/etc/v2node/site-a/node-10");
+        assert_eq!(result.nodes[0].config_dir, "/etc/kelinode/site-a/node-10");
         assert!(result.agent.subscription_proxy.enabled);
         assert_eq!(
             result.agent.subscription_proxy.profiles[0].site_id,

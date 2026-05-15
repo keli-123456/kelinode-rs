@@ -6,9 +6,12 @@ green='\033[0;32m'
 yellow='\033[0;33m'
 plain='\033[0m'
 
-INSTALL_DIR="/usr/local/v2node"
-CONFIG_DIR="/etc/v2node"
+INSTALL_DIR="/usr/local/kelinode"
+CONFIG_DIR="/etc/kelinode"
 CONFIG_FILE="${CONFIG_DIR}/config.yml"
+SERVICE_NAME="kelinode"
+BINARY_NAME="kelinode"
+LEGACY_SERVICE_NAME="v2node"
 VERSION_ARG=""
 MACHINE_URL_ARG=""
 MACHINE_ID_ARG=""
@@ -22,7 +25,7 @@ LOCK_DIR="/tmp/keli-native-node-install.lock"
 usage() {
     cat <<'EOF'
 Usage:
-  install.sh [install] [--version v0.1.44] --machine-url URL --machine-id ID --machine-token TOKEN [--machine-name NAME]
+  install.sh [install] [--version v0.1.45] --machine-url URL --machine-id ID --machine-token TOKEN [--machine-name NAME]
   install.sh uninstall [--purge-config]
 
 Options:
@@ -32,7 +35,7 @@ Options:
   --machine-token TOKEN   server machine token.
   --machine-name NAME     local profile name.
   --skip-geo-rules        do not download default geoip/geosite text route rules.
-  --purge-config          uninstall only: also remove /etc/v2node.
+  --purge-config          uninstall only: also remove /etc/kelinode.
 EOF
 }
 
@@ -177,6 +180,43 @@ resolve_version() {
         exit 1
     fi
     printf '%s' "$version"
+}
+
+normalize_version_label() {
+    printf '%s' "$1" | sed 's/^[vV]//'
+}
+
+installed_native_node_version() {
+    local installed=""
+
+    if [[ -f "${INSTALL_DIR}/.kelinode-rs_version" ]]; then
+        read -r installed < "${INSTALL_DIR}/.kelinode-rs_version" || true
+    elif [[ -f "${INSTALL_DIR}/.installed_version" ]]; then
+        read -r installed < "${INSTALL_DIR}/.installed_version" || true
+    fi
+
+    if [[ -z "$installed" && -x "${INSTALL_DIR}/${BINARY_NAME}" ]]; then
+        installed=$("${INSTALL_DIR}/${BINARY_NAME}" version 2>/dev/null | awk '{print $2}' | head -n 1 || true)
+    fi
+
+    printf '%s' "$installed"
+}
+
+is_native_node_installed_version() {
+    local expected="$1"
+    local installed
+
+    [[ -x "${INSTALL_DIR}/${BINARY_NAME}" ]] || return 1
+    installed="$(installed_native_node_version)"
+    [[ "$(normalize_version_label "$installed")" == "$(normalize_version_label "$expected")" ]]
+}
+
+write_installed_version_markers() {
+    local version="$1"
+
+    mkdir -p "$INSTALL_DIR"
+    printf '%s\n' "$version" > "${INSTALL_DIR}/.installed_version"
+    printf '%s\n' "$version" > "${INSTALL_DIR}/.kelinode-rs_version"
 }
 
 yaml_quote() {
@@ -473,10 +513,65 @@ download_geo_route_rules() {
 
 stop_existing_service() {
     if command -v systemctl >/dev/null 2>&1; then
-        systemctl stop v2node >/dev/null 2>&1 || true
+        stop_systemd_service "$SERVICE_NAME"
+        stop_legacy_native_systemd_service
     elif command -v rc-service >/dev/null 2>&1; then
-        rc-service v2node stop >/dev/null 2>&1 || true
+        rc-service "$SERVICE_NAME" stop >/dev/null 2>&1 || true
+        stop_legacy_native_openrc_service
     fi
+}
+
+stop_systemd_service() {
+    local name="$1"
+    local waited=0
+    local max_wait=20
+
+    systemctl stop "$name" >/dev/null 2>&1 || true
+    while systemctl is-active --quiet "$name" >/dev/null 2>&1; do
+        if [[ $waited -ge $max_wait ]]; then
+            echo -e "${red}${name}.service did not stop in ${max_wait}s. Please inspect: systemctl status ${name}${plain}" >&2
+            exit 1
+        fi
+        sleep 1
+        waited=$((waited + 1))
+    done
+}
+
+stop_legacy_native_systemd_service() {
+    if command -v systemctl >/dev/null 2>&1; then
+        local legacy_unit="/etc/systemd/system/${LEGACY_SERVICE_NAME}.service"
+        if [[ -f "$legacy_unit" ]] && grep -q "Keli Native Node" "$legacy_unit"; then
+            stop_systemd_service "$LEGACY_SERVICE_NAME"
+        fi
+    fi
+}
+
+stop_legacy_native_openrc_service() {
+    local legacy_init="/etc/init.d/${LEGACY_SERVICE_NAME}"
+    if [[ -f "$legacy_init" ]] && grep -q "Keli Native Node" "$legacy_init"; then
+        if command -v rc-service >/dev/null 2>&1; then
+            rc-service "$LEGACY_SERVICE_NAME" stop >/dev/null 2>&1 || true
+        fi
+        if command -v rc-update >/dev/null 2>&1; then
+            rc-update del "$LEGACY_SERVICE_NAME" default >/dev/null 2>&1 || true
+        fi
+        rm -f "$legacy_init"
+    fi
+}
+
+disable_legacy_native_service() {
+    if command -v systemctl >/dev/null 2>&1; then
+        local legacy_unit="/etc/systemd/system/${LEGACY_SERVICE_NAME}.service"
+        if [[ -f "$legacy_unit" ]] && grep -q "Keli Native Node" "$legacy_unit"; then
+            stop_systemd_service "$LEGACY_SERVICE_NAME"
+            systemctl disable "$LEGACY_SERVICE_NAME" >/dev/null 2>&1 || true
+            rm -f "$legacy_unit"
+            systemctl daemon-reload >/dev/null 2>&1 || true
+            systemctl reset-failed "$LEGACY_SERVICE_NAME" >/dev/null 2>&1 || true
+        fi
+    fi
+
+    stop_legacy_native_openrc_service
 }
 
 cleanup_hy2_port_forward_rules() {
@@ -498,20 +593,20 @@ cleanup_hy2_port_forward_rules() {
 
 uninstall_service() {
     if command -v systemctl >/dev/null 2>&1; then
-        systemctl stop v2node >/dev/null 2>&1 || true
-        systemctl disable v2node >/dev/null 2>&1 || true
-        rm -f /etc/systemd/system/v2node.service
+        systemctl stop "$SERVICE_NAME" >/dev/null 2>&1 || true
+        systemctl disable "$SERVICE_NAME" >/dev/null 2>&1 || true
+        rm -f "/etc/systemd/system/${SERVICE_NAME}.service"
         systemctl daemon-reload >/dev/null 2>&1 || true
-        systemctl reset-failed v2node >/dev/null 2>&1 || true
+        systemctl reset-failed "$SERVICE_NAME" >/dev/null 2>&1 || true
     fi
 
     if command -v rc-service >/dev/null 2>&1; then
-        rc-service v2node stop >/dev/null 2>&1 || true
+        rc-service "$SERVICE_NAME" stop >/dev/null 2>&1 || true
     fi
     if command -v rc-update >/dev/null 2>&1; then
-        rc-update del v2node default >/dev/null 2>&1 || true
+        rc-update del "$SERVICE_NAME" default >/dev/null 2>&1 || true
     fi
-    rm -f /etc/init.d/v2node
+    rm -f "/etc/init.d/${SERVICE_NAME}"
 }
 
 uninstall_native_node() {
@@ -519,15 +614,22 @@ uninstall_native_node() {
     uninstall_service
     cleanup_hy2_port_forward_rules
 
-    if [[ -L /usr/local/bin/v2node ]]; then
+    if [[ -L /usr/local/bin/kelinode ]]; then
         local link_target
-        link_target="$(readlink /usr/local/bin/v2node || true)"
-        if [[ "$link_target" == "${INSTALL_DIR}/v2node" ]]; then
+        link_target="$(readlink /usr/local/bin/kelinode || true)"
+        if [[ "$link_target" == "${INSTALL_DIR}/${BINARY_NAME}" ]]; then
+            rm -f /usr/local/bin/kelinode
+        fi
+    fi
+    if [[ -L /usr/local/bin/v2node ]]; then
+        local legacy_link_target
+        legacy_link_target="$(readlink /usr/local/bin/v2node || true)"
+        if [[ "$legacy_link_target" == "${INSTALL_DIR}/${BINARY_NAME}" ]]; then
             rm -f /usr/local/bin/v2node
         fi
     fi
 
-    rm -f "${INSTALL_DIR}/v2node"
+    rm -f "${INSTALL_DIR}/${BINARY_NAME}"
     rm -f "${INSTALL_DIR}/control.token"
     rm -f "${INSTALL_DIR}/.installed_version" "${INSTALL_DIR}/.kelinode-rs_version" "${INSTALL_DIR}/.keli-core-rs_version"
 
@@ -544,7 +646,7 @@ uninstall_native_node() {
 
 install_service() {
     if command -v systemctl >/dev/null 2>&1; then
-        cat >/etc/systemd/system/v2node.service <<EOF
+        cat >"/etc/systemd/system/${SERVICE_NAME}.service" <<EOF
 [Unit]
 Description=Keli Native Node
 After=network.target nss-lookup.target
@@ -556,7 +658,7 @@ Group=root
 Type=simple
 LimitNOFILE=999999
 WorkingDirectory=${INSTALL_DIR}
-ExecStart=${INSTALL_DIR}/v2node server --config ${CONFIG_FILE}
+ExecStart=${INSTALL_DIR}/${BINARY_NAME} server --config ${CONFIG_FILE}
 Restart=always
 RestartSec=10
 
@@ -564,32 +666,32 @@ RestartSec=10
 WantedBy=multi-user.target
 EOF
         systemctl daemon-reload
-        systemctl enable v2node >/dev/null
-        systemctl restart v2node
-        echo -e "${green}v2node service started with systemd.${plain}"
+        systemctl enable "$SERVICE_NAME" >/dev/null
+        systemctl restart "$SERVICE_NAME"
+        echo -e "${green}${SERVICE_NAME} service started with systemd.${plain}"
     elif command -v rc-update >/dev/null 2>&1; then
-        cat >/etc/init.d/v2node <<EOF
+        cat >"/etc/init.d/${SERVICE_NAME}" <<EOF
 #!/sbin/openrc-run
 
-name="v2node"
+name="${SERVICE_NAME}"
 description="Keli Native Node"
-command="${INSTALL_DIR}/v2node"
+command="${INSTALL_DIR}/${BINARY_NAME}"
 command_args="server --config ${CONFIG_FILE}"
 command_user="root"
-pidfile="/run/v2node.pid"
+pidfile="/run/${SERVICE_NAME}.pid"
 command_background="yes"
 
 depend() {
     need net
 }
 EOF
-        chmod +x /etc/init.d/v2node
-        rc-update add v2node default >/dev/null
-        rc-service v2node restart
-        echo -e "${green}v2node service started with OpenRC.${plain}"
+        chmod +x "/etc/init.d/${SERVICE_NAME}"
+        rc-update add "$SERVICE_NAME" default >/dev/null
+        rc-service "$SERVICE_NAME" restart
+        echo -e "${green}${SERVICE_NAME} service started with OpenRC.${plain}"
     else
         echo -e "${yellow}No supported service manager found. Start manually:${plain}"
-        echo "  ${INSTALL_DIR}/v2node server --config ${CONFIG_FILE}"
+        echo "  ${INSTALL_DIR}/${BINARY_NAME} server --config ${CONFIG_FILE}"
     fi
 }
 
@@ -600,6 +702,11 @@ install_native_node() {
     local url="https://github.com/keli-123456/kelinode-rs/releases/download/${version}/${asset}.tar.gz"
     local archive="${WORK_DIR}/${asset}.tar.gz"
 
+    if is_native_node_installed_version "$version"; then
+        echo -e "${green}Keli native node ${version} is already installed; skipping binary download.${plain}"
+        return
+    fi
+
     echo -e "${green}Installing Keli native node ${version} (${target})${plain}"
     echo "Download: ${url}"
     curl -fL "$url" -o "$archive"
@@ -609,13 +716,13 @@ install_native_node() {
 }
 
 verify_installed_binary() {
-    if "${INSTALL_DIR}/v2node" version >/dev/null 2>&1; then
+    if "${INSTALL_DIR}/${BINARY_NAME}" version >/dev/null 2>&1; then
         return
     fi
 
     echo -e "${red}Installed binary cannot run on this system.${plain}" >&2
     echo -e "${yellow}If the error mentions GLIBC, install v0.1.32 or newer so the static Linux binary is used.${plain}" >&2
-    "${INSTALL_DIR}/v2node" version 2>&1 || true
+    "${INSTALL_DIR}/${BINARY_NAME}" version 2>&1 || true
     exit 1
 }
 
@@ -646,16 +753,18 @@ main() {
 
     install_native_node "$version" "$target"
     verify_installed_binary
+    write_installed_version_markers "$version"
     write_machine_config
     download_geo_route_rules
+    disable_legacy_native_service
     install_service
 
     echo "------------------------------------------"
     echo -e "${green}Keli native node installed.${plain}"
     echo "Config: ${CONFIG_FILE}"
-    echo "Command: v2node server --config ${CONFIG_FILE}"
-    echo "Logs: v2node log"
-    echo "      journalctl -u v2node -n 200 --no-pager -f"
+    echo "Command: kelinode server --config ${CONFIG_FILE}"
+    echo "Logs: kelinode log"
+    echo "      journalctl -u ${SERVICE_NAME} -n 200 --no-pager -f"
     echo "------------------------------------------"
 }
 

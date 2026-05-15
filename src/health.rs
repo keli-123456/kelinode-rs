@@ -11,7 +11,7 @@ use crate::process::{ProcessState, ProcessStatus};
 use crate::runtime::{RuntimeBootstrapPlan, RuntimeMode};
 use crate::subscription_proxy::SubscriptionProxyStatus;
 
-const DEFAULT_INSTALL_DIR: &str = "/usr/local/v2node";
+const DEFAULT_INSTALL_DIR: &str = "/usr/local/kelinode";
 const INSTALLED_CORE_VERSION_FILES: &[(&str, &str)] = &[("keli-core-rs", ".keli-core-rs_version")];
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

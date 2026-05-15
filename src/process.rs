@@ -12,7 +12,7 @@ use crate::core_control::{KeliCoreControlClient, KELI_CORE_CONTROL_TOKEN_ENV};
 use crate::logging;
 
 #[cfg_attr(feature = "embedded-core", allow(dead_code))]
-const DEFAULT_NATIVE_INSTALL_DIR: &str = "/usr/local/v2node";
+const DEFAULT_NATIVE_INSTALL_DIR: &str = "/usr/local/kelinode";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProcessSpec {

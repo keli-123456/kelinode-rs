@@ -24,7 +24,7 @@ Start with an opt-in node or machine profile:
 ```yaml
 kernel:
   type: keli-core-rs
-  config_dir: "/etc/v2node"
+  config_dir: "/etc/kelinode"
 ```
 
 Keep `kernel.type: xray` for nodes that are not part of the gray release.
@@ -32,7 +32,7 @@ Keep `kernel.type: xray` for nodes that are not part of the gray release.
 Before starting the runtime, run the preflight gate:
 
 ```bash
-kelinode-rs gray-preflight /etc/v2node/config.yml
+kelinode gray-preflight /etc/kelinode/config.yml
 ```
 
 Treat any `error:` line as a blocker. Warnings are not automatic blockers, but they must be
@@ -43,28 +43,28 @@ For binary gray releases, prefer the embedded native package instead of installi
 core separately. The package contains one native agent binary with the Rust core linked in:
 
 ```text
-bin/v2node
+bin/kelinode
 ```
 
 Install it with:
 
 ```bash
 sudo ./install.sh
-sudo v2node server --config /etc/v2node/config.yml
+sudo kelinode server --config /etc/kelinode/config.yml
 ```
 
-`v2node server` is kept as a compatibility alias for the old Go node command. The package installs
-the single `v2node` binary under `/usr/local/v2node/v2node` and creates `/usr/local/bin/v2node` as
-a compatibility symlink.
+`v2node server` is kept only as a compatibility alias for old operator habits. The native package
+installs the `kelinode` binary under `/usr/local/kelinode/kelinode`, creates `/usr/local/bin/kelinode`,
+and also creates `/usr/local/bin/v2node` as a legacy symlink to the same native binary.
 
 For Docker gray releases, build the image from the `kelinode-rs` repository:
 
 ```bash
 docker build --build-arg KELI_CORE_RS_REF=main -t keli-native-node:latest .
-docker run --rm --network host -v /etc/v2node:/etc/v2node keli-native-node:latest
+docker run --rm --network host -v /etc/kelinode:/etc/kelinode keli-native-node:latest
 ```
 
-The Docker image starts `v2node server` by default. The native core runs in-process, so there is no
+The Docker image starts `kelinode server` by default. The native core runs in-process, so there is no
 separate core binary to install in the container.
 
 Certificates remain external files. Mount the host certificate directory into the same path rendered

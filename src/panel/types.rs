@@ -6,7 +6,7 @@ use serde::de::{self, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 
-use crate::config::normalize_config_dir;
+use crate::config::{normalize_config_dir, DEFAULT_CONFIG_DIR};
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct NodeInfo {
@@ -265,7 +265,7 @@ pub struct UserTraffic {
 
 impl NodeInfo {
     pub fn from_common(api_host: &str, node_id: u32, common: CommonNode) -> Result<Self, String> {
-        Self::from_common_with_config_dir(api_host, node_id, "/etc/v2node", common)
+        Self::from_common_with_config_dir(api_host, node_id, DEFAULT_CONFIG_DIR, common)
     }
 
     pub fn from_common_with_config_dir(

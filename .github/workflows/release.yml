@@ -105,8 +105,8 @@ jobs:
         working-directory: kelinode-rs
         run: |
           set -euo pipefail
-          file target/x86_64-unknown-linux-musl/release/kelinode-rs
-          ldd_output="$(ldd target/x86_64-unknown-linux-musl/release/kelinode-rs 2>&1 || true)"
+          file target/x86_64-unknown-linux-musl/release/kelinode
+          ldd_output="$(ldd target/x86_64-unknown-linux-musl/release/kelinode 2>&1 || true)"
           if printf '%s\n' "$ldd_output" | grep -Eq 'not a dynamic executable|statically linked'; then
             echo "Static musl binary verified."
           else
@@ -123,7 +123,7 @@ jobs:
           version="${{ steps.meta.outputs.version }}"
           name="${{ steps.meta.outputs.asset_prefix }}"
           mkdir -p "dist/${name}/bin" "dist/${name}/docs"
-          cp target/x86_64-unknown-linux-musl/release/kelinode-rs "dist/${name}/bin/v2node"
+          cp target/x86_64-unknown-linux-musl/release/kelinode "dist/${name}/bin/kelinode"
           cp README.md "dist/${name}/"
           cp docs/CONTRACT.md "dist/${name}/CONTRACT.md"
           cp docs/NATIVE_CORE_PARITY.md "dist/${name}/NATIVE_CORE_PARITY.md"
@@ -132,7 +132,7 @@ jobs:
           cat > "dist/${name}/config.yml.example" <<'YAML'
           kernel:
             type: keli-core-rs
-            config_dir: "/etc/v2node"
+            config_dir: "/etc/kelinode"
 
           machine:
             enabled: true
@@ -146,13 +146,14 @@ jobs:
           cat > "dist/${name}/install.sh" <<'SH'
           #!/usr/bin/env sh
           set -eu
-          install_dir="${1:-/usr/local/v2node}"
-          mkdir -p "$install_dir" /etc/v2node /usr/local/bin
-          cp bin/v2node "$install_dir/v2node"
-          chmod +x "$install_dir/v2node"
-          ln -sf "$install_dir/v2node" /usr/local/bin/v2node
+          install_dir="${1:-/usr/local/kelinode}"
+          mkdir -p "$install_dir" /etc/kelinode /usr/local/bin
+          cp bin/kelinode "$install_dir/kelinode"
+          chmod +x "$install_dir/kelinode"
+          ln -sf "$install_dir/kelinode" /usr/local/bin/kelinode
+          ln -sf "$install_dir/kelinode" /usr/local/bin/v2node
           echo "Installed Keli native node to $install_dir"
-          echo "Run: $install_dir/v2node server --config /etc/v2node/config.yml"
+          echo "Run: $install_dir/kelinode server --config /etc/kelinode/config.yml"
           SH
           chmod +x "dist/${name}/install.sh"
           tar -C dist -czf "dist/${name}.tar.gz" "${name}"
@@ -165,8 +166,9 @@ jobs:
             "platform": "linux-x86_64",
             "archive": "${name}.tar.gz",
             "sha256": "${sha256}",
+            "binary": "kelinode",
             "binaries": {
-              "agent": "bin/v2node"
+              "agent": "bin/kelinode"
             },
             "run_args": ["server", "--config", "<config.yml>"],
             "default_core": "embedded-keli-core-rs"

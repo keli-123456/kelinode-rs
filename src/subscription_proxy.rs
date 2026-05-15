@@ -13,7 +13,7 @@ use std::time::Duration;
 use crate::config::{SubscriptionProxyConfig, SubscriptionProxyProfile};
 
 pub const DEFAULT_HTTPS_LISTEN: &str = "0.0.0.0:443";
-pub const DEFAULT_CHALLENGE_DIR: &str = "/etc/v2node/subproxy/challenges";
+pub const DEFAULT_CHALLENGE_DIR: &str = "/etc/kelinode/subproxy/challenges";
 pub const DEFAULT_MAX_RESPONSE_BYTES: u64 = 10 * 1024 * 1024;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
