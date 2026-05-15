@@ -25,7 +25,7 @@ LOCK_DIR="/tmp/keli-native-node-install.lock"
 usage() {
     cat <<'EOF'
 Usage:
-  install.sh [install] [--version v0.1.46] --machine-url URL --machine-id ID --machine-token TOKEN [--machine-name NAME]
+  install.sh [install] [--version v0.1.47] --machine-url URL --machine-id ID --machine-token TOKEN [--machine-name NAME]
   install.sh uninstall [--purge-config]
 
 Options:
@@ -574,6 +574,17 @@ disable_legacy_native_service() {
     stop_legacy_native_openrc_service
 }
 
+remove_legacy_native_command_alias() {
+    local legacy_link="/usr/local/bin/v2node"
+    local legacy_link_target
+
+    [[ -L "$legacy_link" ]] || return 0
+    legacy_link_target="$(readlink "$legacy_link" || true)"
+    if [[ "$legacy_link_target" == "${INSTALL_DIR}/${BINARY_NAME}" ]]; then
+        rm -f "$legacy_link"
+    fi
+}
+
 cleanup_hy2_port_forward_rules() {
     for tool in iptables ip6tables; do
         command -v "$tool" >/dev/null 2>&1 || continue
@@ -754,6 +765,7 @@ main() {
     install_native_node "$version" "$target"
     verify_installed_binary
     write_installed_version_markers "$version"
+    remove_legacy_native_command_alias
     write_machine_config
     download_geo_route_rules
     disable_legacy_native_service
