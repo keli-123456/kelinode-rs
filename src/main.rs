@@ -5,7 +5,10 @@ use kelinode_rs::control::{handle_runtime_signal, RuntimeControlOptions, Runtime
 use kelinode_rs::core::CoreKind;
 use kelinode_rs::panel::client::{PanelClient, PanelClientOptions};
 use kelinode_rs::panel::contract::NODE_API_CONTRACT_VERSION;
-use kelinode_rs::port_forward::SystemPortForwardExecutor;
+use kelinode_rs::port_forward::{
+    cleanup_hysteria_port_forward, inspect_hysteria_port_forward, repair_hysteria_port_forward,
+    HysteriaPortForwardStatus, SystemPortForwardExecutor,
+};
 use kelinode_rs::process::{
     core_process_spec, sidecar_process_spec, ProcessSupervisor, SystemProcessSupervisor,
 };
@@ -63,6 +66,18 @@ fn run() -> Result<(), String> {
                 return Err("native gray preflight failed".to_string());
             }
         }
+        "rules" => {
+            let args = args.collect::<Vec<_>>();
+            let (action, config_args) = parse_rules_args(&args)?;
+            let path = config_path_from_args(config_args, "/etc/v2node/config.yml")?;
+            let runtime = tokio::runtime::Runtime::new()
+                .map_err(|err| format!("start tokio runtime: {err}"))?;
+            let status = runtime.block_on(run_rules_command(&path, action))?;
+            print_hy2_rules_status(&status)?;
+            if !status.errors.is_empty() {
+                return Err("HY2 port forwarding has errors".to_string());
+            }
+        }
         "run" | "server" => {
             let path = config_path_from_args(args, "/etc/v2node/config.yml")?;
             let runtime = tokio::runtime::Runtime::new()
@@ -115,6 +130,55 @@ fn config_path_from_args(
     }
 
     Ok(path.unwrap_or_else(|| default_path.to_string()))
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RulesAction {
+    Status,
+    Repair,
+    Cleanup,
+}
+
+fn parse_rules_args(args: &[String]) -> Result<(RulesAction, Vec<String>), String> {
+    let Some(first) = args.first() else {
+        return Ok((RulesAction::Status, Vec::new()));
+    };
+    if first.starts_with('-') {
+        return Ok((RulesAction::Status, args.to_vec()));
+    }
+
+    let action = match first.as_str() {
+        "status" => RulesAction::Status,
+        "repair" => RulesAction::Repair,
+        "cleanup" | "clean" => RulesAction::Cleanup,
+        other => return Err(format!("unknown rules action: {other}")),
+    };
+    Ok((action, args[1..].to_vec()))
+}
+
+async fn run_rules_command(
+    path: &str,
+    action: RulesAction,
+) -> Result<HysteriaPortForwardStatus, String> {
+    let mut executor = SystemPortForwardExecutor::default();
+    if action == RulesAction::Cleanup {
+        return Ok(cleanup_hysteria_port_forward(&mut executor));
+    }
+
+    let config = AppConfig::load_from_path(path)?;
+    let plan = bootstrap_from_config(&config).await?;
+    Ok(match action {
+        RulesAction::Status => inspect_hysteria_port_forward(&plan.node_infos, &mut executor),
+        RulesAction::Repair => repair_hysteria_port_forward(&plan.node_infos, &mut executor),
+        RulesAction::Cleanup => unreachable!("cleanup returned before config load"),
+    })
+}
+
+fn print_hy2_rules_status(status: &HysteriaPortForwardStatus) -> Result<(), String> {
+    let output = serde_json::to_string_pretty(status)
+        .map_err(|err| format!("serialize HY2 rules status: {err}"))?;
+    println!("{output}");
+    Ok(())
 }
 
 async fn run_native_gray_preflight(path: &str) -> Result<NativeGrayPreflightReport, String> {
@@ -334,6 +398,7 @@ async fn run_agent_once(
     realtime_workers.abort();
     if shutdown {
         stop_core_for_plan(&mut runner)?;
+        cleanup_hy2_port_forward_on_shutdown(&mut runner);
     }
     result
 }
@@ -387,6 +452,26 @@ where
     }
 
     Ok(())
+}
+
+fn cleanup_hy2_port_forward_on_shutdown<P, F>(runner: &mut PanelRuntimeLoop<'_, P, F>)
+where
+    P: ProcessSupervisor,
+    F: kelinode_rs::port_forward::PortForwardExecutor,
+{
+    let status = cleanup_hysteria_port_forward(&mut *runner.port_forward_executor);
+    if !status.errors.is_empty() {
+        eprintln!(
+            "HY2 port forwarding cleanup warning: {}",
+            status.errors.join("; ")
+        );
+    }
+    for tool in status.tools.iter().filter(|tool| !tool.error.is_empty()) {
+        eprintln!(
+            "HY2 port forwarding cleanup warning: tool={} error={}",
+            tool.tool, tool.error
+        );
+    }
 }
 
 async fn wait_shutdown_signal() -> Result<(), String> {
@@ -568,6 +653,9 @@ fn print_help() {
     println!(
         "  gray-preflight [path|--config path]    check whether config is ready for native core gray release"
     );
+    println!(
+        "  rules [status|repair|cleanup] [path|--config path]    inspect or reconcile HY2 iptables rules"
+    );
     println!("  run|server [path|--config path]    start the node runtime loop");
 }
 
@@ -575,7 +663,8 @@ fn print_help() {
 mod tests {
     use super::{
         config_path_from_args, machine_panel_clients, native_gray_preflight_report,
-        runtime_loop_options, runtime_tick_interval, start_subscription_proxy_manager,
+        parse_rules_args, runtime_loop_options, runtime_tick_interval,
+        start_subscription_proxy_manager, RulesAction,
     };
     use kelinode_rs::config::{
         AgentConfig, MachineProfileConfig, NodeConfig, ResolvedConfig, ResolvedMachineConfig,
@@ -610,6 +699,37 @@ mod tests {
             config_path_from_args(vec!["/tmp/c.yml".to_string()], "/etc/v2node/config.yml",)
                 .unwrap(),
             "/tmp/c.yml"
+        );
+    }
+
+    #[test]
+    fn rules_args_default_to_status_and_parse_action() {
+        assert_eq!(
+            parse_rules_args(&[]).unwrap(),
+            (RulesAction::Status, Vec::<String>::new())
+        );
+        assert_eq!(
+            parse_rules_args(&["--config".to_string(), "node.yml".to_string()]).unwrap(),
+            (
+                RulesAction::Status,
+                vec!["--config".to_string(), "node.yml".to_string()]
+            )
+        );
+        assert_eq!(
+            parse_rules_args(&[
+                "repair".to_string(),
+                "--config".to_string(),
+                "node.yml".to_string()
+            ])
+            .unwrap(),
+            (
+                RulesAction::Repair,
+                vec!["--config".to_string(), "node.yml".to_string()]
+            )
+        );
+        assert_eq!(
+            parse_rules_args(&["cleanup".to_string()]).unwrap(),
+            (RulesAction::Cleanup, Vec::<String>::new())
         );
     }
 

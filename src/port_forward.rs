@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::panel::types::{NodeInfo, Protocol};
+use serde::Serialize;
 
 pub const HYSTERIA_PORT_FORWARD_COMMENT: &str = "V2NODE-HY2";
 pub const HYSTERIA_PORT_FORWARD_CHAIN: &str = "V2NODE-HY2";
@@ -22,7 +23,7 @@ pub struct PortForwardRule {
     pub target_port: u16,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct HysteriaPortForwardRuleSpec {
     pub protocol: String,
     pub match_rule: String,
@@ -30,7 +31,7 @@ pub struct HysteriaPortForwardRuleSpec {
     pub spec: String,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
 pub struct HysteriaPortForwardToolStatus {
     pub tool: String,
     pub available: bool,
@@ -42,7 +43,7 @@ pub struct HysteriaPortForwardToolStatus {
     pub error: String,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
 pub struct HysteriaPortForwardStatus {
     pub enabled: bool,
     pub running_as_root: bool,

@@ -21,7 +21,7 @@ LOCK_DIR="/tmp/keli-native-node-install.lock"
 usage() {
     cat <<'EOF'
 Usage:
-  install.sh [install] [--version v0.1.30] --machine-url URL --machine-id ID --machine-token TOKEN [--machine-name NAME]
+  install.sh [install] [--version v0.1.31] --machine-url URL --machine-id ID --machine-token TOKEN [--machine-name NAME]
   install.sh uninstall [--purge-config]
 
 Options:
@@ -115,7 +115,7 @@ acquire_lock() {
 
 install_base_packages() {
     local missing=()
-    for cmd in curl tar; do
+    for cmd in curl tar iptables ip6tables; do
         command -v "$cmd" >/dev/null 2>&1 || missing+=("$cmd")
     done
     command -v update-ca-certificates >/dev/null 2>&1 || true
@@ -127,19 +127,19 @@ install_base_packages() {
     echo -e "${yellow}Installing required packages: ${missing[*]}${plain}"
     if command -v apt-get >/dev/null 2>&1; then
         apt-get update -y >/dev/null
-        DEBIAN_FRONTEND=noninteractive apt-get install -y curl tar ca-certificates >/dev/null
+        DEBIAN_FRONTEND=noninteractive apt-get install -y curl tar ca-certificates iptables >/dev/null
         update-ca-certificates >/dev/null 2>&1 || true
     elif command -v dnf >/dev/null 2>&1; then
-        dnf install -y curl tar ca-certificates >/dev/null
+        dnf install -y curl tar ca-certificates iptables >/dev/null
         update-ca-trust force-enable >/dev/null 2>&1 || true
     elif command -v yum >/dev/null 2>&1; then
-        yum install -y curl tar ca-certificates >/dev/null
+        yum install -y curl tar ca-certificates iptables >/dev/null
         update-ca-trust force-enable >/dev/null 2>&1 || true
     elif command -v apk >/dev/null 2>&1; then
-        apk add --no-cache curl tar ca-certificates >/dev/null
+        apk add --no-cache curl tar ca-certificates iptables >/dev/null
         update-ca-certificates >/dev/null 2>&1 || true
     elif command -v pacman >/dev/null 2>&1; then
-        pacman -Sy --noconfirm --needed curl tar ca-certificates >/dev/null
+        pacman -Sy --noconfirm --needed curl tar ca-certificates iptables >/dev/null
     else
         echo -e "${red}Missing required commands: ${missing[*]}; install them and retry.${plain}" >&2
         exit 1
@@ -216,6 +216,23 @@ stop_existing_service() {
     fi
 }
 
+cleanup_hy2_port_forward_rules() {
+    for tool in iptables ip6tables; do
+        command -v "$tool" >/dev/null 2>&1 || continue
+        while IFS= read -r line; do
+            [[ "$line" == *V2NODE-HY2* ]] || continue
+            line="${line//\"/}"
+            line="${line//\'/}"
+            set -- $line
+            [[ "${1:-}" == "-A" && "${2:-}" == "PREROUTING" ]] || continue
+            shift 2
+            "$tool" -t nat -D PREROUTING "$@" >/dev/null 2>&1 || true
+        done < <("$tool" -t nat -S PREROUTING 2>/dev/null || true)
+        "$tool" -t nat -F V2NODE-HY2 >/dev/null 2>&1 || true
+        "$tool" -t nat -X V2NODE-HY2 >/dev/null 2>&1 || true
+    done
+}
+
 uninstall_service() {
     if command -v systemctl >/dev/null 2>&1; then
         systemctl stop v2node >/dev/null 2>&1 || true
@@ -237,6 +254,7 @@ uninstall_service() {
 uninstall_native_node() {
     echo -e "${yellow}Uninstalling Keli native node...${plain}"
     uninstall_service
+    cleanup_hy2_port_forward_rules
 
     if [[ -L /usr/local/bin/v2node ]]; then
         local link_target
