@@ -22,7 +22,7 @@ LOCK_DIR="/tmp/keli-native-node-install.lock"
 usage() {
     cat <<'EOF'
 Usage:
-  install.sh [install] [--version v0.1.40] --machine-url URL --machine-id ID --machine-token TOKEN [--machine-name NAME]
+  install.sh [install] [--version v0.1.41] --machine-url URL --machine-id ID --machine-token TOKEN [--machine-name NAME]
   install.sh uninstall [--purge-config]
 
 Options:
@@ -186,23 +186,35 @@ yaml_quote() {
     printf '"%s"' "$value"
 }
 
-write_machine_config() {
-    mkdir -p "$CONFIG_DIR"
+trim_value() {
+    local value="$1"
+    value="${value#"${value%%[![:space:]]*}"}"
+    value="${value%"${value##*[![:space:]]}"}"
+    printf '%s' "$value"
+}
 
-    if [[ ! -f "$CONFIG_FILE" ]]; then
-        write_new_machine_config
-        return
+yaml_unquote() {
+    local value
+    value="$(trim_value "$1")"
+    value="${value%%#*}"
+    value="$(trim_value "$value")"
+    if [[ "$value" == \"*\" && "$value" == *\" ]]; then
+        value="${value:1:${#value}-2}"
+    elif [[ "$value" == \'*\' && "$value" == *\' ]]; then
+        value="${value:1:${#value}-2}"
     fi
+    value="${value//\\\"/\"}"
+    value="${value//\\\\/\\}"
+    printf '%s' "$value"
+}
 
-    if machine_profile_exists; then
-        ensure_native_kernel_config
-        chmod 600 "$CONFIG_FILE" 2>/dev/null || true
-        echo -e "${green}Machine profile already exists in ${CONFIG_FILE}; keeping existing profile.${plain}"
-        return
-    fi
-
-    append_machine_profile
-    ensure_native_kernel_config
+normalize_machine_url() {
+    local value
+    value="$(trim_value "$1")"
+    while [[ "$value" == */ ]]; do
+        value="${value%/}"
+    done
+    printf '%s' "$value"
 }
 
 machine_profile_name() {
@@ -213,181 +225,175 @@ machine_profile_name() {
     printf '%s' "$name"
 }
 
-machine_profile_block() {
-    local name
-    name="$(machine_profile_name)"
-    {
-        echo "    - name: $(yaml_quote "$name")"
-        echo "      url: $(yaml_quote "$MACHINE_URL_ARG")"
-        echo "      token: $(yaml_quote "$MACHINE_TOKEN_ARG")"
-        echo "      machine_id: ${MACHINE_ID_ARG}"
-        echo "      config_dir: $(yaml_quote "$CONFIG_DIR")"
+extract_machine_profiles() {
+    local config_file="$1"
+    local line in_profiles=false in_profile=false
+    local name="" url="" token="" machine_id="" timeout="" config_dir=""
+
+    flush_profile() {
+        if [[ -n "$url" && -n "$machine_id" ]]; then
+            [[ -z "$timeout" ]] && timeout=15
+            printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$name" "$url" "$token" "$machine_id" "$timeout" "$config_dir"
+        fi
+        in_profile=false
+        name=""
+        url=""
+        token=""
+        machine_id=""
+        timeout=""
+        config_dir=""
     }
+
+    [[ -f "$config_file" ]] || return 0
+
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        if [[ "$line" =~ ^[[:space:]]*profiles:[[:space:]]*$ ]]; then
+            in_profiles=true
+            continue
+        fi
+        if [[ "$in_profiles" != true ]]; then
+            continue
+        fi
+        if [[ "$line" =~ ^[[:alnum:]_]+: ]]; then
+            flush_profile
+            in_profiles=false
+            continue
+        fi
+        if [[ "$line" =~ ^[[:space:]]*-[[:space:]]*name:[[:space:]]*(.*)$ ]]; then
+            flush_profile
+            in_profile=true
+            name=$(yaml_unquote "${BASH_REMATCH[1]}")
+            continue
+        fi
+        if [[ "$line" =~ ^[[:space:]]*-[[:space:]]*url:[[:space:]]*(.*)$ ]]; then
+            flush_profile
+            in_profile=true
+            url=$(normalize_machine_url "$(yaml_unquote "${BASH_REMATCH[1]}")")
+            continue
+        fi
+        if [[ "$in_profile" == true && "$line" =~ ^[[:space:]]*url:[[:space:]]*(.*)$ ]]; then
+            url=$(normalize_machine_url "$(yaml_unquote "${BASH_REMATCH[1]}")")
+            continue
+        fi
+        if [[ "$in_profile" == true && "$line" =~ ^[[:space:]]*token:[[:space:]]*(.*)$ ]]; then
+            token=$(yaml_unquote "${BASH_REMATCH[1]}")
+            continue
+        fi
+        if [[ "$in_profile" == true && "$line" =~ ^[[:space:]]*machine_id:[[:space:]]*([0-9]+) ]]; then
+            machine_id="${BASH_REMATCH[1]}"
+            continue
+        fi
+        if [[ "$in_profile" == true && "$line" =~ ^[[:space:]]*timeout:[[:space:]]*([0-9]+) ]]; then
+            timeout="${BASH_REMATCH[1]}"
+            continue
+        fi
+        if [[ "$in_profile" == true && "$line" =~ ^[[:space:]]*config_dir:[[:space:]]*(.*)$ ]]; then
+            config_dir=$(yaml_unquote "${BASH_REMATCH[1]}")
+            continue
+        fi
+    done < "$config_file"
+
+    flush_profile
 }
 
-write_new_machine_config() {
+write_machine_config_from_profiles() {
+    local profiles_file="$1"
+    local name url token machine_id timeout config_dir
+
     {
-        echo "kernel:"
-        echo "  type: keli-core-rs"
-        echo "  config_dir: $(yaml_quote "$CONFIG_DIR")"
-        echo
         echo "machine:"
         echo "  enabled: true"
         echo "  continue_on_error: true"
         echo "  profiles:"
-        machine_profile_block
-    } > "$CONFIG_FILE"
-    chmod 600 "$CONFIG_FILE" 2>/dev/null || true
-    echo -e "${green}Wrote ${CONFIG_FILE}${plain}"
+        while IFS=$'\t' read -r name url token machine_id timeout config_dir; do
+            [[ -z "$url" || -z "$machine_id" ]] && continue
+            [[ -z "$name" ]] && name="machine-${machine_id}"
+            [[ -z "$timeout" ]] && timeout=15
+            echo "    - name: $(yaml_quote "$name")"
+            echo "      url: $(yaml_quote "$url")"
+            echo "      token: $(yaml_quote "$token")"
+            echo "      machine_id: ${machine_id}"
+            echo "      timeout: ${timeout}"
+            if [[ -n "$config_dir" ]]; then
+                echo "      config_dir: $(yaml_quote "$config_dir")"
+            fi
+        done < "$profiles_file"
+        echo
+        echo "kernel:"
+        echo "  type: keli-core-rs"
+        echo "  config_dir: $(yaml_quote "$CONFIG_DIR")"
+        echo "  log_level: \"warning\""
+        echo "  ip_strategy: \"UseIPv4\""
+        echo "  dns_servers:"
+        echo "    - \"1.1.1.1\""
+        echo "    - \"8.8.8.8\""
+        echo
+        echo "log:"
+        echo "  level: \"warning\""
+        echo "  output: \"\""
+        echo "  access: \"none\""
+        echo
+        echo "runtime:"
+        echo "  gomemlimit: \"\""
+        echo "  gogc: 0"
+        echo "  auto_hy2_port_forward: true"
+        echo
+        echo "health_port: 0"
+        echo "pprof_port: 0"
+    }
 }
 
-ensure_native_kernel_config() {
-    local backup tmp
-    backup="${CONFIG_FILE}.bak.$(date +%Y%m%d%H%M%S)"
-    tmp="${CONFIG_FILE}.tmp.native.$$"
+write_machine_config() {
+    local existing_profiles merged_profiles new_config backup profile_count machine_url machine_name
 
-    awk -v config_dir="$(yaml_quote "$CONFIG_DIR")" '
-        function finish_kernel() {
-            if (!in_kernel) {
-                return
-            }
-            if (!saw_kernel_type) {
-                print "  type: keli-core-rs"
-            }
-            if (!saw_kernel_config_dir) {
-                print "  config_dir: " config_dir
-            }
-            in_kernel = 0
-        }
-        BEGIN {
-            saw_kernel = 0
-            in_kernel = 0
-            saw_kernel_type = 0
-            saw_kernel_config_dir = 0
-        }
-        {
-            if (in_kernel && $0 ~ /^[^[:space:]#][^:]*:/ && $0 !~ /^kernel:[[:space:]]*$/) {
-                finish_kernel()
-            }
-            if ($0 ~ /^kernel:[[:space:]]*$/) {
-                saw_kernel = 1
-                in_kernel = 1
-                saw_kernel_type = 0
-                saw_kernel_config_dir = 0
-                print
-                next
-            }
-            if (in_kernel && $0 ~ /^[[:space:]]{2}type:[[:space:]]*/) {
-                if (!saw_kernel_type) {
-                    print "  type: keli-core-rs"
-                }
-                saw_kernel_type = 1
-                next
-            }
-            if (in_kernel && $0 ~ /^[[:space:]]{2}config_dir:[[:space:]]*/) {
-                if (!saw_kernel_config_dir) {
-                    print "  config_dir: " config_dir
-                }
-                saw_kernel_config_dir = 1
-                next
-            }
-            print
-        }
-        END {
-            if (in_kernel) {
-                finish_kernel()
-            }
-            if (!saw_kernel) {
-                print ""
-                print "kernel:"
-                print "  type: keli-core-rs"
-                print "  config_dir: " config_dir
-            }
-        }
-    ' "$CONFIG_FILE" > "$tmp"
+    mkdir -p "$CONFIG_DIR"
+    existing_profiles="$(mktemp)"
+    merged_profiles="$(mktemp)"
+    new_config="$(mktemp)"
+    machine_url="$(normalize_machine_url "$MACHINE_URL_ARG")"
+    machine_name="$(machine_profile_name)"
 
-    if cmp -s "$CONFIG_FILE" "$tmp"; then
-        rm -f "$tmp"
+    extract_machine_profiles "$CONFIG_FILE" > "$existing_profiles"
+    awk -F '\t' \
+        -v name="$machine_name" \
+        -v url="$machine_url" \
+        -v token="$MACHINE_TOKEN_ARG" \
+        -v machine_id="$MACHINE_ID_ARG" \
+        'BEGIN { updated = 0 }
+         {
+             if (($2 == url && $4 == machine_id) || ($3 == token && $4 == machine_id)) {
+                 if (!updated) {
+                     print name "\t" url "\t" token "\t" machine_id "\t15\t" $6
+                     updated = 1
+                 }
+                 next
+             }
+             print $0
+         }
+         END {
+             if (!updated) {
+                 print name "\t" url "\t" token "\t" machine_id "\t15\t"
+             }
+         }' "$existing_profiles" > "$merged_profiles"
+
+    write_machine_config_from_profiles "$merged_profiles" > "$new_config"
+    if [[ -f "$CONFIG_FILE" ]] && cmp -s "$new_config" "$CONFIG_FILE"; then
+        rm -f "$existing_profiles" "$merged_profiles" "$new_config"
         chmod 600 "$CONFIG_FILE" 2>/dev/null || true
+        echo -e "${green}Machine config unchanged in ${CONFIG_FILE}.${plain}"
         return
     fi
 
-    cp "$CONFIG_FILE" "$backup"
-    mv "$tmp" "$CONFIG_FILE"
-    chmod 600 "$CONFIG_FILE" 2>/dev/null || true
-    echo -e "${green}Ensured native kernel config in ${CONFIG_FILE}${plain}"
-    echo -e "${yellow}Previous config backup: ${backup}${plain}"
-}
-
-machine_profile_exists() {
-    local url_line
-    url_line="url: $(yaml_quote "$MACHINE_URL_ARG")"
-    grep -F "machine_id: ${MACHINE_ID_ARG}" "$CONFIG_FILE" >/dev/null 2>&1 \
-        && grep -F "$url_line" "$CONFIG_FILE" >/dev/null 2>&1
-}
-
-append_machine_profile() {
-    local backup tmp block
-    backup="${CONFIG_FILE}.bak.$(date +%Y%m%d%H%M%S)"
-    tmp="${CONFIG_FILE}.tmp.$$"
-    block="$(machine_profile_block)"
-
-    cp "$CONFIG_FILE" "$backup"
-
-    if grep -Eq '^machine:[[:space:]]*$' "$CONFIG_FILE" \
-        && grep -Eq '^[[:space:]]{2}profiles:[[:space:]]*$' "$CONFIG_FILE"; then
-        awk -v block="$block" '
-            BEGIN {
-                in_machine = 0
-                in_profiles = 0
-                inserted = 0
-            }
-            {
-                if (in_profiles && !inserted && $0 !~ /^([[:space:]]{4}|[[:space:]]*$|[[:space:]]*#)/) {
-                    print block
-                    inserted = 1
-                    in_profiles = 0
-                }
-                print
-                if ($0 ~ /^machine:[[:space:]]*$/) {
-                    in_machine = 1
-                    next
-                }
-                if (in_machine && $0 ~ /^[^[:space:]#][^:]*:/ && $0 !~ /^machine:/) {
-                    in_machine = 0
-                    in_profiles = 0
-                }
-                if (in_machine && $0 ~ /^[[:space:]]{2}profiles:[[:space:]]*$/) {
-                    in_profiles = 1
-                }
-            }
-            END {
-                if (in_profiles && !inserted) {
-                    print block
-                }
-            }
-        ' "$CONFIG_FILE" > "$tmp"
-    elif ! grep -Eq '^machine:[[:space:]]*$' "$CONFIG_FILE"; then
-        {
-            cat "$CONFIG_FILE"
-            echo
-            echo "machine:"
-            echo "  enabled: true"
-            echo "  continue_on_error: true"
-            echo "  profiles:"
-            printf '%s\n' "$block"
-        } > "$tmp"
-    else
-        echo -e "${yellow}Existing ${CONFIG_FILE} has a machine section without profiles; keeping a backup and rewriting generated config.${plain}" >&2
-        write_new_machine_config
+    if [[ -f "$CONFIG_FILE" ]]; then
+        backup="${CONFIG_FILE}.bak.$(date +%Y%m%d%H%M%S)"
+        cp "$CONFIG_FILE" "$backup"
         echo -e "${yellow}Previous config backup: ${backup}${plain}"
-        return
     fi
-
-    mv "$tmp" "$CONFIG_FILE"
+    mv "$new_config" "$CONFIG_FILE"
     chmod 600 "$CONFIG_FILE" 2>/dev/null || true
-    echo -e "${green}Appended machine profile to ${CONFIG_FILE}${plain}"
-    echo -e "${yellow}Previous config backup: ${backup}${plain}"
+    rm -f "$existing_profiles" "$merged_profiles"
+    profile_count="$(extract_machine_profiles "$CONFIG_FILE" | wc -l | tr -d ' ')"
+    echo -e "${green}Wrote native machine config to ${CONFIG_FILE}; profiles=${profile_count}.${plain}"
 }
 
 geo_rule_safe_name() {
