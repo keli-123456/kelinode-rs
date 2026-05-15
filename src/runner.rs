@@ -468,18 +468,46 @@ where
                 );
             }
             if report_to_panel {
-                let action =
-                    report_runtime_apply_result_to_panels(&self.panel_clients, &result.apply)
-                        .await?;
-                report_keli_core_activity_to_panel_with_user_lookup(
-                    &self.plan,
-                    &self.user_id_lookup,
-                )
-                .await?;
+                let action = nonfatal_panel_status_report(
+                    report_runtime_apply_result_to_panels(&self.panel_clients, &result.apply).await,
+                );
+                nonfatal_keli_core_activity_report(
+                    report_keli_core_activity_to_panel_with_user_lookup(
+                        &self.plan,
+                        &self.user_id_lookup,
+                    )
+                    .await,
+                );
                 return Ok(runtime_loop_signal(&action));
             }
             Ok(result.signal)
         })
+    }
+}
+
+fn nonfatal_panel_status_report(
+    result: Result<crate::control::RuntimePanelAction, String>,
+) -> crate::control::RuntimePanelAction {
+    match result {
+        Ok(action) => action,
+        Err(error) => {
+            logging::warn(
+                "panel",
+                format!("machine status report failed; keeping runtime alive error={error}"),
+            );
+            crate::control::RuntimePanelAction::default()
+        }
+    }
+}
+
+fn nonfatal_keli_core_activity_report(
+    result: Result<crate::report::NodeActivityBatchReport, String>,
+) {
+    if let Err(error) = result {
+        logging::warn(
+            "panel",
+            format!("traffic report failed; keeping runtime alive error={error}"),
+        );
     }
 }
 
@@ -1351,17 +1379,17 @@ mod tests {
     use super::{
         handle_runtime_loop_event, keli_core_rs_metrics_snapshot, keli_core_user_delta_payload,
         keli_core_user_delta_requires_full_snapshot, keli_core_user_full_snapshot_payload,
-        node_config_for_info, refresh_runtime_health, refresh_subscription_proxy_health,
-        run_runtime_loop, run_runtime_loop_async, run_runtime_loop_async_with_events,
-        runtime_loop_event_for_task, should_run, try_apply_keli_core_rs_user_deltas,
-        user_delta_not_supported, AsyncRuntimeLoopCallbacks, PanelRuntimeLoop,
-        RuntimeLoopCallbacks, RuntimeLoopEvent, RuntimeLoopEventKind, RuntimeLoopExit,
-        RuntimeLoopExitReason, RuntimeLoopFuture, RuntimeLoopOptions, RuntimeUserDeltaChange,
-        RuntimeUserDeltaMetrics, RuntimeUserSyncEntry,
+        node_config_for_info, nonfatal_keli_core_activity_report, nonfatal_panel_status_report,
+        refresh_runtime_health, refresh_subscription_proxy_health, run_runtime_loop,
+        run_runtime_loop_async, run_runtime_loop_async_with_events, runtime_loop_event_for_task,
+        should_run, try_apply_keli_core_rs_user_deltas, user_delta_not_supported,
+        AsyncRuntimeLoopCallbacks, PanelRuntimeLoop, RuntimeLoopCallbacks, RuntimeLoopEvent,
+        RuntimeLoopEventKind, RuntimeLoopExit, RuntimeLoopExitReason, RuntimeLoopFuture,
+        RuntimeLoopOptions, RuntimeUserDeltaChange, RuntimeUserDeltaMetrics, RuntimeUserSyncEntry,
     };
     use crate::config::{NodeConfig, ResolvedConfig, ResolvedMachineConfig};
     use crate::control::RuntimeControlOptions;
-    use crate::control::{RuntimeLoopSignal, RuntimeTickOptions};
+    use crate::control::{RuntimeLoopSignal, RuntimePanelAction, RuntimeTickOptions};
     use crate::health::ResourceSnapshot;
     use crate::machine::MachineUpgradeCommand;
     use crate::panel::types::{CommonNode, NodeInfo, UserInfo};
@@ -1434,6 +1462,28 @@ mod tests {
         assert_eq!(status.mode, "http");
         assert_eq!(status.certificate_domain, "proxy.example.test");
         assert_eq!(status.csr_pem, "csr");
+    }
+
+    #[test]
+    fn panel_status_report_failure_keeps_runtime_alive() {
+        let action = nonfatal_panel_status_report(Err("panel timed out".to_string()));
+
+        assert_eq!(action, RuntimePanelAction::default());
+    }
+
+    #[test]
+    fn panel_status_report_success_preserves_runtime_action() {
+        let action = RuntimePanelAction {
+            reload: true,
+            upgrade: None,
+        };
+
+        assert_eq!(nonfatal_panel_status_report(Ok(action.clone())), action);
+    }
+
+    #[test]
+    fn traffic_report_failure_keeps_runtime_alive() {
+        nonfatal_keli_core_activity_report(Err("panel report failed".to_string()));
     }
 
     #[test]

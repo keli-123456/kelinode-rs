@@ -330,8 +330,21 @@ impl PanelClient {
             .send()
             .await
             .context("report machine status")?;
-        ensure_success(response.status(), "machine status")?;
+        let status = response.status();
+        let content_type = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or("")
+            .to_string();
         let body = response.bytes().await.context("read machine status")?;
+        if !status.is_success() {
+            return Err(anyhow!(
+                "machine status request failed: {status}; content_type={}; body_prefix={}",
+                content_type,
+                safe_response_preview(&body, &self.options.token)
+            ));
+        }
         if body.iter().all(|byte| byte.is_ascii_whitespace()) {
             return Ok(MachineStatusResponse::default());
         }
