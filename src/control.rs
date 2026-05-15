@@ -491,21 +491,36 @@ fn machine_status_payload_for_client(
     let api_host = client.options().api_host.trim_end_matches('/');
     let machine_id = client.options().machine_id as u64;
     if let Some(Value::Array(failures)) = payload.status.get_mut("node_failures") {
-        failures.retain(|failure| {
-            let failure_host = failure
-                .get("api_host")
-                .and_then(Value::as_str)
-                .map(|host| host.trim_end_matches('/'))
-                .unwrap_or_default();
-            let failure_machine_id = failure
-                .get("machine_id")
-                .and_then(Value::as_u64)
-                .unwrap_or_default();
-            failure_host == api_host && failure_machine_id == machine_id
-        });
+        failures.retain(|failure| status_row_matches_client(failure, api_host, machine_id));
+    }
+
+    if let Some(runtime) = payload
+        .status
+        .get_mut("runtime")
+        .and_then(Value::as_object_mut)
+    {
+        if let Some(Value::Array(node_statuses)) = runtime.get_mut("node_statuses") {
+            node_statuses.retain(|row| status_row_matches_client(row, api_host, machine_id));
+            let count = node_statuses.len() as u64;
+            runtime.insert("nodes".to_string(), Value::from(count));
+            runtime.insert("configured_nodes".to_string(), Value::from(count));
+        }
     }
 
     payload
+}
+
+fn status_row_matches_client(row: &Value, api_host: &str, machine_id: u64) -> bool {
+    let row_host = row
+        .get("api_host")
+        .and_then(Value::as_str)
+        .map(|host| host.trim_end_matches('/'))
+        .unwrap_or_default();
+    let row_machine_id = row
+        .get("machine_id")
+        .and_then(Value::as_u64)
+        .unwrap_or_default();
+    row_host == api_host && row_machine_id == machine_id
 }
 
 pub async fn report_machine_status_payload(
@@ -1285,6 +1300,25 @@ mod tests {
                 }
             ]),
         );
+        payload.insert_status(
+            "runtime",
+            json!({
+                "nodes": 2,
+                "configured_nodes": 2,
+                "node_statuses": [
+                    {
+                        "api_host": "https://panel-a.example.test",
+                        "machine_id": 1,
+                        "node_id": 7
+                    },
+                    {
+                        "api_host": "https://panel-b.example.test/",
+                        "machine_id": 2,
+                        "node_id": 8
+                    }
+                ]
+            }),
+        );
         let client = PanelClient::new(PanelClientOptions {
             api_host: "https://panel-b.example.test".to_string(),
             token: "token-b".to_string(),
@@ -1303,6 +1337,19 @@ mod tests {
             1
         );
         assert_eq!(filtered.status["node_failures"][0]["node_id"], json!(8));
+        assert_eq!(filtered.status["runtime"]["nodes"], json!(1));
+        assert_eq!(filtered.status["runtime"]["configured_nodes"], json!(1));
+        assert_eq!(
+            filtered.status["runtime"]["node_statuses"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            filtered.status["runtime"]["node_statuses"][0]["node_id"],
+            json!(8)
+        );
     }
 
     #[tokio::test]

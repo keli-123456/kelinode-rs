@@ -8,7 +8,7 @@ use crate::machine::{MachineStatusPayload, NodeFailurePayload};
 use crate::node::NodeFailure;
 use crate::port_forward::{HysteriaPortForwardStatus, HysteriaPortForwardToolStatus};
 use crate::process::{ProcessState, ProcessStatus};
-use crate::runtime::{RuntimeBootstrapPlan, RuntimeMode};
+use crate::runtime::{node_config_for_info, RuntimeBootstrapPlan, RuntimeMode};
 use crate::subscription_proxy::SubscriptionProxyStatus;
 
 const DEFAULT_INSTALL_DIR: &str = "/usr/local/kelinode";
@@ -341,7 +341,10 @@ fn runtime_node_statuses_value(plan: &RuntimeBootstrapPlan) -> Value {
         .node_infos
         .iter()
         .map(|node| {
+            let config = node_config_for_info(&plan.resolved, node.id, &node.tag);
             json!({
+                "api_host": config.map(|config| config.url.trim_end_matches('/')).unwrap_or_default(),
+                "machine_id": config.map(|config| config.machine_id).unwrap_or_default(),
                 "node_id": node.id,
                 "node_type": "v2node",
                 "protocol": node.protocol.as_str(),
