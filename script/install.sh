@@ -22,7 +22,7 @@ LOCK_DIR="/tmp/keli-native-node-install.lock"
 usage() {
     cat <<'EOF'
 Usage:
-  install.sh [install] [--version v0.1.38] --machine-url URL --machine-id ID --machine-token TOKEN [--machine-name NAME]
+  install.sh [install] [--version v0.1.39] --machine-url URL --machine-id ID --machine-token TOKEN [--machine-name NAME]
   install.sh uninstall [--purge-config]
 
 Options:
@@ -195,12 +195,14 @@ write_machine_config() {
     fi
 
     if machine_profile_exists; then
+        ensure_native_kernel_config
         chmod 600 "$CONFIG_FILE" 2>/dev/null || true
-        echo -e "${green}Machine profile already exists in ${CONFIG_FILE}; keeping existing config.${plain}"
+        echo -e "${green}Machine profile already exists in ${CONFIG_FILE}; keeping existing profile.${plain}"
         return
     fi
 
     append_machine_profile
+    ensure_native_kernel_config
 }
 
 machine_profile_name() {
@@ -237,6 +239,80 @@ write_new_machine_config() {
     } > "$CONFIG_FILE"
     chmod 600 "$CONFIG_FILE" 2>/dev/null || true
     echo -e "${green}Wrote ${CONFIG_FILE}${plain}"
+}
+
+ensure_native_kernel_config() {
+    local backup tmp
+    backup="${CONFIG_FILE}.bak.$(date +%Y%m%d%H%M%S)"
+    tmp="${CONFIG_FILE}.tmp.native.$$"
+
+    awk -v config_dir="$(yaml_quote "$CONFIG_DIR")" '
+        function finish_kernel() {
+            if (!in_kernel) {
+                return
+            }
+            if (!saw_kernel_type) {
+                print "  type: keli-core-rs"
+            }
+            if (!saw_kernel_config_dir) {
+                print "  config_dir: " config_dir
+            }
+            in_kernel = 0
+        }
+        BEGIN {
+            saw_kernel = 0
+            in_kernel = 0
+            saw_kernel_type = 0
+            saw_kernel_config_dir = 0
+        }
+        {
+            if (in_kernel && $0 ~ /^[^[:space:]#][^:]*:/ && $0 !~ /^kernel:[[:space:]]*$/) {
+                finish_kernel()
+            }
+            if ($0 ~ /^kernel:[[:space:]]*$/) {
+                saw_kernel = 1
+                in_kernel = 1
+                saw_kernel_type = 0
+                saw_kernel_config_dir = 0
+                print
+                next
+            }
+            if (in_kernel && $0 ~ /^[[:space:]]{2}type:[[:space:]]*/) {
+                print "  type: keli-core-rs"
+                saw_kernel_type = 1
+                next
+            }
+            if (in_kernel && $0 ~ /^[[:space:]]{2}config_dir:[[:space:]]*/) {
+                print "  config_dir: " config_dir
+                saw_kernel_config_dir = 1
+                next
+            }
+            print
+        }
+        END {
+            if (in_kernel) {
+                finish_kernel()
+            }
+            if (!saw_kernel) {
+                print ""
+                print "kernel:"
+                print "  type: keli-core-rs"
+                print "  config_dir: " config_dir
+            }
+        }
+    ' "$CONFIG_FILE" > "$tmp"
+
+    if cmp -s "$CONFIG_FILE" "$tmp"; then
+        rm -f "$tmp"
+        chmod 600 "$CONFIG_FILE" 2>/dev/null || true
+        return
+    fi
+
+    cp "$CONFIG_FILE" "$backup"
+    mv "$tmp" "$CONFIG_FILE"
+    chmod 600 "$CONFIG_FILE" 2>/dev/null || true
+    echo -e "${green}Ensured native kernel config in ${CONFIG_FILE}${plain}"
+    echo -e "${yellow}Previous config backup: ${backup}${plain}"
 }
 
 machine_profile_exists() {
