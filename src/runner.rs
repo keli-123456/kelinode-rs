@@ -10,6 +10,7 @@ use crate::control::{
 };
 use crate::core::CoreKind;
 use crate::health::ResourceSnapshot;
+use crate::logging;
 use crate::panel::client::{PanelClient, PanelClientOptions};
 use crate::panel::types::UserInfo;
 use crate::port_forward::PortForwardExecutor;
@@ -350,6 +351,13 @@ where
                     &mut self.user_delta_metrics,
                 );
                 if applied_user_delta {
+                    logging::info(
+                        "core",
+                        format!(
+                            "user delta applied natively tags={}",
+                            user_change_tags.len()
+                        ),
+                    );
                     options.control.keli_core_rs_user_delta_applied = true;
                     sync_runtime_user_id_lookup_from_state(
                         &mut self.user_id_lookup,
@@ -357,6 +365,13 @@ where
                         &user_change_tags,
                     );
                 } else {
+                    logging::warn(
+                        "core",
+                        format!(
+                            "user delta fell back to full runtime rebuild tags={}",
+                            user_change_tags.len()
+                        ),
+                    );
                     self.user_delta_metrics.record_full_rebuild();
                     self.plan =
                         rebuild_runtime_plan_with_users(&self.plan, &options.users_by_node_tag)?;
@@ -461,6 +476,12 @@ fn try_apply_keli_core_rs_user_deltas(
         .count();
     if skipped_port_range > 0 {
         metrics.record_skipped_port_range(skipped_port_range);
+        logging::warn(
+            "core",
+            format!(
+                "user delta skipped because port-range inbound exists count={skipped_port_range}"
+            ),
+        );
         return false;
     }
     if users_by_node_tag.keys().any(|node_tag| {
@@ -490,14 +511,32 @@ fn try_apply_keli_core_rs_user_deltas(
             Err(error) => {
                 metrics.record_failed();
                 if !keli_core_user_delta_requires_full_snapshot(&error.message) {
+                    logging::warn(
+                        "core",
+                        format!(
+                            "user delta apply failed node_tag={node_tag} error={}",
+                            error.message
+                        ),
+                    );
                     return false;
                 }
                 metrics.record_full_snapshot_fallback();
+                logging::warn(
+                    "core",
+                    format!(
+                        "user delta requires full snapshot node_tag={node_tag} error={}",
+                        error.message
+                    ),
+                );
                 let full_delta = keli_core_user_full_snapshot_payload(node_tag, entry);
                 match client.apply_user_delta(node_tag.clone(), full_delta) {
                     Ok(_) => metrics.record_success(),
                     Err(_) => {
                         metrics.record_failed();
+                        logging::error(
+                            "core",
+                            format!("full snapshot user delta failed node_tag={node_tag}"),
+                        );
                         return false;
                     }
                 }

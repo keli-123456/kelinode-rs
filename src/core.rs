@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use rcgen::{generate_simple_self_signed, CertifiedKey};
 use serde_json::{json, Map, Value};
 
+use crate::logging;
 use crate::panel::types::{CertInfo, NodeInfo, Protocol, Security, TlsSettings, UserInfo};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -201,9 +202,12 @@ pub fn split_core_plans_for_nodes_with_kind(
             match node_supported_by_keli_core_rs(&config_path, node, users_by_node_tag) {
                 Ok(()) => true,
                 Err(error) => {
-                    eprintln!(
-                        "skipping unsupported keli-core-rs inbound {}: {}",
-                        node.tag, error.message
+                    logging::warn(
+                        "core",
+                        format!(
+                            "skipping unsupported native inbound tag={} error={}",
+                            node.tag, error.message
+                        ),
                     );
                     false
                 }
@@ -2478,9 +2482,12 @@ fn ensure_inbound_certificate_pair(inbound: &InboundPlan) -> Result<(), CoreErro
         })?;
     write_certificate_file(cert_path, cert.pem().as_bytes(), false)?;
     write_certificate_file(key_path, key_pair.serialize_pem().as_bytes(), true)?;
-    eprintln!(
-        "warning: generated fallback self-signed certificate for inbound {} domain {}",
-        inbound.tag, domain
+    logging::warn(
+        "core",
+        format!(
+            "generated fallback self-signed certificate inbound={} domain={}",
+            inbound.tag, domain
+        ),
     );
 
     Ok(())

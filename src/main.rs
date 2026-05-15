@@ -3,6 +3,7 @@
 use kelinode_rs::config::{AppConfig, MachineProfileConfig, DEFAULT_TIMEOUT_SECS};
 use kelinode_rs::control::{handle_runtime_signal, RuntimeControlOptions, RuntimeLoopSignal};
 use kelinode_rs::core::CoreKind;
+use kelinode_rs::logging;
 use kelinode_rs::panel::client::{PanelClient, PanelClientOptions};
 use kelinode_rs::panel::contract::NODE_API_CONTRACT_VERSION;
 use kelinode_rs::port_forward::{
@@ -28,7 +29,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 fn main() {
     if let Err(err) = run() {
-        eprintln!("{err}");
+        logging::error("agent", err);
         std::process::exit(1);
     }
 }
@@ -156,6 +157,7 @@ enum RulesAction {
 struct LogOptions {
     tail: usize,
     follow: bool,
+    raw: bool,
 }
 
 fn parse_rules_args(args: &[String]) -> Result<(RulesAction, Vec<String>), String> {
@@ -179,6 +181,7 @@ fn parse_log_args(args: impl IntoIterator<Item = String>) -> Result<LogOptions, 
     let mut options = LogOptions {
         tail: 200,
         follow: true,
+        raw: false,
     };
     let mut iter = args.into_iter();
     while let Some(arg) = iter.next() {
@@ -205,6 +208,7 @@ fn parse_log_args(args: impl IntoIterator<Item = String>) -> Result<LogOptions, 
             }
             "--no-follow" => options.follow = false,
             "--follow" | "-f" => options.follow = true,
+            "--raw" => options.raw = true,
             other => return Err(format!("unknown log option {other}")),
         }
     }
@@ -222,6 +226,9 @@ fn run_log_command(options: LogOptions) -> Result<(), String> {
         .stdin(Stdio::inherit())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit());
+    if !options.raw {
+        command.arg("--output").arg("cat");
+    }
     if options.follow {
         command.arg("-f");
     }
@@ -229,8 +236,9 @@ fn run_log_command(options: LogOptions) -> Result<(), String> {
     match command.status() {
         Ok(status) if status.success() => Ok(()),
         Ok(status) => Err(format!(
-            "journalctl exited with status {status}; try: journalctl -u v2node -n {} --no-pager{}",
+            "journalctl exited with status {status}; try: journalctl -u v2node -n {} --no-pager{}{}",
             options.tail,
+            if options.raw { "" } else { " --output cat" },
             if options.follow { " -f" } else { "" }
         )),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Err(
@@ -396,9 +404,12 @@ async fn run_agent(path: &str) -> Result<(), String> {
             upgrade_manager.current_status_value(),
         )
         .await?;
-        println!(
-            "runtime loop exited after {} ticks: {:?}",
-            exit.ticks, exit.reason
+        logging::info(
+            "agent",
+            format!(
+                "runtime loop exited ticks={} reason={:?}",
+                exit.ticks, exit.reason
+            ),
         );
 
         match exit.reason {
@@ -406,7 +417,10 @@ async fn run_agent(path: &str) -> Result<(), String> {
             RuntimeLoopExitReason::Shutdown => return Ok(()),
             RuntimeLoopExitReason::Signal(RuntimeLoopSignal::Continue) => {}
             RuntimeLoopExitReason::Signal(RuntimeLoopSignal::Reload) => {
-                println!("runtime reload requested; rebuilding bootstrap plan");
+                logging::info(
+                    "agent",
+                    "runtime reload requested; rebuilding bootstrap plan",
+                );
             }
             RuntimeLoopExitReason::Signal(signal @ RuntimeLoopSignal::Upgrade(_)) => {
                 let current_version = agent_version();
@@ -417,7 +431,7 @@ async fn run_agent(path: &str) -> Result<(), String> {
                     unix_now(),
                     &mut upgrade_executor,
                 ) {
-                    eprintln!("runtime upgrade command ignored: {err}");
+                    logging::warn("upgrade", format!("runtime upgrade command ignored: {err}"));
                 }
             }
         }
@@ -430,26 +444,35 @@ async fn run_agent_once(
     port_forward_executor: &mut SystemPortForwardExecutor,
     upgrade_status: Option<Value>,
 ) -> Result<RuntimeLoopExit, String> {
-    eprintln!("loading config: {path}");
+    logging::info("agent", format!("loading config path={path}"));
     let config = AppConfig::load_from_path(path)?;
-    eprintln!("building runtime bootstrap");
+    logging::info("agent", "building runtime bootstrap");
     let plan = bootstrap_from_config(&config).await?;
-    eprintln!(
-        "runtime bootstrap ready: mode={:?} resolved_nodes={} active_nodes={} machine_profiles={} realtime_workers={}",
+    logging::info(
+        "agent",
+        format!(
+            "bootstrap ready mode={:?} resolved_nodes={} active_nodes={} machine_profiles={} realtime_workers={}",
         plan.bootstrap.mode,
         plan.resolved.nodes.len(),
         plan.node_count,
         plan.resolved.machine.profiles.len(),
         plan.realtime_options.len()
+        ),
     );
     for failure in &plan.node_failures {
-        eprintln!(
-            "node failure: api_host={} node_id={} machine_id={} error={}",
-            failure.config.url, failure.config.node_id, failure.config.machine_id, failure.error
+        logging::warn(
+            "node",
+            format!(
+                "skipped api_host={} node_id={} machine_id={} error={}",
+                failure.config.url,
+                failure.config.node_id,
+                failure.config.machine_id,
+                failure.error
+            ),
         );
     }
     let panel_clients = machine_panel_clients(&plan)?;
-    eprintln!("panel clients: {}", panel_clients.len());
+    logging::info("panel", format!("clients={}", panel_clients.len()));
     let options = runtime_loop_options(&plan, !panel_clients.is_empty());
     let realtime_options = plan.realtime_options.clone();
     let subscription_proxy_manager = start_subscription_proxy_manager(&plan);
@@ -462,7 +485,7 @@ async fn run_agent_once(
         runner = runner.with_subscription_proxy_manager(manager);
     }
     let mut realtime_workers = start_realtime_runtime_workers(realtime_options);
-    eprintln!("runtime loop started");
+    logging::info("agent", "runtime loop started");
     let mut shutdown = false;
     let result = tokio::select! {
         result = run_runtime_loop_async_with_events(
@@ -499,7 +522,7 @@ fn start_subscription_proxy_manager(
     if let Err(err) =
         manager.apply_and_start_with_file_system(config, ensure_subscription_proxy_csr_with_openssl)
     {
-        eprintln!("subscription proxy start failed: {err}");
+        logging::warn("subproxy", format!("start failed error={err}"));
     }
     Some(manager)
 }
@@ -546,15 +569,18 @@ where
 {
     let status = cleanup_hysteria_port_forward(&mut *runner.port_forward_executor);
     if !status.errors.is_empty() {
-        eprintln!(
-            "HY2 port forwarding cleanup warning: {}",
-            status.errors.join("; ")
+        logging::warn(
+            "hy2",
+            format!("port forwarding cleanup: {}", status.errors.join("; ")),
         );
     }
     for tool in status.tools.iter().filter(|tool| !tool.error.is_empty()) {
-        eprintln!(
-            "HY2 port forwarding cleanup warning: tool={} error={}",
-            tool.tool, tool.error
+        logging::warn(
+            "hy2",
+            format!(
+                "port forwarding cleanup tool={} error={}",
+                tool.tool, tool.error
+            ),
         );
     }
 }
@@ -741,7 +767,7 @@ fn print_help() {
     println!(
         "  rules [status|repair|cleanup] [path|--config path]    inspect or reconcile HY2 iptables rules"
     );
-    println!("  log [--tail N] [--no-follow]    show v2node service logs through journalctl");
+    println!("  log [--tail N] [--no-follow] [--raw]    show v2node service logs");
     println!("  run|server [path|--config path]    start the node runtime loop");
 }
 
@@ -750,6 +776,7 @@ fn print_log_help() {
     println!("  v2node log                 show and follow the last 200 service log lines");
     println!("  v2node log --tail 500      show and follow the last 500 service log lines");
     println!("  v2node log --no-follow     print recent logs and exit");
+    println!("  v2node log --raw           show raw journalctl metadata");
 }
 
 #[cfg(test)]
@@ -833,6 +860,7 @@ mod tests {
             LogOptions {
                 tail: 200,
                 follow: true,
+                raw: false,
             }
         );
         assert_eq!(
@@ -840,6 +868,7 @@ mod tests {
             LogOptions {
                 tail: 500,
                 follow: true,
+                raw: false,
             }
         );
         assert_eq!(
@@ -847,6 +876,20 @@ mod tests {
             LogOptions {
                 tail: 50,
                 follow: false,
+                raw: false,
+            }
+        );
+        assert_eq!(
+            parse_log_args(vec![
+                "--raw".to_string(),
+                "-n".to_string(),
+                "20".to_string()
+            ])
+            .unwrap(),
+            LogOptions {
+                tail: 20,
+                follow: true,
+                raw: true,
             }
         );
         assert!(parse_log_args(vec!["--tail".to_string(), "0".to_string()]).is_err());

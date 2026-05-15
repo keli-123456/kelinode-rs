@@ -9,6 +9,7 @@ use std::sync::{Arc, Mutex};
 
 use crate::core::{CoreKind, CorePlan};
 use crate::core_control::{KeliCoreControlClient, KELI_CORE_CONTROL_TOKEN_ENV};
+use crate::logging;
 
 #[cfg_attr(feature = "embedded-core", allow(dead_code))]
 const DEFAULT_NATIVE_INSTALL_DIR: &str = "/usr/local/v2node";
@@ -138,6 +139,10 @@ impl ProcessSupervisor for SystemProcessSupervisor {
             .spawn()
             .map_err(|err| ProcessError::new(format!("start process {}: {err}", spec.name)))?;
         let status = ProcessStatus::running(&spec.name, child.id());
+        logging::info(
+            process_log_component(&spec.name),
+            format!("started name={} pid={}", spec.name, child.id()),
+        );
         self.children.insert(spec.name.clone(), child);
         self.statuses.insert(spec.name.clone(), status.clone());
         Ok(status)
@@ -156,6 +161,7 @@ impl ProcessSupervisor for SystemProcessSupervisor {
             }
             embedded.control.stop();
             let status = ProcessStatus::stopped(name, "embedded keli-core-rs stopped");
+            logging::info("core", "stopped engine=embedded-keli-core-rs");
             self.statuses.insert(name.to_string(), status.clone());
             return Ok(status);
         }
@@ -181,6 +187,10 @@ impl ProcessSupervisor for SystemProcessSupervisor {
                 let exit = child
                     .wait()
                     .map_err(|err| ProcessError::new(format!("wait process {name}: {err}")))?;
+                logging::info(
+                    process_log_component(name),
+                    format!("stopped name={name} code={:?}", exit.code()),
+                );
                 let status = ProcessStatus {
                     name: name.to_string(),
                     pid: None,
@@ -250,8 +260,34 @@ impl SystemProcessSupervisor {
         })?;
         let mut controller = keli_core_rs::CoreController::new();
         match controller.handle(keli_core_rs::CoreCommand::ApplyConfig { config }) {
-            keli_core_rs::CoreResponse::Applied { .. } => {}
+            keli_core_rs::CoreResponse::Applied {
+                decision,
+                listeners,
+                ..
+            } => {
+                logging::info(
+                    "core",
+                    format!(
+                        "started engine=embedded-keli-core-rs decision={} listeners={}",
+                        decision,
+                        listeners.len()
+                    ),
+                );
+                for listener in listeners {
+                    logging::info(
+                        "core",
+                        format!(
+                            "listener tag={} protocol={:?} listen={}",
+                            listener.tag, listener.protocol, listener.local_addr
+                        ),
+                    );
+                }
+            }
             keli_core_rs::CoreResponse::Error { message } => {
+                logging::error(
+                    "core",
+                    format!("start failed engine=embedded-keli-core-rs error={message}"),
+                );
                 return Err(ProcessError::new(format!(
                     "start embedded keli-core-rs: {message}"
                 )));
@@ -279,6 +315,14 @@ impl SystemProcessSupervisor {
         let status = ProcessStatus::running(&spec.name, std::process::id());
         self.statuses.insert(spec.name.clone(), status.clone());
         Ok(status)
+    }
+}
+
+fn process_log_component(name: &str) -> &'static str {
+    if name.contains("core") {
+        "core"
+    } else {
+        "process"
     }
 }
 

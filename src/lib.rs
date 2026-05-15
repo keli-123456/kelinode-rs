@@ -5,6 +5,7 @@ pub mod control;
 pub mod core;
 pub mod core_control;
 pub mod health;
+pub mod logging;
 pub mod machine;
 pub mod node;
 pub mod panel;

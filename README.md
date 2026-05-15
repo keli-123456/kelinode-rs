@@ -166,8 +166,13 @@ Installed systemd services can be inspected with the compatibility log command:
 ```bash
 v2node log
 v2node log --tail 500 --no-follow
+v2node log --raw
 journalctl -u v2node -n 200 --no-pager -f
 ```
+
+`v2node log` uses concise output by default and the runtime prefixes important events with
+`agent`, `core`, `node`, `panel`, `hy2`, `subproxy`, or `upgrade`. Use `--raw` when you need full
+`journalctl` metadata. Set `V2NODE_LOG_LEVEL=debug` only while diagnosing detailed runtime behavior.
 
 Running the one-click installer again with a different `--machine-url` or `--machine-id` appends a
 new machine profile to `/etc/v2node/config.yml` instead of replacing the previous site. The installer
