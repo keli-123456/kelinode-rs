@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::sync::{Mutex, OnceLock};
 
 use crate::config::SidecarProcessConfig;
 use crate::core::{
@@ -175,10 +176,25 @@ fn log_hy2_port_forward_status(
 
     let summary = hy2_port_forward_summary(status, repaired, infos);
     if status.errors.is_empty() && total_hy2_missing_rules(status) == 0 {
-        logging::info("rules", summary);
+        if should_log_clean_hy2_port_forward_status(&summary) {
+            logging::info("rules", summary);
+        }
     } else {
         logging::warn("rules", summary);
     }
+}
+
+fn should_log_clean_hy2_port_forward_status(summary: &str) -> bool {
+    static LAST_CLEAN_SUMMARY: OnceLock<Mutex<Option<String>>> = OnceLock::new();
+    let mut last = LAST_CLEAN_SUMMARY
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .expect("hy2 port-forward log state poisoned");
+    if last.as_deref() == Some(summary) {
+        return false;
+    }
+    *last = Some(summary.to_string());
+    true
 }
 
 fn hy2_port_forward_summary(
@@ -656,8 +672,8 @@ mod tests {
     use super::{
         apply_runtime_plan, handle_runtime_signal, hy2_port_forward_summary,
         machine_status_payload_for_client, merge_runtime_panel_action, run_runtime_tick,
-        runtime_loop_signal, runtime_panel_action, RuntimeControlOptions, RuntimeLoopSignal,
-        RuntimePanelAction, RuntimeTickOptions,
+        runtime_loop_signal, runtime_panel_action, should_log_clean_hy2_port_forward_status,
+        RuntimeControlOptions, RuntimeLoopSignal, RuntimePanelAction, RuntimeTickOptions,
     };
 
     #[test]
@@ -760,6 +776,17 @@ mod tests {
         assert!(summary.contains("expected=0"));
         assert!(summary.contains("first_rule=-"));
         assert!(summary.contains("8:server_port=10088 external=-"));
+    }
+
+    #[test]
+    fn clean_hy2_port_forward_log_suppresses_duplicate_summary() {
+        let summary = format!("clean hy2 summary {}", line!());
+
+        assert!(should_log_clean_hy2_port_forward_status(&summary));
+        assert!(!should_log_clean_hy2_port_forward_status(&summary));
+        assert!(should_log_clean_hy2_port_forward_status(&format!(
+            "{summary} changed"
+        )));
     }
 
     #[test]

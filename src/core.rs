@@ -1,9 +1,11 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
+use std::io::Write;
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 
 use rcgen::{generate_simple_self_signed, CertifiedKey};
+use serde::Serialize;
 use serde_json::{json, Map, Value};
 
 use crate::logging;
@@ -142,7 +144,7 @@ impl CorePlan {
         users_by_node_tag: &BTreeMap<String, Vec<UserInfo>>,
     ) -> Result<Self, CoreError> {
         reject_sidecar_protocols_for_core(&kind, nodes)?;
-        let inbounds = nodes
+        let mut inbounds = nodes
             .iter()
             .map(|node| {
                 let users = users_by_node_tag
@@ -152,6 +154,9 @@ impl CorePlan {
                 build_inbound_plan_with_users(node, users)
             })
             .collect::<Result<Vec<_>, _>>()?;
+        if matches!(kind, CoreKind::KeliCoreRs) {
+            strip_native_user_emails(&mut inbounds);
+        }
         let listen_tags = inbounds.iter().map(|inbound| inbound.tag.clone()).collect();
 
         Ok(Self {
@@ -164,6 +169,14 @@ impl CorePlan {
 
     pub fn file_layout(&self) -> CoreFileLayout {
         core_file_layout(&self.config_path)
+    }
+}
+
+fn strip_native_user_emails(inbounds: &mut [InboundPlan]) {
+    for inbound in inbounds {
+        for user in &mut inbound.users {
+            user.email.clear();
+        }
     }
 }
 
@@ -2427,7 +2440,7 @@ fn render_keli_core_rs_user(user: &InboundUserPlan) -> Value {
         "id": user.id,
         "uuid": &user.uuid,
         "password": null,
-        "email": &user.email,
+        "email": null,
         "speed_limit": user.speed_limit,
         "device_limit": user.device_limit
     })
@@ -2444,8 +2457,170 @@ pub fn write_core_config(plan: &CorePlan) -> Result<CoreConfigWriteResult, CoreE
             plan.inbounds.len(),
         );
     }
+    if matches!(plan.kind, CoreKind::KeliCoreRs) {
+        let content = render_keli_core_rs_config_bytes(plan)?;
+        return write_core_config_bytes(&plan.config_path, content, plan.inbounds.len());
+    }
     let value = render_core_config(plan)?;
     write_core_config_value(&plan.config_path, &value, plan.inbounds.len())
+}
+
+#[derive(Serialize)]
+struct KeliCoreRsUserRef<'a> {
+    id: u32,
+    uuid: &'a str,
+    password: Option<&'a str>,
+    email: Option<&'a str>,
+    speed_limit: u32,
+    device_limit: u32,
+}
+
+fn render_keli_core_rs_config_bytes(plan: &CorePlan) -> Result<Vec<u8>, CoreError> {
+    let mut outbounds = vec![json!({
+        "tag": "direct",
+        "protocol": "freedom",
+        "address": null,
+        "port": null
+    })];
+    for inbound in &plan.inbounds {
+        validate_keli_core_rs_inbound(inbound)?;
+        collect_keli_core_rs_route_outbounds(inbound, &mut outbounds)?;
+    }
+
+    let mut content = Vec::new();
+    content.extend_from_slice(b"{");
+    write_json_field(
+        &mut content,
+        "instance_id",
+        &keli_core_rs_instance_id(plan),
+        true,
+    )?;
+    write_json_field(&mut content, "log_level", &"info", false)?;
+    write_json_field(&mut content, "dns", &render_keli_core_rs_dns(plan)?, false)?;
+    content.extend_from_slice(br#","inbounds":["#);
+    let mut first_inbound = true;
+    for inbound in &plan.inbounds {
+        for expanded in expand_keli_core_rs_inbound(inbound)? {
+            if !first_inbound {
+                content.push(b',');
+            }
+            write_keli_core_rs_inbound(&mut content, &expanded)?;
+            first_inbound = false;
+        }
+    }
+    content.push(b']');
+    write_json_field(&mut content, "outbounds", &outbounds, false)?;
+    write_json_field(&mut content, "routes", &Vec::<Value>::new(), false)?;
+    write_json_field(
+        &mut content,
+        "stats",
+        &json!({
+            "enabled": true,
+            "per_user": true
+        }),
+        false,
+    )?;
+    content.extend_from_slice(b"}\n");
+    Ok(content)
+}
+
+fn write_keli_core_rs_inbound<W: Write>(
+    writer: &mut W,
+    inbound: &InboundPlan,
+) -> Result<(), CoreError> {
+    writer
+        .write_all(b"{")
+        .map_err(|err| CoreError::new(format!("encode keli-core-rs inbound: {err}")))?;
+    write_json_field(writer, "tag", &inbound.tag, true)?;
+    write_json_field(
+        writer,
+        "protocol",
+        &keli_core_rs_protocol_name(inbound),
+        false,
+    )?;
+    write_json_field(writer, "listen", &inbound.listen, false)?;
+    write_json_field(writer, "port", &inbound.port, false)?;
+    let cipher = if inbound.protocol == "shadowsocks" {
+        Value::String(inbound.cipher.clone())
+    } else {
+        Value::Null
+    };
+    write_json_field(writer, "cipher", &cipher, false)?;
+    write_json_field(writer, "flow", &inbound.flow, false)?;
+    write_json_field(writer, "padding_scheme", &inbound.padding_scheme, false)?;
+    writer
+        .write_all(br#","users":["#)
+        .map_err(|err| CoreError::new(format!("encode keli-core-rs users: {err}")))?;
+    for (idx, user) in inbound.users.iter().enumerate() {
+        if idx > 0 {
+            writer
+                .write_all(b",")
+                .map_err(|err| CoreError::new(format!("encode keli-core-rs users: {err}")))?;
+        }
+        let user = KeliCoreRsUserRef {
+            id: user.id,
+            uuid: &user.uuid,
+            password: None,
+            email: None,
+            speed_limit: user.speed_limit,
+            device_limit: user.device_limit,
+        };
+        serde_json::to_writer(&mut *writer, &user)
+            .map_err(|err| CoreError::new(format!("encode keli-core-rs user: {err}")))?;
+    }
+    writer
+        .write_all(b"]")
+        .map_err(|err| CoreError::new(format!("encode keli-core-rs users: {err}")))?;
+    write_json_field(
+        writer,
+        "transport",
+        &render_keli_core_rs_transport(inbound),
+        false,
+    )?;
+    write_json_field(writer, "tls", &render_keli_core_rs_tls(inbound), false)?;
+    write_json_field(
+        writer,
+        "sniffing",
+        &json!({
+            "enabled": true,
+            "dest_override": ["http", "tls"]
+        }),
+        false,
+    )?;
+    write_json_field(
+        writer,
+        "routes",
+        &render_keli_core_rs_routes_for_inbound(inbound)?,
+        false,
+    )?;
+    writer
+        .write_all(b"}")
+        .map_err(|err| CoreError::new(format!("encode keli-core-rs inbound: {err}")))?;
+    Ok(())
+}
+
+fn write_json_field<W, T>(
+    writer: &mut W,
+    name: &str,
+    value: &T,
+    first: bool,
+) -> Result<(), CoreError>
+where
+    W: Write,
+    T: Serialize + ?Sized,
+{
+    if !first {
+        writer
+            .write_all(b",")
+            .map_err(|err| CoreError::new(format!("encode core config field {name}: {err}")))?;
+    }
+    serde_json::to_writer(&mut *writer, name)
+        .map_err(|err| CoreError::new(format!("encode core config field {name}: {err}")))?;
+    writer
+        .write_all(b":")
+        .map_err(|err| CoreError::new(format!("encode core config field {name}: {err}")))?;
+    serde_json::to_writer(writer, value)
+        .map_err(|err| CoreError::new(format!("encode core config field {name}: {err}")))
 }
 
 fn ensure_core_plan_certificates(plan: &CorePlan) -> Result<(), CoreError> {
@@ -4070,10 +4245,8 @@ mod tests {
         assert_eq!(config["inbounds"][0]["listen"], "0.0.0.0");
         assert_eq!(config["inbounds"][0]["transport"]["network"], "tcp");
         assert_eq!(config["inbounds"][0]["users"][0]["uuid"], "socks-user");
-        assert_eq!(
-            config["inbounds"][0]["users"][0]["email"],
-            format!("{socks_tag}|socks-user")
-        );
+        assert_eq!(config["inbounds"][0]["users"][0]["email"], json!(null));
+        assert_eq!(plan.inbounds[0].users[0].email, "");
         assert_eq!(config["inbounds"][0]["users"][0]["speed_limit"], 1024);
         assert_eq!(config["inbounds"][0]["users"][0]["device_limit"], 2);
         assert_eq!(config["inbounds"][1]["protocol"], "http");

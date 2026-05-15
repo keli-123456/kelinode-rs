@@ -13,7 +13,7 @@ use crate::core_control::KELI_CORE_APPLY_CONTROL_TIMEOUT;
 use crate::health::ResourceSnapshot;
 use crate::logging;
 use crate::panel::client::{PanelClient, PanelClientOptions};
-use crate::panel::types::UserInfo;
+use crate::panel::types::{UserDeltaBody, UserInfo};
 use crate::port_forward::PortForwardExecutor;
 use crate::process::{core_process_spec, keli_core_rs_control_client, ProcessSupervisor};
 use crate::realtime::{
@@ -30,7 +30,7 @@ use crate::subscription_proxy::SubscriptionProxyRuntimeManager;
 use crate::system::{ResourceSampler, SystemPublicIpProbe};
 use crate::user::{
     apply_full_user_list, apply_user_delta_body, load_user_sync_state, save_user_sync_state,
-    user_sync_state_path, UserListDiff, UserSyncState,
+    user_delta_body_diff, user_sync_state_path, UserListDiff, UserSyncState,
 };
 use serde_json::{json, Value};
 
@@ -405,8 +405,12 @@ where
                         startup_full_snapshot_tags = user_change_tags.clone();
                     }
                     self.user_delta_metrics.record_full_rebuild();
-                    self.plan =
-                        rebuild_runtime_plan_with_users(&self.plan, &options.users_by_node_tag)?;
+                    let users_for_rebuild = user_sync_users_for_tags(
+                        &self.user_sync,
+                        &user_change_tags,
+                        &options.users_by_node_tag,
+                    );
+                    self.plan = rebuild_runtime_plan_with_users(&self.plan, &users_for_rebuild)?;
                     self.user_id_lookup = runtime_user_id_lookup_from_plan(&self.plan);
                 }
                 options.users_by_node_tag.clear();
@@ -729,12 +733,12 @@ fn keli_core_user_delta_payload(node_tag: &str, change: &RuntimeUserDeltaChange)
     })
 }
 
-fn keli_core_user_delta_user(node_tag: &str, user: &UserInfo) -> Value {
+fn keli_core_user_delta_user(_node_tag: &str, user: &UserInfo) -> Value {
     json!({
         "id": user.id,
         "uuid": user.uuid,
         "password": null,
-        "email": format!("{}|{}", node_tag, user.uuid),
+        "email": null,
         "speed_limit": user.speed_limit,
         "device_limit": user.device_limit
     })
@@ -1290,14 +1294,22 @@ async fn load_users_for_node(
         let base_revision = entry.state.revision;
         match client.get_user_delta(entry.state.revision).await {
             Ok(delta) => {
+                if user_delta_body_is_revision_only(&delta) && !entry.state.users.is_empty() {
+                    entry.state.revision = delta.revision;
+                    entry.last_change = None;
+                    return Ok(Vec::new());
+                }
+                let diff = user_delta_body_diff(&entry.state, &delta);
+                let change =
+                    runtime_user_delta_change(delta.full, base_revision, delta.revision, diff);
+                if change.is_none() {
+                    entry.state.revision = delta.revision;
+                    entry.last_change = None;
+                    return Ok(Vec::new());
+                }
                 let result = apply_user_delta_body(&entry.state, &delta);
-                entry.last_change = runtime_user_delta_change(
-                    delta.full,
-                    base_revision,
-                    delta.revision,
-                    result.diff.clone(),
-                );
                 entry.state = result.state;
+                entry.last_change = change;
                 save_runtime_user_sync_entry(entry);
                 return Ok(entry.state.users.clone());
             }
@@ -1328,13 +1340,17 @@ async fn load_users_for_node(
         })?
         .unwrap_or_else(|| entry.state.users.clone());
     let result = apply_full_user_list(&entry.state, &users);
-    entry.last_change = runtime_user_delta_change(
+    let change = runtime_user_delta_change(
         true,
         entry.state.revision,
         entry.state.revision,
         result.diff.clone(),
     );
     entry.state = result.state;
+    entry.last_change = change;
+    if entry.last_change.is_none() {
+        return Ok(Vec::new());
+    }
     save_runtime_user_sync_entry(entry);
     Ok(entry.state.users.clone())
 }
@@ -1345,7 +1361,7 @@ fn runtime_user_delta_change(
     revision: i64,
     diff: UserListDiff,
 ) -> Option<RuntimeUserDeltaChange> {
-    if user_list_diff_is_empty(&diff) && base_revision == revision {
+    if user_list_diff_is_empty(&diff) {
         return None;
     }
     Some(RuntimeUserDeltaChange {
@@ -1358,6 +1374,25 @@ fn runtime_user_delta_change(
 
 fn user_list_diff_is_empty(diff: &UserListDiff) -> bool {
     diff.deleted.is_empty() && diff.added.is_empty() && diff.updated.is_empty()
+}
+
+fn user_delta_body_is_revision_only(delta: &UserDeltaBody) -> bool {
+    !delta.full && delta.deleted.is_empty() && delta.upsert.is_empty()
+}
+
+fn user_sync_users_for_tags(
+    sync_state: &BTreeMap<String, RuntimeUserSyncEntry>,
+    tags: &[String],
+    fallback: &BTreeMap<String, Vec<UserInfo>>,
+) -> BTreeMap<String, Vec<UserInfo>> {
+    tags.iter()
+        .filter_map(|tag| {
+            if let Some(entry) = sync_state.get(tag) {
+                return Some((tag.clone(), entry.state.users.clone()));
+            }
+            fallback.get(tag).map(|users| (tag.clone(), users.clone()))
+        })
+        .collect()
 }
 
 fn load_runtime_user_sync_entry(config: &NodeConfig) -> RuntimeUserSyncEntry {
@@ -1421,10 +1456,11 @@ mod tests {
         node_config_for_info, nonfatal_keli_core_activity_report, nonfatal_panel_status_report,
         refresh_runtime_health, refresh_subscription_proxy_health, run_runtime_loop,
         run_runtime_loop_async, run_runtime_loop_async_with_events, runtime_loop_event_for_task,
-        should_run, try_apply_keli_core_rs_user_deltas, user_delta_not_supported,
-        AsyncRuntimeLoopCallbacks, PanelRuntimeLoop, RuntimeLoopCallbacks, RuntimeLoopEvent,
-        RuntimeLoopEventKind, RuntimeLoopExit, RuntimeLoopExitReason, RuntimeLoopFuture,
-        RuntimeLoopOptions, RuntimeUserDeltaChange, RuntimeUserDeltaMetrics, RuntimeUserSyncEntry,
+        runtime_user_delta_change, should_run, try_apply_keli_core_rs_user_deltas,
+        user_delta_body_is_revision_only, user_delta_not_supported, AsyncRuntimeLoopCallbacks,
+        PanelRuntimeLoop, RuntimeLoopCallbacks, RuntimeLoopEvent, RuntimeLoopEventKind,
+        RuntimeLoopExit, RuntimeLoopExitReason, RuntimeLoopFuture, RuntimeLoopOptions,
+        RuntimeUserDeltaChange, RuntimeUserDeltaMetrics, RuntimeUserSyncEntry,
     };
     use crate::config::{NodeConfig, ResolvedConfig, ResolvedMachineConfig};
     use crate::control::RuntimeControlOptions;
@@ -1535,6 +1571,20 @@ mod tests {
     }
 
     #[test]
+    fn revision_only_user_delta_does_not_trigger_runtime_change() {
+        assert!(runtime_user_delta_change(false, 42, 43, UserListDiff::default()).is_none());
+        assert!(user_delta_body_is_revision_only(
+            &crate::panel::types::UserDeltaBody {
+                full: false,
+                revision: 43,
+                users: Vec::new(),
+                deleted: Vec::new(),
+                upsert: Vec::new(),
+            }
+        ));
+    }
+
+    #[test]
     fn keli_core_user_delta_payload_maps_panel_diff() {
         let change = RuntimeUserDeltaChange {
             full: false,
@@ -1571,7 +1621,7 @@ mod tests {
                     "id": 2,
                     "uuid": "added-user",
                     "password": null,
-                    "email": "panel|vless|1|added-user",
+                    "email": null,
                     "speed_limit": 10,
                     "device_limit": 2
                 }],
@@ -1579,7 +1629,7 @@ mod tests {
                     "id": 3,
                     "uuid": "updated-user",
                     "password": null,
-                    "email": "panel|vless|1|updated-user",
+                    "email": null,
                     "speed_limit": 20,
                     "device_limit": 3
                 }],
@@ -1630,7 +1680,7 @@ mod tests {
                 "id": 7,
                 "uuid": "11111111-1111-1111-1111-111111111111",
                 "password": null,
-                "email": "panel|vless|1|11111111-1111-1111-1111-111111111111",
+                "email": null,
                 "speed_limit": 1024,
                 "device_limit": 3
             })

@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::Path;
 
@@ -52,8 +52,10 @@ pub fn apply_user_delta(
     }
 
     for user in upsert {
-        if old_map.contains_key(&user.uuid) {
-            result.updated.push(user.clone());
+        if let Some(old_user) = old_map.get(&user.uuid) {
+            if user_changed(old_user, user) {
+                result.updated.push(user.clone());
+            }
         } else {
             result.added.push(user.clone());
         }
@@ -112,6 +114,16 @@ pub fn apply_user_delta_body(state: &UserSyncState, delta: &UserDeltaBody) -> Us
     }
 }
 
+pub fn user_delta_body_diff(state: &UserSyncState, delta: &UserDeltaBody) -> UserListDiff {
+    if delta.full {
+        if delta.users.is_empty() {
+            return UserListDiff::default();
+        }
+        return compare_user_list(&state.users, &delta.users);
+    }
+    compare_incremental_delta(&state.users, &delta.deleted, &delta.upsert)
+}
+
 pub fn apply_full_user_list(state: &UserSyncState, users: &[UserInfo]) -> UserSyncStepResult {
     if users.is_empty() {
         return UserSyncStepResult {
@@ -127,6 +139,37 @@ pub fn apply_full_user_list(state: &UserSyncState, users: &[UserInfo]) -> UserSy
         },
         diff: compare_user_list(&state.users, users),
     }
+}
+
+fn compare_incremental_delta(
+    old: &[UserInfo],
+    deleted: &[UserInfo],
+    upsert: &[UserInfo],
+) -> UserListDiff {
+    let deleted_uuids = deleted
+        .iter()
+        .map(|user| user.uuid.as_str())
+        .collect::<BTreeSet<_>>();
+    let mut upsert_map = upsert
+        .iter()
+        .map(|user| (user.uuid.as_str(), user))
+        .collect::<BTreeMap<_, _>>();
+    let mut diff = UserListDiff::default();
+
+    for old_user in old {
+        if deleted_uuids.contains(old_user.uuid.as_str()) {
+            diff.deleted.push(old_user.clone());
+            continue;
+        }
+        if let Some(new_user) = upsert_map.remove(old_user.uuid.as_str()) {
+            if user_changed(old_user, new_user) {
+                diff.updated.push(new_user.clone());
+            }
+        }
+    }
+
+    diff.added = upsert_map.into_values().cloned().collect();
+    diff
 }
 
 fn user_map_by_uuid(users: &[UserInfo]) -> BTreeMap<String, UserInfo> {
@@ -199,7 +242,8 @@ mod tests {
 
     use super::{
         apply_full_user_list, apply_user_delta, apply_user_delta_body, compare_user_list,
-        load_user_sync_state, save_user_sync_state, user_sync_state_path, UserSyncState,
+        load_user_sync_state, save_user_sync_state, user_delta_body_diff, user_sync_state_path,
+        UserSyncState,
     };
     use crate::panel::types::{UserDeltaBody, UserInfo};
 
@@ -299,6 +343,52 @@ mod tests {
         assert_eq!(uuids(&result.state.users), vec!["a", "c"]);
         assert_eq!(uuids(&result.diff.deleted), vec!["b"]);
         assert_eq!(uuids(&result.diff.added), vec!["c"]);
+    }
+
+    #[test]
+    fn incremental_delta_ignores_unchanged_upsert_users() {
+        let state = UserSyncState {
+            revision: 1,
+            users: vec![user(1, "a", 0, 1), user(2, "b", 10, 2)],
+            updated_at: None,
+        };
+        let delta = UserDeltaBody {
+            full: false,
+            revision: 2,
+            users: Vec::new(),
+            deleted: Vec::new(),
+            upsert: vec![user(2, "b", 10, 2)],
+        };
+
+        let result = apply_user_delta_body(&state, &delta);
+
+        assert_eq!(result.state.revision, 2);
+        assert_eq!(uuids(&result.state.users), vec!["a", "b"]);
+        assert!(result.diff.added.is_empty());
+        assert!(result.diff.deleted.is_empty());
+        assert!(result.diff.updated.is_empty());
+    }
+
+    #[test]
+    fn user_delta_body_diff_detects_incremental_changes_without_state_rebuild() {
+        let state = UserSyncState {
+            revision: 1,
+            users: vec![user(1, "a", 0, 1), user(2, "b", 10, 2), user(3, "c", 0, 1)],
+            updated_at: None,
+        };
+        let delta = UserDeltaBody {
+            full: false,
+            revision: 2,
+            users: Vec::new(),
+            deleted: vec![user(1, "a", 0, 1)],
+            upsert: vec![user(2, "b", 10, 2), user(4, "d", 20, 1)],
+        };
+
+        let diff = user_delta_body_diff(&state, &delta);
+
+        assert_eq!(uuids(&diff.deleted), vec!["a"]);
+        assert_eq!(uuids(&diff.added), vec!["d"]);
+        assert!(diff.updated.is_empty());
     }
 
     #[test]
