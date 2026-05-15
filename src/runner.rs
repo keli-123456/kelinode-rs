@@ -375,6 +375,14 @@ where
                         &self.user_sync,
                         &user_change_tags,
                     );
+                    for node_tag in &user_change_tags {
+                        if let Some(entry) = self.user_sync.get_mut(node_tag) {
+                            entry.last_change = None;
+                        }
+                    }
+                    if !options.report_to_panel {
+                        return Ok(RuntimeLoopSignal::Continue);
+                    }
                 } else {
                     if native_core_running == Some(false) {
                         logging::info(
@@ -1209,20 +1217,26 @@ where
             RuntimeLoopEventReply::queued("reload queued"),
         )),
         RuntimeLoopEventKind::RefreshUsers => match callbacks.refresh_users().await {
-            Ok(users_by_node_tag) => match callbacks
-                .run_tick(RuntimeTickOptions {
-                    control: options.control.clone(),
-                    report_to_panel: false,
-                    users_by_node_tag,
-                })
-                .await
-            {
-                Ok(signal) => Ok((
-                    signal,
-                    RuntimeLoopEventReply::applied("user refresh applied"),
-                )),
-                Err(error) => Err(error),
-            },
+            Ok(users_by_node_tag) if users_by_node_tag.is_empty() => Ok((
+                RuntimeLoopSignal::Continue,
+                RuntimeLoopEventReply::applied("user refresh no changes"),
+            )),
+            Ok(users_by_node_tag) => {
+                match callbacks
+                    .run_tick(RuntimeTickOptions {
+                        control: options.control.clone(),
+                        report_to_panel: false,
+                        users_by_node_tag,
+                    })
+                    .await
+                {
+                    Ok(signal) => Ok((
+                        signal,
+                        RuntimeLoopEventReply::applied("user refresh applied"),
+                    )),
+                    Err(error) => Err(error),
+                }
+            }
             Err(error) => Err(error),
         },
     };
@@ -1260,7 +1274,9 @@ async fn load_users_by_node_tag_from_panel_with_state(
             .entry(node.tag.clone())
             .or_insert_with(|| load_runtime_user_sync_entry(config));
         let users = load_users_for_node(config, entry, &mut client).await?;
-        users_by_tag.insert(node.tag.clone(), users);
+        if entry.last_change.is_some() {
+            users_by_tag.insert(node.tag.clone(), users);
+        }
     }
     Ok(users_by_tag)
 }
@@ -1275,12 +1291,12 @@ async fn load_users_for_node(
         match client.get_user_delta(entry.state.revision).await {
             Ok(delta) => {
                 let result = apply_user_delta_body(&entry.state, &delta);
-                entry.last_change = Some(RuntimeUserDeltaChange {
-                    full: delta.full,
+                entry.last_change = runtime_user_delta_change(
+                    delta.full,
                     base_revision,
-                    revision: delta.revision,
-                    diff: result.diff.clone(),
-                });
+                    delta.revision,
+                    result.diff.clone(),
+                );
                 entry.state = result.state;
                 save_runtime_user_sync_entry(entry);
                 return Ok(entry.state.users.clone());
@@ -1312,15 +1328,36 @@ async fn load_users_for_node(
         })?
         .unwrap_or_else(|| entry.state.users.clone());
     let result = apply_full_user_list(&entry.state, &users);
-    entry.last_change = Some(RuntimeUserDeltaChange {
-        full: true,
-        base_revision: entry.state.revision,
-        revision: entry.state.revision,
-        diff: result.diff.clone(),
-    });
+    entry.last_change = runtime_user_delta_change(
+        true,
+        entry.state.revision,
+        entry.state.revision,
+        result.diff.clone(),
+    );
     entry.state = result.state;
     save_runtime_user_sync_entry(entry);
     Ok(entry.state.users.clone())
+}
+
+fn runtime_user_delta_change(
+    full: bool,
+    base_revision: i64,
+    revision: i64,
+    diff: UserListDiff,
+) -> Option<RuntimeUserDeltaChange> {
+    if user_list_diff_is_empty(&diff) && base_revision == revision {
+        return None;
+    }
+    Some(RuntimeUserDeltaChange {
+        full,
+        base_revision,
+        revision,
+        diff,
+    })
+}
+
+fn user_list_diff_is_empty(diff: &UserListDiff) -> bool {
+    diff.deleted.is_empty() && diff.added.is_empty() && diff.updated.is_empty()
 }
 
 fn load_runtime_user_sync_entry(config: &NodeConfig) -> RuntimeUserSyncEntry {
@@ -2236,6 +2273,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn runtime_event_skips_tick_when_user_refresh_has_no_changes() {
+        let (reply, result) = tokio::sync::oneshot::channel();
+        let mut callbacks = AsyncFakeCallbacks {
+            empty_refresh_users: true,
+            ..AsyncFakeCallbacks::default()
+        };
+
+        let signal = handle_runtime_loop_event(
+            &mut callbacks,
+            &RuntimeLoopOptions {
+                user_refresh_interval: 0,
+                panel_report_interval: 0,
+                ..RuntimeLoopOptions::default()
+            },
+            RuntimeLoopEvent::with_reply(RuntimeLoopEventKind::RefreshUsers, reply),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(signal, RuntimeLoopSignal::Continue);
+        let reply = result.await.unwrap().unwrap();
+        assert_eq!(reply.status, "applied");
+        assert_eq!(reply.message, "user refresh no changes");
+        assert_eq!(callbacks.refreshes, 1);
+        assert!(callbacks.ticks.is_empty());
+    }
+
+    #[tokio::test]
     async fn runtime_event_marks_reload_reply_as_queued() {
         let (reply, result) = tokio::sync::oneshot::channel();
         let mut callbacks = AsyncFakeCallbacks::default();
@@ -2760,7 +2825,7 @@ mod tests {
             .unwrap();
         });
         let mut current_users_by_tag = BTreeMap::new();
-        current_users_by_tag.insert(tag, vec![old_user.clone(), new_user.clone()]);
+        current_users_by_tag.insert(tag.clone(), vec![old_user.clone(), new_user.clone()]);
 
         let signal = AsyncRuntimeLoopCallbacks::run_tick(
             &mut runner,
@@ -2783,7 +2848,12 @@ mod tests {
         assert_eq!(signal, RuntimeLoopSignal::Continue);
         assert_eq!(saved_after, saved_before);
         assert_eq!(runner.process_supervisor.stops.len(), stops_before);
-        assert_eq!(runner.process_supervisor.starts.len(), starts_before + 1);
+        assert_eq!(runner.process_supervisor.starts.len(), starts_before);
+        assert!(runner
+            .user_sync
+            .get(&tag)
+            .and_then(|entry| entry.last_change.as_ref())
+            .is_none());
         assert!(runner
             .plan
             .core_plan
@@ -3270,6 +3340,7 @@ mod tests {
         refreshes: usize,
         signal_at: Option<usize>,
         signal: RuntimeLoopSignal,
+        empty_refresh_users: bool,
     }
 
     impl Default for AsyncFakeCallbacks {
@@ -3279,6 +3350,7 @@ mod tests {
                 refreshes: 0,
                 signal_at: None,
                 signal: RuntimeLoopSignal::Continue,
+                empty_refresh_users: false,
             }
         }
     }
@@ -3289,6 +3361,9 @@ mod tests {
         ) -> RuntimeLoopFuture<'a, Result<BTreeMap<String, Vec<UserInfo>>, String>> {
             Box::pin(async move {
                 self.refreshes += 1;
+                if self.empty_refresh_users {
+                    return Ok(BTreeMap::new());
+                }
                 let mut users = BTreeMap::new();
                 users.insert(
                     "node-a".to_string(),
