@@ -526,10 +526,11 @@ fn try_apply_keli_core_rs_user_deltas(
     let skipped_port_range = users_by_node_tag
         .keys()
         .filter(|node_tag| {
-            core_plan
-                .inbounds
-                .iter()
-                .any(|inbound| inbound.tag == **node_tag && !inbound.port_range.trim().is_empty())
+            core_plan.inbounds.iter().any(|inbound| {
+                inbound.tag == **node_tag
+                    && inbound.protocol == "mieru"
+                    && !inbound.port_range.trim().is_empty()
+            })
         })
         .count();
     if skipped_port_range > 0 {
@@ -1747,8 +1748,8 @@ mod tests {
     }
 
     #[test]
-    fn keli_core_user_delta_metrics_report_port_range_skip() {
-        let dir = temp_test_dir("user-delta-port-range-skip");
+    fn keli_core_user_delta_metrics_report_mieru_port_range_skip() {
+        let dir = temp_test_dir("user-delta-mieru-port-range-skip");
         let mut resolved = ResolvedConfig {
             kernel: Default::default(),
             realtime: Default::default(),
@@ -1768,7 +1769,7 @@ mod tests {
         };
         resolved.kernel.r#type = "keli-core-rs".to_string();
         resolved.kernel.config_dir = dir.join("v2node").display().to_string();
-        let node = test_node_with_host("https://panel.example.test", "vless", 12);
+        let node = test_node_with_host("https://panel.example.test", "mieru", 12);
         let tag = node.tag.clone();
         let mut plan = build_runtime_bootstrap_plan(resolved, vec![node], Vec::new()).unwrap();
         plan.core_plan.as_mut().unwrap().inbounds[0].port_range = "20000-20001".to_string();
@@ -1790,6 +1791,58 @@ mod tests {
             status["kelinode_user_delta_skipped_port_range_total"],
             json!(1)
         );
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn keli_core_user_delta_does_not_skip_hysteria2_port_range() {
+        let dir = temp_test_dir("user-delta-hysteria2-port-range");
+        let mut resolved = ResolvedConfig {
+            kernel: Default::default(),
+            realtime: Default::default(),
+            machine: ResolvedMachineConfig {
+                enabled: true,
+                continue_on_error: true,
+                profiles: Vec::new(),
+            },
+            agent: Default::default(),
+            nodes: vec![NodeConfig {
+                url: "https://panel.example.test".to_string(),
+                token: "token".to_string(),
+                node_id: 12,
+                machine_id: 12,
+                ..NodeConfig::default()
+            }],
+        };
+        resolved.kernel.r#type = "keli-core-rs".to_string();
+        resolved.kernel.config_dir = dir.join("v2node").display().to_string();
+        let common: CommonNode = serde_json::from_value(json!({
+            "protocol": "hysteria2",
+            "server_port": 10012,
+            "tls": 1,
+            "tls_settings": {
+                "server_name": "hy2.example.test",
+                "cert_file": "/tmp/hy2.cer",
+                "key_file": "/tmp/hy2.key"
+            }
+        }))
+        .unwrap();
+        let node = NodeInfo::from_common("https://panel.example.test", 12, common).unwrap();
+        let tag = node.tag.clone();
+        let mut plan = build_runtime_bootstrap_plan(resolved, vec![node], Vec::new()).unwrap();
+        plan.core_plan.as_mut().unwrap().inbounds[0].port_range = "32000-33000".to_string();
+        let mut users_by_tag = BTreeMap::new();
+        users_by_tag.insert(tag, Vec::new());
+        let mut metrics = RuntimeUserDeltaMetrics::default();
+
+        assert!(!try_apply_keli_core_rs_user_deltas(
+            &plan,
+            &BTreeMap::new(),
+            &users_by_tag,
+            &mut metrics
+        ));
+
+        assert_eq!(metrics.kelinode_user_delta_skipped_port_range_total, 0);
         let _ = fs::remove_dir_all(dir);
     }
 
