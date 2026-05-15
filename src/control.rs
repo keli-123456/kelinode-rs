@@ -6,6 +6,7 @@ use crate::core::{
 };
 use crate::core_control::KeliCoreResponse;
 use crate::health::{build_machine_status_payload, HealthReportInput};
+use crate::logging;
 use crate::machine::{MachineStatusPayload, MachineStatusResponse, MachineUpgradeCommand};
 use crate::panel::types::UserInfo;
 use crate::panel::PanelClient;
@@ -129,6 +130,7 @@ where
     } else {
         inspect_hysteria_port_forward(&plan.node_infos, port_forward_executor)
     };
+    log_hy2_port_forward_status(&hy2_port_forward, options.repair_port_forward);
 
     let mut report_plan = plan.clone();
     report_plan.hy2_port_forward = hy2_port_forward.clone();
@@ -149,6 +151,70 @@ where
         hy2_port_forward,
         machine_status,
     })
+}
+
+fn log_hy2_port_forward_status(status: &HysteriaPortForwardStatus, repaired: bool) {
+    if !status.enabled {
+        return;
+    }
+    if status.expected_rules.is_empty() && status.errors.is_empty() {
+        return;
+    }
+
+    let summary = hy2_port_forward_summary(status, repaired);
+    if status.errors.is_empty() && total_hy2_missing_rules(status) == 0 {
+        logging::info("rules", summary);
+    } else {
+        logging::warn("rules", summary);
+    }
+}
+
+fn hy2_port_forward_summary(status: &HysteriaPortForwardStatus, repaired: bool) -> String {
+    let tool_summary = status
+        .tools
+        .iter()
+        .map(|tool| {
+            let state = if !tool.available {
+                "unavailable".to_string()
+            } else if !tool.error.is_empty() {
+                format!("error:{}", tool.error)
+            } else {
+                format!(
+                    "current={} expected={} missing={} extra={}",
+                    tool.current.len(),
+                    tool.expected.len(),
+                    tool.missing.len(),
+                    tool.extra.len()
+                )
+            };
+            format!("{}({})", tool.tool, state)
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    let first_rule = status
+        .expected_rules
+        .first()
+        .map(|rule| rule.spec.as_str())
+        .unwrap_or("-");
+
+    format!(
+        "hy2 port-forward {} root={} expected={} missing={} errors={} first_rule={} tools={}",
+        if repaired { "repair" } else { "inspect" },
+        status.running_as_root,
+        status.expected_rules.len(),
+        total_hy2_missing_rules(status),
+        status.errors.len(),
+        first_rule,
+        if tool_summary.is_empty() {
+            "-"
+        } else {
+            tool_summary.as_str()
+        }
+    )
+}
+
+fn total_hy2_missing_rules(status: &HysteriaPortForwardStatus) -> usize {
+    status.tools.iter().map(|tool| tool.missing.len()).sum()
 }
 
 fn apply_core_process<P>(
@@ -510,7 +576,10 @@ mod tests {
     use crate::config::{NodeConfig, ResolvedConfig, ResolvedMachineConfig, SidecarProcessConfig};
     use crate::panel::client::{PanelClient, PanelClientOptions};
     use crate::panel::types::{CommonNode, NodeInfo, UserInfo};
-    use crate::port_forward::{PortForwardCommand, PortForwardExecutor};
+    use crate::port_forward::{
+        HysteriaPortForwardRuleSpec, HysteriaPortForwardStatus, HysteriaPortForwardToolStatus,
+        PortForwardCommand, PortForwardExecutor,
+    };
     use crate::process::{
         keli_core_rs_control_addr, MemoryProcessSupervisor, ProcessSpec, ProcessSupervisor,
     };
@@ -522,9 +591,10 @@ mod tests {
     use crate::upgrade::{MemoryUpgradeExecutor, UpgradeManager};
 
     use super::{
-        apply_runtime_plan, handle_runtime_signal, machine_status_payload_for_client,
-        merge_runtime_panel_action, run_runtime_tick, runtime_loop_signal, runtime_panel_action,
-        RuntimeControlOptions, RuntimeLoopSignal, RuntimePanelAction, RuntimeTickOptions,
+        apply_runtime_plan, handle_runtime_signal, hy2_port_forward_summary,
+        machine_status_payload_for_client, merge_runtime_panel_action, run_runtime_tick,
+        runtime_loop_signal, runtime_panel_action, RuntimeControlOptions, RuntimeLoopSignal,
+        RuntimePanelAction, RuntimeTickOptions,
     };
 
     #[test]
@@ -576,6 +646,36 @@ mod tests {
         assert_eq!(result.machine_status.status["runtime"]["nodes"], json!(1));
 
         let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn hy2_port_forward_summary_reports_rule_drift() {
+        let rule = "-A PREROUTING -p udp --dport 32000:32010 -m comment --comment V2NODE-HY2 -j REDIRECT --to-ports 10088".to_string();
+        let status = HysteriaPortForwardStatus {
+            enabled: true,
+            running_as_root: true,
+            expected_rules: vec![HysteriaPortForwardRuleSpec {
+                protocol: "udp".to_string(),
+                match_rule: "32000-32010".to_string(),
+                target_port: 10088,
+                spec: rule.clone(),
+            }],
+            tools: vec![HysteriaPortForwardToolStatus {
+                tool: "iptables".to_string(),
+                available: true,
+                expected: vec![rule.clone()],
+                missing: vec![rule],
+                ..HysteriaPortForwardToolStatus::default()
+            }],
+            errors: Vec::new(),
+        };
+        let summary = hy2_port_forward_summary(&status, false);
+
+        assert!(summary.contains("hy2 port-forward inspect"));
+        assert!(summary.contains("expected=1"));
+        assert!(summary.contains("missing=1"));
+        assert!(summary.contains("--dport 32000:32010"));
+        assert!(summary.contains("--to-ports 10088"));
     }
 
     #[test]
