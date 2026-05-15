@@ -189,7 +189,7 @@ jobs:
         with:
           tag_name: ${{ steps.meta.outputs.version }}
           name: Keli native node ${{ steps.meta.outputs.version }}
-          prerelease: true
+          prerelease: false
           files: |
             kelinode-rs/dist/*.tar.gz
             kelinode-rs/dist/*.sha256
