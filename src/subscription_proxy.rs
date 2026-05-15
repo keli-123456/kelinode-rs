@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::fs;
-use std::io::{ErrorKind, Read, Write};
+use std::io::{BufReader, ErrorKind, Read, Write};
 use std::net::{IpAddr, Ipv4Addr, Shutdown, TcpListener, TcpStream};
 use std::path::Path;
 use std::process::Command;
@@ -421,11 +421,10 @@ impl SubscriptionProxyRuntimeManager {
                         Ok(())
                     }
                     SubscriptionProxyServeMode::Https => {
-                        self.stop_main_server();
-                        Err(
-                            "subscription proxy HTTPS serving is not wired in the Rust runtime yet"
-                                .to_string(),
-                        )
+                        self.main_server = Some(spawn_subscription_proxy_main_https_server(
+                            plan_subscription_proxy_main_server(config, mode),
+                        )?);
+                        Ok(())
                     }
                 }
             }
@@ -676,6 +675,27 @@ pub fn spawn_subscription_proxy_main_http_fallback_server(
     let profiles = plan.profiles.clone();
     let max_response_bytes = plan.max_response_bytes;
     spawn_subscription_proxy_blocking_server(listen, move |request| {
+        handle_subscription_proxy_request(&profiles, &request, max_response_bytes, |upstream| {
+            fetch_subscription_proxy_upstream_blocking(upstream, max_response_bytes)
+        })
+        .unwrap_or_else(|err| subscription_proxy_error_response(&err))
+    })
+}
+
+pub fn spawn_subscription_proxy_main_https_server(
+    plan: SubscriptionProxyMainServerPlan,
+) -> Result<SubscriptionProxyServerHandle, String> {
+    if plan.mode != SubscriptionProxyServeMode::Https {
+        return Err("subscription proxy HTTPS server requires https mode".to_string());
+    }
+    let tls_config = Arc::new(load_subscription_proxy_tls_config(
+        &plan.cert_file,
+        &plan.key_file,
+    )?);
+    let listen = plan.listen.clone();
+    let profiles = plan.profiles.clone();
+    let max_response_bytes = plan.max_response_bytes;
+    spawn_subscription_proxy_tls_blocking_server(listen, tls_config, move |request| {
         handle_subscription_proxy_request(&profiles, &request, max_response_bytes, |upstream| {
             fetch_subscription_proxy_upstream_blocking(upstream, max_response_bytes)
         })
@@ -1405,6 +1425,10 @@ where
 {
     let listener = TcpListener::bind(&listen)
         .map_err(|err| format!("bind subscription proxy server {listen}: {err}"))?;
+    let bound_listen = listener
+        .local_addr()
+        .map(|addr| addr.to_string())
+        .unwrap_or_else(|_| listen.clone());
     listener
         .set_nonblocking(true)
         .map_err(|err| format!("set subscription proxy server nonblocking {listen}: {err}"))?;
@@ -1415,7 +1439,40 @@ where
         serve_subscription_proxy_listener(listener, thread_stop, handler);
     });
     Ok(SubscriptionProxyServerHandle {
-        listen,
+        listen: bound_listen,
+        stop,
+        join: Some(join),
+    })
+}
+
+fn spawn_subscription_proxy_tls_blocking_server<F>(
+    listen: String,
+    tls_config: Arc<rustls::ServerConfig>,
+    handler: F,
+) -> Result<SubscriptionProxyServerHandle, String>
+where
+    F: Fn(SubscriptionProxyInboundRequest) -> SubscriptionProxyClientResponse
+        + Send
+        + Sync
+        + 'static,
+{
+    let listener = TcpListener::bind(&listen)
+        .map_err(|err| format!("bind subscription proxy HTTPS server {listen}: {err}"))?;
+    let bound_listen = listener
+        .local_addr()
+        .map(|addr| addr.to_string())
+        .unwrap_or_else(|_| listen.clone());
+    listener.set_nonblocking(true).map_err(|err| {
+        format!("set subscription proxy HTTPS server nonblocking {listen}: {err}")
+    })?;
+    let stop = Arc::new(AtomicBool::new(false));
+    let thread_stop = Arc::clone(&stop);
+    let handler = Arc::new(handler);
+    let join = thread::spawn(move || {
+        serve_subscription_proxy_tls_listener(listener, thread_stop, tls_config, handler);
+    });
+    Ok(SubscriptionProxyServerHandle {
+        listen: bound_listen,
         stop,
         join: Some(join),
     })
@@ -1447,10 +1504,39 @@ fn serve_subscription_proxy_listener<F>(
     }
 }
 
+fn serve_subscription_proxy_tls_listener<F>(
+    listener: TcpListener,
+    stop: Arc<AtomicBool>,
+    tls_config: Arc<rustls::ServerConfig>,
+    handler: Arc<F>,
+) where
+    F: Fn(SubscriptionProxyInboundRequest) -> SubscriptionProxyClientResponse
+        + Send
+        + Sync
+        + 'static,
+{
+    while !stop.load(Ordering::SeqCst) {
+        match listener.accept() {
+            Ok((stream, _)) => {
+                let handler = Arc::clone(&handler);
+                let tls_config = Arc::clone(&tls_config);
+                thread::spawn(move || {
+                    let _ = serve_subscription_proxy_tls_stream(stream, tls_config, handler);
+                });
+            }
+            Err(err) if err.kind() == ErrorKind::WouldBlock => {
+                thread::sleep(Duration::from_millis(50));
+            }
+            Err(_) => return,
+        }
+    }
+}
+
 fn serve_subscription_proxy_stream<F>(mut stream: TcpStream, handler: Arc<F>) -> Result<(), String>
 where
     F: Fn(SubscriptionProxyInboundRequest) -> SubscriptionProxyClientResponse,
 {
+    let _ = stream.set_nonblocking(false);
     let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
     let _ = stream.set_write_timeout(Some(Duration::from_secs(10)));
     let remote_addr = stream
@@ -1469,6 +1555,94 @@ where
         .map_err(|err| format!("write subscription proxy response: {err}"))?;
     let _ = stream.shutdown(Shutdown::Both);
     Ok(())
+}
+
+fn serve_subscription_proxy_tls_stream<F>(
+    stream: TcpStream,
+    tls_config: Arc<rustls::ServerConfig>,
+    handler: Arc<F>,
+) -> Result<(), String>
+where
+    F: Fn(SubscriptionProxyInboundRequest) -> SubscriptionProxyClientResponse,
+{
+    let _ = stream.set_nonblocking(false);
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
+    let _ = stream.set_write_timeout(Some(Duration::from_secs(10)));
+    let remote_addr = stream
+        .peer_addr()
+        .map(|addr| addr.to_string())
+        .unwrap_or_default();
+    let connection = rustls::ServerConnection::new(tls_config)
+        .map_err(|err| format!("create subscription proxy TLS connection: {err}"))?;
+    let mut stream = rustls::StreamOwned::new(connection, stream);
+    let response = match read_subscription_proxy_http_request_head(&mut stream, 32 * 1024)
+        .and_then(|raw| parse_subscription_proxy_http_request(&raw, &remote_addr))
+    {
+        Ok(request) => handler(request),
+        Err(err) => subscription_proxy_bad_request_response(&err),
+    };
+    let bytes = render_subscription_proxy_http_response(&response);
+    stream
+        .write_all(&bytes)
+        .map_err(|err| format!("write subscription proxy HTTPS response: {err}"))?;
+    stream
+        .flush()
+        .map_err(|err| format!("flush subscription proxy HTTPS response: {err}"))?;
+    stream.conn.send_close_notify();
+    let _ = stream.sock.shutdown(Shutdown::Both);
+    Ok(())
+}
+
+fn load_subscription_proxy_tls_config(
+    cert_file: &str,
+    key_file: &str,
+) -> Result<rustls::ServerConfig, String> {
+    let cert_file = cert_file.trim();
+    let key_file = key_file.trim();
+    if cert_file.is_empty() || key_file.is_empty() {
+        return Err("subscription proxy HTTPS requires cert_file and key_file".to_string());
+    }
+
+    let certs = load_subscription_proxy_certs(cert_file)?;
+    let key = load_subscription_proxy_private_key(key_file)?;
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let builder = rustls::ServerConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .map_err(|err| format!("configure subscription proxy TLS versions: {err}"))?;
+    let mut config = builder
+        .with_no_client_auth()
+        .with_single_cert(certs, key)
+        .map_err(|err| format!("load subscription proxy TLS certificate: {err}"))?;
+    config.alpn_protocols = vec![b"http/1.1".to_vec()];
+    Ok(config)
+}
+
+fn load_subscription_proxy_certs(
+    cert_file: &str,
+) -> Result<Vec<rustls::pki_types::CertificateDer<'static>>, String> {
+    let file = fs::File::open(cert_file)
+        .map_err(|err| format!("open subscription proxy cert file {cert_file}: {err}"))?;
+    let mut reader = BufReader::new(file);
+    let certs = rustls_pemfile::certs(&mut reader)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|err| format!("parse subscription proxy cert file {cert_file}: {err}"))?;
+    if certs.is_empty() {
+        return Err(format!(
+            "subscription proxy cert file {cert_file} has no certificates"
+        ));
+    }
+    Ok(certs)
+}
+
+fn load_subscription_proxy_private_key(
+    key_file: &str,
+) -> Result<rustls::pki_types::PrivateKeyDer<'static>, String> {
+    let file = fs::File::open(key_file)
+        .map_err(|err| format!("open subscription proxy key file {key_file}: {err}"))?;
+    let mut reader = BufReader::new(file);
+    rustls_pemfile::private_key(&mut reader)
+        .map_err(|err| format!("parse subscription proxy key file {key_file}: {err}"))?
+        .ok_or_else(|| format!("subscription proxy key file {key_file} has no private key"))
 }
 
 fn read_subscription_proxy_http_request_head<R: Read>(
@@ -1752,6 +1926,7 @@ mod tests {
     use std::collections::BTreeMap;
     use std::fs;
     use std::io::Cursor;
+    use std::path::Path;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::{
@@ -1769,10 +1944,10 @@ mod tests {
         read_subscription_proxy_http_request_head, render_subscription_proxy_http_response,
         resolve_subscription_certificate_domain, spawn_subscription_proxy_http_challenge_server,
         spawn_subscription_proxy_main_http_fallback_server,
-        subscription_proxy_certificate_owner_site_id, subscription_proxy_error_response,
-        subscription_proxy_file_readable, subscription_proxy_fingerprint,
-        write_subscription_proxy_file, SubscriptionProxyApplyAction,
-        SubscriptionProxyClientResponse, SubscriptionProxyFileWrite,
+        spawn_subscription_proxy_main_https_server, subscription_proxy_certificate_owner_site_id,
+        subscription_proxy_error_response, subscription_proxy_file_readable,
+        subscription_proxy_fingerprint, write_subscription_proxy_file,
+        SubscriptionProxyApplyAction, SubscriptionProxyClientResponse, SubscriptionProxyFileWrite,
         SubscriptionProxyInboundRequest, SubscriptionProxyMainServerPlan, SubscriptionProxyRoute,
         SubscriptionProxyRouteError, SubscriptionProxyRuntimeManager, SubscriptionProxyServeMode,
         SubscriptionProxyStatus, SubscriptionProxyUpstreamResponse, DEFAULT_CHALLENGE_DIR,
@@ -2444,12 +2619,11 @@ mod tests {
     }
 
     #[test]
-    fn runtime_manager_start_boundary_rejects_https_until_tls_server_is_wired() {
+    fn runtime_manager_start_boundary_runs_https_server() {
         let dir = temp_test_dir("subscription-proxy-manager-https-boundary");
         let cert_file = dir.join("fullchain.pem");
         let key_file = dir.join("private.key");
-        fs::write(&cert_file, "cert").unwrap();
-        fs::write(&key_file, "key").unwrap();
+        write_test_certificate_pair(&cert_file, &key_file);
 
         let mut config = normalized_proxy_for_apply();
         config.https_listen = "127.0.0.1:0".to_string();
@@ -2457,14 +2631,45 @@ mod tests {
         config.key_file = key_file.to_string_lossy().to_string();
         let mut manager = SubscriptionProxyRuntimeManager::new();
 
-        let err = manager
+        let plan = manager
             .apply_and_start_with_file_system(&config, |_, _| Ok("csr".to_string()))
-            .unwrap_err();
+            .unwrap();
 
-        assert!(err.contains("HTTPS serving is not wired"));
-        assert_eq!(manager.status().status, "error");
-        assert!(!manager.status().running);
+        assert_eq!(plan.action, SubscriptionProxyApplyAction::Start);
+        assert_eq!(plan.serve_mode, Some(SubscriptionProxyServeMode::Https));
+        assert_eq!(manager.status().status, "running");
+        assert_eq!(manager.status().mode, "https");
+        assert!(manager.status().running);
 
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn subscription_proxy_https_server_serves_health() {
+        let dir = temp_test_dir("subscription-proxy-https-server");
+        let cert_file = dir.join("fullchain.pem");
+        let key_file = dir.join("private.key");
+        write_test_certificate_pair(&cert_file, &key_file);
+        let mut config = normalized_proxy_for_apply();
+        config.https_listen = "127.0.0.1:0".to_string();
+        config.cert_file = cert_file.to_string_lossy().to_string();
+        config.key_file = key_file.to_string_lossy().to_string();
+        let plan = plan_subscription_proxy_main_server(&config, SubscriptionProxyServeMode::Https);
+
+        let server = spawn_subscription_proxy_main_https_server(plan).unwrap();
+        let response = reqwest::blocking::Client::builder()
+            .danger_accept_invalid_certs(true)
+            .no_proxy()
+            .build()
+            .unwrap()
+            .get(format!("https://{}/health", server.listen()))
+            .send()
+            .unwrap();
+
+        assert_eq!(response.status().as_u16(), 200);
+        assert_eq!(response.text().unwrap(), r#"{"status":"ok"}"#);
+
+        server.stop();
         let _ = fs::remove_dir_all(dir);
     }
 
@@ -2960,6 +3165,15 @@ mod tests {
         let path = std::env::temp_dir().join(format!("kelinode-rs-{label}-{nanos}"));
         fs::create_dir_all(&path).unwrap();
         path
+    }
+
+    fn write_test_certificate_pair(cert_file: &Path, key_file: &Path) {
+        if let Some(parent) = cert_file.parent() {
+            fs::create_dir_all(parent).unwrap();
+        }
+        let generated = rcgen::generate_simple_self_signed(vec!["localhost".to_string()]).unwrap();
+        fs::write(cert_file, generated.cert.pem()).unwrap();
+        fs::write(key_file, generated.key_pair.serialize_pem()).unwrap();
     }
 
     fn normalized_proxy_for_apply() -> SubscriptionProxyConfig {

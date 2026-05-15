@@ -994,7 +994,7 @@ dependencies = [
 
 [[package]]
 name = "kelinode-rs"
-version = "0.1.28"
+version = "0.1.29"
 dependencies = [
  "anyhow",
  "futures-util",
@@ -1003,6 +1003,7 @@ dependencies = [
  "rcgen",
  "reqwest",
  "rmp-serde",
+ "rustls",
  "rustls-pemfile",
  "serde",
  "serde_json",
