@@ -201,6 +201,41 @@ fn native_core_gray_health_value(metrics: &Map<String, Value>) -> Value {
         "keli_core_user_delta_apply_duration_ms",
         "max_ms",
     );
+    let quic_total_limit = nested_metric_object_u64(
+        metrics,
+        "keli_core_rs",
+        "keli_core_quic_resource",
+        "total_limit",
+    );
+    let quic_active_connections = nested_metric_object_u64(
+        metrics,
+        "keli_core_rs",
+        "keli_core_quic_resource",
+        "active_connections",
+    );
+    let quic_available_connections = nested_metric_object_u64(
+        metrics,
+        "keli_core_rs",
+        "keli_core_quic_resource",
+        "available_connections",
+    );
+    let quic_listener_count = nested_metric_object_u64(
+        metrics,
+        "keli_core_rs",
+        "keli_core_quic_resource",
+        "listener_count",
+    );
+    let quic_per_listener_soft_limit = nested_metric_object_u64(
+        metrics,
+        "keli_core_rs",
+        "keli_core_quic_resource",
+        "per_listener_soft_limit",
+    );
+    let quic_utilization_pct = if quic_total_limit == 0 {
+        0
+    } else {
+        quic_active_connections.saturating_mul(100) / quic_total_limit
+    };
     let metrics_failure = metrics.get("keli_core_rs_error").is_some();
 
     if native_success == 0
@@ -213,6 +248,7 @@ fn native_core_gray_health_value(metrics: &Map<String, Value>) -> Value {
         && revision_mismatch == 0
         && current_revision_missing == 0
         && core_apply_errors == 0
+        && quic_total_limit == 0
         && !metrics_failure
     {
         return Value::Null;
@@ -240,6 +276,9 @@ fn native_core_gray_health_value(metrics: &Map<String, Value>) -> Value {
     if current_revision_missing > 0 {
         reasons.push("current_revision_missing");
     }
+    if quic_utilization_pct >= 90 {
+        reasons.push("quic_resource_high");
+    }
 
     let mode = if metrics_failure || native_failed > 0 || core_apply_errors > 0 {
         "degraded"
@@ -252,18 +291,25 @@ fn native_core_gray_health_value(metrics: &Map<String, Value>) -> Value {
     } else {
         "unknown"
     };
-    let warning = match mode {
-        "degraded" => "native core metrics unavailable or apply errors observed",
-        "full_rebuild" => "native user delta fell back to full plan rebuild",
-        "fallback_repaired" => "full snapshot fallback observed; monitor for repetition",
-        _ => "",
+    let warning = if quic_utilization_pct >= 90 {
+        "QUIC resource usage is high; hold gray rollout until capacity is adjusted"
+    } else {
+        match mode {
+            "degraded" => "native core metrics unavailable or apply errors observed",
+            "full_rebuild" => "native user delta fell back to full plan rebuild",
+            "fallback_repaired" => "full snapshot fallback observed; monitor for repetition",
+            _ => "",
+        }
     };
-    let gate = match mode {
+    let mut gate = match mode {
         "native_delta" => "allow_widen",
         "fallback_repaired" => "hold_monitor",
         "full_rebuild" | "degraded" => "hold_rollback",
         _ => "hold",
     };
+    if quic_utilization_pct >= 90 && gate == "allow_widen" {
+        gate = "hold_monitor";
+    }
 
     json!({
         "mode": mode,
@@ -284,6 +330,12 @@ fn native_core_gray_health_value(metrics: &Map<String, Value>) -> Value {
         "core_apply_duration_count": core_apply_duration_count,
         "core_apply_duration_last_ms": core_apply_duration_last_ms,
         "core_apply_duration_max_ms": core_apply_duration_max_ms,
+        "quic_total_limit": quic_total_limit,
+        "quic_active_connections": quic_active_connections,
+        "quic_available_connections": quic_available_connections,
+        "quic_listener_count": quic_listener_count,
+        "quic_per_listener_soft_limit": quic_per_listener_soft_limit,
+        "quic_utilization_pct": quic_utilization_pct,
         "metrics_available": !metrics_failure,
         "reasons": reasons
     })
@@ -1000,6 +1052,39 @@ mod tests {
         assert_eq!(summary["can_widen"], json!(true));
         assert_eq!(summary["rollback_recommended"], json!(false));
         assert_eq!(summary["warning"], json!(""));
+    }
+
+    #[test]
+    fn native_core_metrics_summary_holds_widen_on_high_quic_usage() {
+        let metrics = json!({
+            "user_delta": {
+                "kelinode_user_delta_native_apply_success_total": 12
+            },
+            "keli_core_rs": {
+                "keli_core_user_delta_incremental_total": 12,
+                "keli_core_quic_resource": {
+                    "total_limit": 1000,
+                    "active_connections": 930,
+                    "available_connections": 70,
+                    "listener_count": 4,
+                    "per_listener_soft_limit": 250
+                }
+            }
+        });
+
+        let summary = metrics_value(metrics)["native_core_gray_health"].clone();
+
+        assert_eq!(summary["mode"], json!("native_delta"));
+        assert_eq!(summary["gate"], json!("hold_monitor"));
+        assert_eq!(summary["can_widen"], json!(false));
+        assert_eq!(summary["quic_utilization_pct"], json!(93));
+        assert_eq!(summary["quic_total_limit"], json!(1000));
+        assert_eq!(summary["quic_active_connections"], json!(930));
+        assert_eq!(
+            summary["warning"],
+            json!("QUIC resource usage is high; hold gray rollout until capacity is adjusted")
+        );
+        assert_eq!(summary["reasons"], json!(["quic_resource_high"]));
     }
 
     #[test]
