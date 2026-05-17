@@ -231,11 +231,52 @@ fn native_core_gray_health_value(metrics: &Map<String, Value>) -> Value {
         "keli_core_quic_resource",
         "per_listener_soft_limit",
     );
+    let tls_handshake_failure_total = nested_metric_u64(
+        metrics,
+        "keli_core_rs",
+        "keli_core_tls_handshake_failure_total",
+    );
+    let tls_handshake_backoff_reject_total = nested_metric_u64(
+        metrics,
+        "keli_core_rs",
+        "keli_core_tls_handshake_backoff_reject_total",
+    );
+    let tls_handshake_backoff_active_ips = nested_metric_u64(
+        metrics,
+        "keli_core_rs",
+        "keli_core_tls_handshake_backoff_active_ips",
+    );
+    let tls_handshake_backoff_blocked_ips = nested_metric_u64(
+        metrics,
+        "keli_core_rs",
+        "keli_core_tls_handshake_backoff_blocked_ips",
+    );
+    let tcp_auth_failure_total =
+        nested_metric_u64(metrics, "keli_core_rs", "keli_core_tcp_auth_failure_total");
+    let tcp_auth_backoff_reject_total = nested_metric_u64(
+        metrics,
+        "keli_core_rs",
+        "keli_core_tcp_auth_backoff_reject_total",
+    );
+    let tcp_auth_backoff_active_ips = nested_metric_u64(
+        metrics,
+        "keli_core_rs",
+        "keli_core_tcp_auth_backoff_active_ips",
+    );
+    let tcp_auth_backoff_blocked_ips = nested_metric_u64(
+        metrics,
+        "keli_core_rs",
+        "keli_core_tcp_auth_backoff_blocked_ips",
+    );
     let quic_utilization_pct = if quic_total_limit == 0 {
         0
     } else {
         quic_active_connections.saturating_mul(100) / quic_total_limit
     };
+    let abuse_backoff_pressure = tls_handshake_backoff_reject_total > 0
+        || tls_handshake_backoff_blocked_ips > 0
+        || tcp_auth_backoff_reject_total > 0
+        || tcp_auth_backoff_blocked_ips > 0;
     let metrics_failure = metrics.get("keli_core_rs_error").is_some();
 
     if native_success == 0
@@ -249,6 +290,14 @@ fn native_core_gray_health_value(metrics: &Map<String, Value>) -> Value {
         && current_revision_missing == 0
         && core_apply_errors == 0
         && quic_total_limit == 0
+        && tls_handshake_failure_total == 0
+        && tls_handshake_backoff_reject_total == 0
+        && tls_handshake_backoff_active_ips == 0
+        && tls_handshake_backoff_blocked_ips == 0
+        && tcp_auth_failure_total == 0
+        && tcp_auth_backoff_reject_total == 0
+        && tcp_auth_backoff_active_ips == 0
+        && tcp_auth_backoff_blocked_ips == 0
         && !metrics_failure
     {
         return Value::Null;
@@ -279,6 +328,12 @@ fn native_core_gray_health_value(metrics: &Map<String, Value>) -> Value {
     if quic_utilization_pct >= 90 {
         reasons.push("quic_resource_high");
     }
+    if tls_handshake_backoff_reject_total > 0 || tls_handshake_backoff_blocked_ips > 0 {
+        reasons.push("tls_handshake_backoff");
+    }
+    if tcp_auth_backoff_reject_total > 0 || tcp_auth_backoff_blocked_ips > 0 {
+        reasons.push("tcp_auth_backoff");
+    }
 
     let mode = if metrics_failure || native_failed > 0 || core_apply_errors > 0 {
         "degraded"
@@ -293,6 +348,8 @@ fn native_core_gray_health_value(metrics: &Map<String, Value>) -> Value {
     };
     let warning = if quic_utilization_pct >= 90 {
         "QUIC resource usage is high; hold gray rollout until capacity is adjusted"
+    } else if abuse_backoff_pressure {
+        "client abuse backoff observed; monitor CPU and auth failure rate before widening"
     } else {
         match mode {
             "degraded" => "native core metrics unavailable or apply errors observed",
@@ -308,6 +365,9 @@ fn native_core_gray_health_value(metrics: &Map<String, Value>) -> Value {
         _ => "hold",
     };
     if quic_utilization_pct >= 90 && gate == "allow_widen" {
+        gate = "hold_monitor";
+    }
+    if abuse_backoff_pressure && gate == "allow_widen" {
         gate = "hold_monitor";
     }
 
@@ -336,6 +396,14 @@ fn native_core_gray_health_value(metrics: &Map<String, Value>) -> Value {
         "quic_listener_count": quic_listener_count,
         "quic_per_listener_soft_limit": quic_per_listener_soft_limit,
         "quic_utilization_pct": quic_utilization_pct,
+        "tls_handshake_failure_total": tls_handshake_failure_total,
+        "tls_handshake_backoff_reject_total": tls_handshake_backoff_reject_total,
+        "tls_handshake_backoff_active_ips": tls_handshake_backoff_active_ips,
+        "tls_handshake_backoff_blocked_ips": tls_handshake_backoff_blocked_ips,
+        "tcp_auth_failure_total": tcp_auth_failure_total,
+        "tcp_auth_backoff_reject_total": tcp_auth_backoff_reject_total,
+        "tcp_auth_backoff_active_ips": tcp_auth_backoff_active_ips,
+        "tcp_auth_backoff_blocked_ips": tcp_auth_backoff_blocked_ips,
         "metrics_available": !metrics_failure,
         "reasons": reasons
     })
@@ -1085,6 +1153,54 @@ mod tests {
             json!("QUIC resource usage is high; hold gray rollout until capacity is adjusted")
         );
         assert_eq!(summary["reasons"], json!(["quic_resource_high"]));
+    }
+
+    #[test]
+    fn native_core_metrics_summary_holds_widen_on_abuse_backoff_pressure() {
+        let metrics = json!({
+            "user_delta": {
+                "kelinode_user_delta_native_apply_success_total": 12
+            },
+            "keli_core_rs": {
+                "keli_core_user_delta_incremental_total": 12,
+                "keli_core_tls_handshake_failure_total": 9,
+                "keli_core_tls_handshake_backoff_reject_total": 2,
+                "keli_core_tls_handshake_backoff_active_ips": 3,
+                "keli_core_tls_handshake_backoff_blocked_ips": 1,
+                "keli_core_tcp_auth_failure_total": 7,
+                "keli_core_tcp_auth_backoff_reject_total": 1,
+                "keli_core_tcp_auth_backoff_active_ips": 2,
+                "keli_core_tcp_auth_backoff_blocked_ips": 1
+            }
+        });
+
+        let summary = metrics_value(metrics)["native_core_gray_health"].clone();
+
+        assert_eq!(summary["mode"], json!("native_delta"));
+        assert_eq!(summary["gate"], json!("hold_monitor"));
+        assert_eq!(summary["can_widen"], json!(false));
+        assert_eq!(summary["rollback_recommended"], json!(false));
+        assert_eq!(
+            summary["warning"],
+            json!(
+                "client abuse backoff observed; monitor CPU and auth failure rate before widening"
+            )
+        );
+        assert_eq!(summary["tls_handshake_failure_total"], json!(9));
+        assert_eq!(summary["tls_handshake_backoff_reject_total"], json!(2));
+        assert_eq!(summary["tls_handshake_backoff_active_ips"], json!(3));
+        assert_eq!(summary["tls_handshake_backoff_blocked_ips"], json!(1));
+        assert_eq!(summary["tcp_auth_failure_total"], json!(7));
+        assert_eq!(summary["tcp_auth_backoff_reject_total"], json!(1));
+        assert_eq!(summary["tcp_auth_backoff_active_ips"], json!(2));
+        assert_eq!(summary["tcp_auth_backoff_blocked_ips"], json!(1));
+        assert_eq!(
+            summary["reasons"],
+            json!(["tls_handshake_backoff", "tcp_auth_backoff"])
+        );
+        let serialized = summary.to_string();
+        assert!(!serialized.contains("KELI_CORE_CONTROL_TOKEN"));
+        assert!(!serialized.contains("203.0.113."));
     }
 
     #[test]
