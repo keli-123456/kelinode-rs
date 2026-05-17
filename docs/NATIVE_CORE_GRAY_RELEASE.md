@@ -84,6 +84,26 @@ native core follows v2fly-style `include:` lines and strips attributes such as `
 text files. Built-in private rules and a small common-domain fallback work without files. Xray
 `.dat` files are not parsed by the native Rust core.
 
+Native DNS uses `kernel.dns_servers` when present and falls back to `1.1.1.1` / `8.8.8.8` when it
+is empty. DNS private-address blocking is opt-in so existing internal deployments keep working by
+default:
+
+```yaml
+kernel:
+  type: keli-core-rs
+  dns_servers:
+    - "1.1.1.1"
+    - "8.8.8.8"
+  dns_block_private_ips: true
+  dns_private_ip_allowlist:
+    - "domain:internal.example"
+    - "ip:10.0.0.0/8"
+```
+
+Enable `dns_block_private_ips` for public proxy nodes when DNS rebinding or accidental private IP
+egress is a concern. Keep explicit allowlist entries for local upstreams that are intentionally
+private, such as internal DNS names or private service subnets.
+
 Recommended rollout:
 
 1. Internal test node with no customer traffic.
