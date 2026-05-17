@@ -1,7 +1,8 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpListener, UdpSocket};
 use std::sync::{Mutex, OnceLock};
 
-use crate::config::SidecarProcessConfig;
+use crate::config::{NodeConfig, SidecarProcessConfig};
 use crate::core::{
     render_core_config, write_core_config, CoreConfigWriteResult, CoreKind, CorePlan,
 };
@@ -9,6 +10,7 @@ use crate::core_control::{KeliCoreResponse, KELI_CORE_APPLY_CONTROL_TIMEOUT};
 use crate::health::{build_machine_status_payload, HealthReportInput};
 use crate::logging;
 use crate::machine::{MachineStatusPayload, MachineStatusResponse, MachineUpgradeCommand};
+use crate::node::NodeFailure;
 use crate::panel::types::{NodeInfo, Protocol, UserInfo};
 use crate::panel::PanelClient;
 use crate::port_forward::{
@@ -19,7 +21,10 @@ use crate::process::{
     core_process_spec, keli_core_rs_control_client, sidecar_process_spec, ProcessSpec,
     ProcessStatus, ProcessSupervisor,
 };
-use crate::runtime::{rebuild_runtime_plan_with_users, RuntimeBootstrapPlan};
+use crate::runtime::{
+    node_config_for_info as runtime_node_config_for_info, rebuild_runtime_plan_with_users,
+    RuntimeBootstrapPlan,
+};
 use crate::upgrade::{UpgradeExecutor, UpgradeManager, UpgradeStatus};
 use serde_json::Value;
 
@@ -92,12 +97,30 @@ where
     let mut sidecar_configs = Vec::new();
     let mut core_process = None;
     let mut sidecar_processes = Vec::new();
+    let mut report_plan = plan.clone();
 
     if options.start_core {
         stop_unmanaged_core_processes(plan, process_supervisor, &options)?;
     }
 
     if let Some(core_plan) = &plan.core_plan {
+        let mut core_plan = core_plan.clone();
+        if options.start_core && core_plan.kind == CoreKind::KeliCoreRs {
+            filter_unavailable_keli_core_rs_listeners(
+                &mut core_plan,
+                &mut report_plan,
+                process_supervisor,
+                &options,
+            )?;
+        }
+        if core_plan.inbounds.is_empty() {
+            report_plan.core_plan = None;
+        } else {
+            report_plan.core_plan = Some(core_plan.clone());
+        }
+    }
+
+    if let Some(core_plan) = report_plan.core_plan.as_ref() {
         let write_result = write_core_config(core_plan).map_err(|err| err.message)?;
         if options.start_core {
             let status =
@@ -127,17 +150,16 @@ where
     }
 
     let hy2_port_forward = if options.repair_port_forward {
-        repair_hysteria_port_forward(&plan.node_infos, port_forward_executor)
+        repair_hysteria_port_forward(&report_plan.node_infos, port_forward_executor)
     } else {
-        inspect_hysteria_port_forward(&plan.node_infos, port_forward_executor)
+        inspect_hysteria_port_forward(&report_plan.node_infos, port_forward_executor)
     };
     log_hy2_port_forward_status(
         &hy2_port_forward,
         options.repair_port_forward,
-        &plan.node_infos,
+        &report_plan.node_infos,
     );
 
-    let mut report_plan = plan.clone();
     report_plan.hy2_port_forward = hy2_port_forward.clone();
     let mut health = options.health;
     if health.core.is_none() {
@@ -156,6 +178,175 @@ where
         hy2_port_forward,
         machine_status,
     })
+}
+
+fn filter_unavailable_keli_core_rs_listeners<P>(
+    core_plan: &mut CorePlan,
+    report_plan: &mut RuntimeBootstrapPlan,
+    process_supervisor: &mut P,
+    options: &RuntimeControlOptions,
+) -> Result<(), String>
+where
+    P: ProcessSupervisor,
+{
+    if !report_plan.resolved.machine.continue_on_error {
+        return Ok(());
+    }
+    let spec =
+        core_process_spec(core_plan, options.core_command.as_deref()).map_err(|err| err.message)?;
+    let running = process_supervisor
+        .status(&spec.name)
+        .map(|status| status.is_running())
+        .unwrap_or(false);
+    if running {
+        return Ok(());
+    }
+
+    let mut skipped_tags = BTreeSet::new();
+    let mut failures = Vec::new();
+    for inbound in &core_plan.inbounds {
+        if let Some(error) = first_unavailable_listener_error(inbound) {
+            logging::warn(
+                "core",
+                format!(
+                    "skipping node because listener is unavailable tag={} error={}",
+                    inbound.tag, error
+                ),
+            );
+            skipped_tags.insert(inbound.tag.clone());
+            if let Some(node) = report_plan
+                .node_infos
+                .iter()
+                .find(|node| node.tag == inbound.tag)
+            {
+                failures.push(NodeFailure {
+                    config: runtime_node_config_for_info(&report_plan.resolved, node.id, &node.tag)
+                        .cloned()
+                        .unwrap_or_else(|| NodeConfig {
+                            node_id: node.id,
+                            ..NodeConfig::default()
+                        }),
+                    error,
+                });
+            }
+        }
+    }
+
+    if skipped_tags.is_empty() {
+        return Ok(());
+    }
+
+    core_plan
+        .inbounds
+        .retain(|inbound| !skipped_tags.contains(&inbound.tag));
+    core_plan
+        .listen_tags
+        .retain(|tag| !skipped_tags.contains(tag));
+    report_plan
+        .node_infos
+        .retain(|node| !skipped_tags.contains(&node.tag));
+    report_plan.node_count = report_plan.node_infos.len();
+    report_plan.node_failures.extend(failures);
+    Ok(())
+}
+
+fn first_unavailable_listener_error(inbound: &crate::core::InboundPlan) -> Option<String> {
+    for spec in control_listener_specs(inbound) {
+        if let Err(error) = check_listener_available(&spec) {
+            return Some(error);
+        }
+    }
+    None
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ControlListenerSpec {
+    tag: String,
+    protocol: String,
+    network: &'static str,
+    listen: String,
+    port: u16,
+}
+
+fn control_listener_specs(inbound: &crate::core::InboundPlan) -> Vec<ControlListenerSpec> {
+    let listen = normalize_control_listen(&inbound.listen);
+    let mut specs = Vec::with_capacity(2);
+    if control_inbound_binds_tcp(inbound) {
+        specs.push(ControlListenerSpec {
+            tag: inbound.tag.clone(),
+            protocol: inbound.protocol.clone(),
+            network: "tcp",
+            listen: listen.clone(),
+            port: inbound.port,
+        });
+    }
+    if control_inbound_binds_udp(inbound) {
+        specs.push(ControlListenerSpec {
+            tag: inbound.tag.clone(),
+            protocol: inbound.protocol.clone(),
+            network: "udp",
+            listen,
+            port: inbound.port,
+        });
+    }
+    specs
+}
+
+fn control_inbound_binds_tcp(inbound: &crate::core::InboundPlan) -> bool {
+    matches!(
+        inbound.protocol.as_str(),
+        "socks" | "http" | "vless" | "vmess" | "trojan" | "shadowsocks" | "anytls" | "mieru"
+    )
+}
+
+fn control_inbound_binds_udp(inbound: &crate::core::InboundPlan) -> bool {
+    matches!(inbound.protocol.as_str(), "hysteria" | "hysteria2" | "tuic")
+        || (inbound.protocol == "shadowsocks" && inbound.network.contains("udp"))
+}
+
+fn check_listener_available(spec: &ControlListenerSpec) -> Result<(), String> {
+    let addrs = candidate_listener_addrs(&spec.listen, spec.port);
+    let mut last_error = None;
+    for addr in addrs {
+        let result = if spec.network == "udp" {
+            UdpSocket::bind(addr).map(|_| ())
+        } else {
+            TcpListener::bind(addr).map(|_| ())
+        };
+        match result {
+            Ok(()) => return Ok(()),
+            Err(error) => last_error = Some((addr, error)),
+        }
+    }
+    let Some((addr, error)) = last_error else {
+        return Ok(());
+    };
+    Err(format!(
+        "{} listener {} for inbound {} ({}) is unavailable: {}",
+        spec.network, addr, spec.tag, spec.protocol, error
+    ))
+}
+
+fn candidate_listener_addrs(listen: &str, port: u16) -> Vec<SocketAddr> {
+    let listen = normalize_control_listen(listen);
+    if listen.is_empty() || listen == "0.0.0.0" || listen == "::" {
+        return vec![
+            SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), port),
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), port),
+        ];
+    }
+    match listen.parse::<IpAddr>() {
+        Ok(ip) => vec![SocketAddr::new(ip, port)],
+        Err(_) => Vec::new(),
+    }
+}
+
+fn normalize_control_listen(value: &str) -> String {
+    value
+        .trim()
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .to_string()
 }
 
 fn log_hy2_port_forward_status(
@@ -724,6 +915,69 @@ mod tests {
         );
         assert_eq!(result.machine_status.status["runtime"]["nodes"], json!(1));
 
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn keli_core_rs_start_skips_node_when_listener_port_is_already_used() {
+        let occupied = TcpListener::bind("127.0.0.1:0").expect("occupy listener port");
+        let occupied_port = occupied.local_addr().unwrap().port();
+        let dir = temp_test_dir("runtime-control-occupied-port");
+        let mut resolved = ResolvedConfig {
+            kernel: Default::default(),
+            realtime: Default::default(),
+            machine: ResolvedMachineConfig {
+                enabled: true,
+                continue_on_error: true,
+                profiles: Vec::new(),
+            },
+            agent: Default::default(),
+            nodes: vec![NodeConfig {
+                url: "https://panel.example.test".to_string(),
+                token: "token".to_string(),
+                node_id: 7,
+                machine_id: 3,
+                ..NodeConfig::default()
+            }],
+        };
+        resolved.kernel.r#type = "keli-core-rs".to_string();
+        resolved.kernel.config_dir = dir.join("v2node").display().to_string();
+        let mut node = test_node("vless", 7);
+        node.common.listen_ip = "127.0.0.1".to_string();
+        node.common.server_port = occupied_port;
+        let plan = build_runtime_bootstrap_plan(resolved, vec![node], Vec::new()).unwrap();
+        let mut process = MemoryProcessSupervisor::default();
+        let mut port_forward = FakePortForwardExecutor::default();
+
+        let result = apply_runtime_plan(
+            &plan,
+            &mut process,
+            &mut port_forward,
+            RuntimeControlOptions {
+                machine_id: 3,
+                start_core: true,
+                ..RuntimeControlOptions::default()
+            },
+        )
+        .unwrap();
+
+        assert!(result.core_config.is_none());
+        assert!(process.starts.is_empty());
+        assert_eq!(result.machine_status.status["runtime"]["nodes"], json!(0));
+        let failures = result.machine_status.status["node_failures"]
+            .as_array()
+            .expect("node failures");
+        assert_eq!(failures.len(), 1);
+        assert!(
+            failures[0]["error"]
+                .as_str()
+                .unwrap()
+                .contains("listener 127.0.0.1"),
+            "{}",
+            failures[0]["error"]
+        );
+
+        drop(occupied);
         let _ = fs::remove_dir_all(dir);
     }
 

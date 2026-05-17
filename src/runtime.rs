@@ -1,10 +1,12 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
 use crate::config::{AgentConfig, AppConfig, NodeConfig, ResolvedConfig, SubscriptionProxyConfig};
 use crate::core::{
-    core_kind_from_name, split_core_plans_for_nodes_with_kind, CorePlan, CorePlanBundle,
+    core_kind_from_name, split_core_plans_for_nodes_with_kind, CoreKind, CorePlan, CorePlanBundle,
+    InboundPlan,
 };
+use crate::logging;
 use crate::machine::{resolve_machine_profiles_from_panel, MachineResolveSummary};
 use crate::node::{users_by_node_tag, NodeFailure, NodeManager, NodeManagerOptions};
 use crate::panel::types::{NodeInfo, UserInfo};
@@ -135,7 +137,7 @@ pub fn build_runtime_bootstrap_plan_with_users(
 ) -> Result<RuntimeBootstrapPlan, String> {
     let subscription_proxy_only =
         node_infos.is_empty() && resolved.agent.subscription_proxy.enabled;
-    let core_bundle = if node_infos.is_empty() {
+    let mut core_bundle = if node_infos.is_empty() {
         CorePlanBundle::default()
     } else {
         split_core_plans_for_nodes_with_kind(
@@ -146,6 +148,12 @@ pub fn build_runtime_bootstrap_plan_with_users(
         )
         .map_err(|err| err.message)?
     };
+    let (node_infos, node_failures) = filter_conflicting_runtime_listeners(
+        &resolved,
+        node_infos,
+        node_failures,
+        &mut core_bundle,
+    )?;
     let (hy2_rules, hy2_errors) = build_hysteria_port_forward_rules(&node_infos);
     let realtime_options = resolve_realtime_options_for_nodes(&resolved, &node_infos);
     let bootstrap = Bootstrap::from_resolved(&resolved);
@@ -203,6 +211,164 @@ pub fn node_config_for_info<'a>(
     } else {
         None
     }
+}
+
+fn filter_conflicting_runtime_listeners(
+    resolved: &ResolvedConfig,
+    node_infos: Vec<NodeInfo>,
+    node_failures: Vec<NodeFailure>,
+    core_bundle: &mut CorePlanBundle,
+) -> Result<(Vec<NodeInfo>, Vec<NodeFailure>), String> {
+    let Some(core_plan) = core_bundle.xray.as_mut() else {
+        return Ok((node_infos, node_failures));
+    };
+    if core_plan.kind != CoreKind::KeliCoreRs {
+        return Ok((node_infos, node_failures));
+    }
+
+    let mut seen = Vec::<RuntimeListenerSpec>::new();
+    let mut skipped_tags = BTreeSet::new();
+    let mut failures = node_failures;
+    for inbound in &core_plan.inbounds {
+        let mut inbound_conflict = None;
+        for spec in runtime_listener_specs(inbound) {
+            if let Some(existing) = seen
+                .iter()
+                .find(|existing| runtime_listener_specs_conflict(existing, &spec))
+            {
+                inbound_conflict = Some(format!(
+                    "duplicate {} listen {}:{} for inbound {} ({}) conflicts with {} ({}); change one node server port or listen address",
+                    spec.network,
+                    spec.listen,
+                    spec.port,
+                    spec.tag,
+                    spec.protocol,
+                    existing.tag,
+                    existing.protocol
+                ));
+                break;
+            }
+            seen.push(spec);
+        }
+
+        let Some(error) = inbound_conflict else {
+            continue;
+        };
+        if !resolved.machine.continue_on_error {
+            return Err(error);
+        }
+        logging::warn(
+            "core",
+            format!(
+                "skipping node due to listener conflict tag={} error={}",
+                inbound.tag, error
+            ),
+        );
+        skipped_tags.insert(inbound.tag.clone());
+        if let Some(node) = node_infos.iter().find(|node| node.tag == inbound.tag) {
+            failures.push(NodeFailure {
+                config: node_config_for_info(resolved, node.id, &node.tag)
+                    .cloned()
+                    .unwrap_or_else(|| NodeConfig {
+                        node_id: node.id,
+                        ..NodeConfig::default()
+                    }),
+                error,
+            });
+        }
+    }
+
+    if skipped_tags.is_empty() {
+        return Ok((node_infos, failures));
+    }
+
+    core_plan
+        .inbounds
+        .retain(|inbound| !skipped_tags.contains(&inbound.tag));
+    core_plan
+        .listen_tags
+        .retain(|tag| !skipped_tags.contains(tag));
+    if core_plan.inbounds.is_empty() {
+        core_bundle.xray = None;
+    }
+    let node_infos = node_infos
+        .into_iter()
+        .filter(|node| !skipped_tags.contains(&node.tag))
+        .collect();
+    Ok((node_infos, failures))
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RuntimeListenerSpec {
+    tag: String,
+    protocol: String,
+    network: &'static str,
+    listen: String,
+    port: u16,
+}
+
+fn runtime_listener_specs(inbound: &InboundPlan) -> Vec<RuntimeListenerSpec> {
+    let listen = normalize_runtime_listen(&inbound.listen);
+    let mut specs = Vec::with_capacity(2);
+    if inbound_binds_tcp(inbound) {
+        specs.push(RuntimeListenerSpec {
+            tag: inbound.tag.clone(),
+            protocol: inbound.protocol.clone(),
+            network: "tcp",
+            listen: listen.clone(),
+            port: inbound.port,
+        });
+    }
+    if inbound_binds_udp(inbound) {
+        specs.push(RuntimeListenerSpec {
+            tag: inbound.tag.clone(),
+            protocol: inbound.protocol.clone(),
+            network: "udp",
+            listen,
+            port: inbound.port,
+        });
+    }
+    specs
+}
+
+fn inbound_binds_tcp(inbound: &InboundPlan) -> bool {
+    matches!(
+        inbound.protocol.as_str(),
+        "socks" | "http" | "vless" | "vmess" | "trojan" | "shadowsocks" | "anytls" | "mieru"
+    )
+}
+
+fn inbound_binds_udp(inbound: &InboundPlan) -> bool {
+    matches!(inbound.protocol.as_str(), "hysteria" | "hysteria2" | "tuic")
+        || (inbound.protocol == "shadowsocks" && inbound.network.contains("udp"))
+}
+
+fn runtime_listener_specs_conflict(
+    existing: &RuntimeListenerSpec,
+    next: &RuntimeListenerSpec,
+) -> bool {
+    existing.network == next.network
+        && existing.port == next.port
+        && runtime_listens_conflict(&existing.listen, &next.listen)
+}
+
+fn runtime_listens_conflict(left: &str, right: &str) -> bool {
+    left == right || is_wildcard_listen(left) || is_wildcard_listen(right)
+}
+
+fn is_wildcard_listen(value: &str) -> bool {
+    matches!(
+        normalize_runtime_listen(value).as_str(),
+        "" | "0.0.0.0" | "::"
+    )
+}
+
+fn normalize_runtime_listen(value: &str) -> String {
+    value
+        .trim()
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .to_string()
 }
 
 pub fn apply_machine_summary(resolved: &mut ResolvedConfig, summary: MachineResolveSummary) {
@@ -537,6 +703,53 @@ mod tests {
             plan.core_plan.as_ref().unwrap().inbounds[0].protocol,
             "socks"
         );
+    }
+
+    #[test]
+    fn keli_core_rs_skips_duplicate_listener_nodes_when_machine_continues_on_error() {
+        let mut resolved = ResolvedConfig {
+            kernel: Default::default(),
+            realtime: Default::default(),
+            machine: ResolvedMachineConfig {
+                enabled: true,
+                continue_on_error: true,
+                profiles: Vec::new(),
+            },
+            agent: AgentConfig::default(),
+            nodes: vec![
+                NodeConfig {
+                    url: "https://panel-a.example.test".to_string(),
+                    token: "token-a".to_string(),
+                    node_id: 7,
+                    machine_id: 1,
+                    ..NodeConfig::default()
+                },
+                NodeConfig {
+                    url: "https://panel-b.example.test".to_string(),
+                    token: "token-b".to_string(),
+                    node_id: 8,
+                    machine_id: 2,
+                    ..NodeConfig::default()
+                },
+            ],
+        };
+        resolved.kernel.r#type = "keli-core-rs".to_string();
+        let nodes = vec![
+            test_node_for_url("https://panel-a.example.test", "vless", 7, 57702, ""),
+            test_node_for_url("https://panel-b.example.test", "vless", 8, 57702, ""),
+        ];
+
+        let plan = build_runtime_bootstrap_plan(resolved, nodes, Vec::new()).unwrap();
+
+        assert_eq!(plan.node_infos.len(), 1);
+        assert_eq!(plan.core_plan.as_ref().unwrap().inbounds.len(), 1);
+        assert_eq!(plan.node_failures.len(), 1);
+        assert!(
+            plan.node_failures[0].error.contains("duplicate tcp listen"),
+            "{}",
+            plan.node_failures[0].error
+        );
+        assert_eq!(plan.node_failures[0].config.node_id, 8);
     }
 
     #[test]
