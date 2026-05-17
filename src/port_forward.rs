@@ -1703,7 +1703,10 @@ mod tests {
         executor.output(
             "iptables",
             &["-S", "INPUT"],
-            Ok("-A INPUT -p udp -m udp --dport 10088 -m comment --comment V2NODE-HY2 -j ACCEPT\n".to_string()),
+            Ok(
+                "-A INPUT -p udp -m udp --dport 10088 -m comment --comment V2NODE-HY2 -j ACCEPT\n"
+                    .to_string(),
+            ),
         );
         executor.output(
             "iptables",
