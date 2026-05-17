@@ -268,6 +268,54 @@ fn native_core_gray_health_value(metrics: &Map<String, Value>) -> Value {
         "keli_core_rs",
         "keli_core_tcp_auth_backoff_blocked_ips",
     );
+    let dns_resolve_total = nested_metric_object_u64(
+        metrics,
+        "keli_core_rs",
+        "keli_core_dns",
+        "keli_core_dns_resolve_total",
+    );
+    let dns_system_query_total = nested_metric_object_u64(
+        metrics,
+        "keli_core_rs",
+        "keli_core_dns",
+        "keli_core_dns_system_query_total",
+    );
+    let dns_configured_query_total = nested_metric_object_u64(
+        metrics,
+        "keli_core_rs",
+        "keli_core_dns",
+        "keli_core_dns_configured_query_total",
+    );
+    let dns_positive_cache_hit_total = nested_metric_object_u64(
+        metrics,
+        "keli_core_rs",
+        "keli_core_dns",
+        "keli_core_dns_positive_cache_hit_total",
+    );
+    let dns_negative_cache_hit_total = nested_metric_object_u64(
+        metrics,
+        "keli_core_rs",
+        "keli_core_dns",
+        "keli_core_dns_negative_cache_hit_total",
+    );
+    let dns_resolve_error_total = nested_metric_object_u64(
+        metrics,
+        "keli_core_rs",
+        "keli_core_dns",
+        "keli_core_dns_resolve_error_total",
+    );
+    let dns_private_ip_filter_total = nested_metric_object_u64(
+        metrics,
+        "keli_core_rs",
+        "keli_core_dns",
+        "keli_core_dns_private_ip_filter_total",
+    );
+    let dns_private_ip_block_total = nested_metric_object_u64(
+        metrics,
+        "keli_core_rs",
+        "keli_core_dns",
+        "keli_core_dns_private_ip_block_total",
+    );
     let quic_utilization_pct = if quic_total_limit == 0 {
         0
     } else {
@@ -277,6 +325,7 @@ fn native_core_gray_health_value(metrics: &Map<String, Value>) -> Value {
         || tls_handshake_backoff_blocked_ips > 0
         || tcp_auth_backoff_reject_total > 0
         || tcp_auth_backoff_blocked_ips > 0;
+    let dns_guard_pressure = dns_private_ip_block_total > 0 || dns_resolve_error_total > 0;
     let metrics_failure = metrics.get("keli_core_rs_error").is_some();
 
     if native_success == 0
@@ -298,6 +347,14 @@ fn native_core_gray_health_value(metrics: &Map<String, Value>) -> Value {
         && tcp_auth_backoff_reject_total == 0
         && tcp_auth_backoff_active_ips == 0
         && tcp_auth_backoff_blocked_ips == 0
+        && dns_resolve_total == 0
+        && dns_system_query_total == 0
+        && dns_configured_query_total == 0
+        && dns_positive_cache_hit_total == 0
+        && dns_negative_cache_hit_total == 0
+        && dns_resolve_error_total == 0
+        && dns_private_ip_filter_total == 0
+        && dns_private_ip_block_total == 0
         && !metrics_failure
     {
         return Value::Null;
@@ -334,6 +391,12 @@ fn native_core_gray_health_value(metrics: &Map<String, Value>) -> Value {
     if tcp_auth_backoff_reject_total > 0 || tcp_auth_backoff_blocked_ips > 0 {
         reasons.push("tcp_auth_backoff");
     }
+    if dns_resolve_error_total > 0 {
+        reasons.push("dns_resolve_error");
+    }
+    if dns_private_ip_block_total > 0 {
+        reasons.push("dns_private_ip_block");
+    }
 
     let mode = if metrics_failure || native_failed > 0 || core_apply_errors > 0 {
         "degraded"
@@ -350,6 +413,8 @@ fn native_core_gray_health_value(metrics: &Map<String, Value>) -> Value {
         "QUIC resource usage is high; hold gray rollout until capacity is adjusted"
     } else if abuse_backoff_pressure {
         "client abuse backoff observed; monitor CPU and auth failure rate before widening"
+    } else if dns_guard_pressure {
+        "DNS guard or resolve errors observed; verify route rules and upstream DNS before widening"
     } else {
         match mode {
             "degraded" => "native core metrics unavailable or apply errors observed",
@@ -370,43 +435,153 @@ fn native_core_gray_health_value(metrics: &Map<String, Value>) -> Value {
     if abuse_backoff_pressure && gate == "allow_widen" {
         gate = "hold_monitor";
     }
+    if dns_guard_pressure && gate == "allow_widen" {
+        gate = "hold_monitor";
+    }
 
-    json!({
-        "mode": mode,
-        "gate": gate,
-        "can_widen": gate == "allow_widen",
-        "rollback_recommended": gate == "hold_rollback",
-        "warning": warning,
-        "native_apply_success_total": native_success,
-        "native_apply_failed_total": native_failed,
-        "full_snapshot_fallback_total": full_snapshot_fallback,
-        "full_rebuild_total": full_rebuild,
-        "core_apply_total": core_apply_total,
-        "core_incremental_total": core_incremental,
-        "core_full_snapshot_total": core_full_snapshot,
-        "revision_mismatch_total": revision_mismatch,
-        "current_revision_missing_total": current_revision_missing,
-        "core_apply_error_total": core_apply_errors,
-        "core_apply_duration_count": core_apply_duration_count,
-        "core_apply_duration_last_ms": core_apply_duration_last_ms,
-        "core_apply_duration_max_ms": core_apply_duration_max_ms,
-        "quic_total_limit": quic_total_limit,
-        "quic_active_connections": quic_active_connections,
-        "quic_available_connections": quic_available_connections,
-        "quic_listener_count": quic_listener_count,
-        "quic_per_listener_soft_limit": quic_per_listener_soft_limit,
-        "quic_utilization_pct": quic_utilization_pct,
-        "tls_handshake_failure_total": tls_handshake_failure_total,
-        "tls_handshake_backoff_reject_total": tls_handshake_backoff_reject_total,
-        "tls_handshake_backoff_active_ips": tls_handshake_backoff_active_ips,
-        "tls_handshake_backoff_blocked_ips": tls_handshake_backoff_blocked_ips,
-        "tcp_auth_failure_total": tcp_auth_failure_total,
-        "tcp_auth_backoff_reject_total": tcp_auth_backoff_reject_total,
-        "tcp_auth_backoff_active_ips": tcp_auth_backoff_active_ips,
-        "tcp_auth_backoff_blocked_ips": tcp_auth_backoff_blocked_ips,
-        "metrics_available": !metrics_failure,
-        "reasons": reasons
-    })
+    let mut summary = Map::new();
+    summary.insert("mode".to_string(), json!(mode));
+    summary.insert("gate".to_string(), json!(gate));
+    summary.insert("can_widen".to_string(), json!(gate == "allow_widen"));
+    summary.insert(
+        "rollback_recommended".to_string(),
+        json!(gate == "hold_rollback"),
+    );
+    summary.insert("warning".to_string(), json!(warning));
+    insert_u64(&mut summary, "native_apply_success_total", native_success);
+    insert_u64(&mut summary, "native_apply_failed_total", native_failed);
+    insert_u64(
+        &mut summary,
+        "full_snapshot_fallback_total",
+        full_snapshot_fallback,
+    );
+    insert_u64(&mut summary, "full_rebuild_total", full_rebuild);
+    insert_u64(&mut summary, "core_apply_total", core_apply_total);
+    insert_u64(&mut summary, "core_incremental_total", core_incremental);
+    insert_u64(&mut summary, "core_full_snapshot_total", core_full_snapshot);
+    insert_u64(&mut summary, "revision_mismatch_total", revision_mismatch);
+    insert_u64(
+        &mut summary,
+        "current_revision_missing_total",
+        current_revision_missing,
+    );
+    insert_u64(&mut summary, "core_apply_error_total", core_apply_errors);
+    insert_u64(
+        &mut summary,
+        "core_apply_duration_count",
+        core_apply_duration_count,
+    );
+    insert_u64(
+        &mut summary,
+        "core_apply_duration_last_ms",
+        core_apply_duration_last_ms,
+    );
+    insert_u64(
+        &mut summary,
+        "core_apply_duration_max_ms",
+        core_apply_duration_max_ms,
+    );
+    insert_u64(&mut summary, "quic_total_limit", quic_total_limit);
+    insert_u64(
+        &mut summary,
+        "quic_active_connections",
+        quic_active_connections,
+    );
+    insert_u64(
+        &mut summary,
+        "quic_available_connections",
+        quic_available_connections,
+    );
+    insert_u64(&mut summary, "quic_listener_count", quic_listener_count);
+    insert_u64(
+        &mut summary,
+        "quic_per_listener_soft_limit",
+        quic_per_listener_soft_limit,
+    );
+    insert_u64(&mut summary, "quic_utilization_pct", quic_utilization_pct);
+    insert_u64(
+        &mut summary,
+        "tls_handshake_failure_total",
+        tls_handshake_failure_total,
+    );
+    insert_u64(
+        &mut summary,
+        "tls_handshake_backoff_reject_total",
+        tls_handshake_backoff_reject_total,
+    );
+    insert_u64(
+        &mut summary,
+        "tls_handshake_backoff_active_ips",
+        tls_handshake_backoff_active_ips,
+    );
+    insert_u64(
+        &mut summary,
+        "tls_handshake_backoff_blocked_ips",
+        tls_handshake_backoff_blocked_ips,
+    );
+    insert_u64(
+        &mut summary,
+        "tcp_auth_failure_total",
+        tcp_auth_failure_total,
+    );
+    insert_u64(
+        &mut summary,
+        "tcp_auth_backoff_reject_total",
+        tcp_auth_backoff_reject_total,
+    );
+    insert_u64(
+        &mut summary,
+        "tcp_auth_backoff_active_ips",
+        tcp_auth_backoff_active_ips,
+    );
+    insert_u64(
+        &mut summary,
+        "tcp_auth_backoff_blocked_ips",
+        tcp_auth_backoff_blocked_ips,
+    );
+    insert_u64(&mut summary, "dns_resolve_total", dns_resolve_total);
+    insert_u64(
+        &mut summary,
+        "dns_system_query_total",
+        dns_system_query_total,
+    );
+    insert_u64(
+        &mut summary,
+        "dns_configured_query_total",
+        dns_configured_query_total,
+    );
+    insert_u64(
+        &mut summary,
+        "dns_positive_cache_hit_total",
+        dns_positive_cache_hit_total,
+    );
+    insert_u64(
+        &mut summary,
+        "dns_negative_cache_hit_total",
+        dns_negative_cache_hit_total,
+    );
+    insert_u64(
+        &mut summary,
+        "dns_resolve_error_total",
+        dns_resolve_error_total,
+    );
+    insert_u64(
+        &mut summary,
+        "dns_private_ip_filter_total",
+        dns_private_ip_filter_total,
+    );
+    insert_u64(
+        &mut summary,
+        "dns_private_ip_block_total",
+        dns_private_ip_block_total,
+    );
+    summary.insert("metrics_available".to_string(), json!(!metrics_failure));
+    summary.insert("reasons".to_string(), json!(reasons));
+    Value::Object(summary)
+}
+
+fn insert_u64(summary: &mut Map<String, Value>, key: &str, value: u64) {
+    summary.insert(key.to_string(), json!(value));
 }
 
 fn nested_metric_u64(metrics: &Map<String, Value>, section: &str, key: &str) -> u64 {
@@ -1201,6 +1376,56 @@ mod tests {
         let serialized = summary.to_string();
         assert!(!serialized.contains("KELI_CORE_CONTROL_TOKEN"));
         assert!(!serialized.contains("203.0.113."));
+    }
+
+    #[test]
+    fn native_core_metrics_summary_holds_widen_on_dns_guard_pressure() {
+        let metrics = json!({
+            "user_delta": {
+                "kelinode_user_delta_native_apply_success_total": 12
+            },
+            "keli_core_rs": {
+                "keli_core_user_delta_incremental_total": 12,
+                "keli_core_dns": {
+                    "keli_core_dns_resolve_total": 30,
+                    "keli_core_dns_system_query_total": 4,
+                    "keli_core_dns_configured_query_total": 20,
+                    "keli_core_dns_positive_cache_hit_total": 5,
+                    "keli_core_dns_negative_cache_hit_total": 1,
+                    "keli_core_dns_resolve_error_total": 2,
+                    "keli_core_dns_private_ip_filter_total": 3,
+                    "keli_core_dns_private_ip_block_total": 1
+                }
+            }
+        });
+
+        let summary = metrics_value(metrics)["native_core_gray_health"].clone();
+
+        assert_eq!(summary["mode"], json!("native_delta"));
+        assert_eq!(summary["gate"], json!("hold_monitor"));
+        assert_eq!(summary["can_widen"], json!(false));
+        assert_eq!(summary["rollback_recommended"], json!(false));
+        assert_eq!(
+            summary["warning"],
+            json!(
+                "DNS guard or resolve errors observed; verify route rules and upstream DNS before widening"
+            )
+        );
+        assert_eq!(summary["dns_resolve_total"], json!(30));
+        assert_eq!(summary["dns_system_query_total"], json!(4));
+        assert_eq!(summary["dns_configured_query_total"], json!(20));
+        assert_eq!(summary["dns_positive_cache_hit_total"], json!(5));
+        assert_eq!(summary["dns_negative_cache_hit_total"], json!(1));
+        assert_eq!(summary["dns_resolve_error_total"], json!(2));
+        assert_eq!(summary["dns_private_ip_filter_total"], json!(3));
+        assert_eq!(summary["dns_private_ip_block_total"], json!(1));
+        assert_eq!(
+            summary["reasons"],
+            json!(["dns_resolve_error", "dns_private_ip_block"])
+        );
+        let serialized = summary.to_string();
+        assert!(!serialized.contains("KELI_CORE_CONTROL_TOKEN"));
+        assert!(!serialized.contains("api.rebind.example"));
     }
 
     #[test]
