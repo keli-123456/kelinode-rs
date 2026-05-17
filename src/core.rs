@@ -8,6 +8,7 @@ use rcgen::{generate_simple_self_signed, CertifiedKey};
 use serde::Serialize;
 use serde_json::{json, Map, Value};
 
+use crate::config::KernelConfig;
 use crate::logging;
 use crate::panel::types::{CertInfo, NodeInfo, Protocol, Security, TlsSettings, UserInfo};
 
@@ -26,6 +27,14 @@ pub struct CorePlan {
     pub config_path: PathBuf,
     pub listen_tags: Vec<String>,
     pub inbounds: Vec<InboundPlan>,
+    pub dns: CorePlanDnsOptions,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct CorePlanDnsOptions {
+    pub servers: Vec<String>,
+    pub block_private_ips: bool,
+    pub private_ip_allowlist: Vec<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -164,11 +173,20 @@ impl CorePlan {
             config_path,
             listen_tags,
             inbounds,
+            dns: CorePlanDnsOptions::default(),
         })
     }
 
     pub fn file_layout(&self) -> CoreFileLayout {
         core_file_layout(&self.config_path)
+    }
+
+    pub fn apply_kernel_dns_options(&mut self, kernel: &KernelConfig) {
+        self.dns = CorePlanDnsOptions {
+            servers: kernel.dns_servers.clone(),
+            block_private_ips: kernel.dns_block_private_ips,
+            private_ip_allowlist: kernel.dns_private_ip_allowlist.clone(),
+        };
     }
 }
 
@@ -562,14 +580,26 @@ fn render_keli_core_rs_routes_for_inbound(inbound: &InboundPlan) -> Result<Vec<V
 }
 
 fn render_keli_core_rs_dns(plan: &CorePlan) -> Result<Value, CoreError> {
-    let mut servers = vec![
-        json!({
-            "address": "1.1.1.1"
-        }),
-        json!({
-            "address": "8.8.8.8"
-        }),
-    ];
+    let mut servers = if plan.dns.servers.is_empty() {
+        vec![
+            json!({
+                "address": "1.1.1.1"
+            }),
+            json!({
+                "address": "8.8.8.8"
+            }),
+        ]
+    } else {
+        plan.dns
+            .servers
+            .iter()
+            .map(|address| {
+                json!({
+                    "address": address
+                })
+            })
+            .collect()
+    };
     for inbound in &plan.inbounds {
         for route in &inbound.routes {
             if route.action != "dns" {
@@ -593,10 +623,19 @@ fn render_keli_core_rs_dns(plan: &CorePlan) -> Result<Value, CoreError> {
         }
     }
 
-    Ok(json!({
-        "servers": servers,
-        "query_strategy": "UseIPv4"
-    }))
+    let mut dns = Map::new();
+    dns.insert("servers".to_string(), json!(servers));
+    dns.insert("query_strategy".to_string(), json!("UseIPv4"));
+    if plan.dns.block_private_ips {
+        dns.insert("block_private_ips".to_string(), json!(true));
+    }
+    if !plan.dns.private_ip_allowlist.is_empty() {
+        dns.insert(
+            "private_ip_allowlist".to_string(),
+            json!(plan.dns.private_ip_allowlist),
+        );
+    }
+    Ok(Value::Object(dns))
 }
 
 fn push_keli_core_rs_outbound_once(outbounds: &mut Vec<Value>, tag: &str, outbound: Value) {
@@ -3824,6 +3863,7 @@ mod tests {
             config_path: PathBuf::from("/etc/v2node/config.json"),
             listen_tags: vec!["[panel]-vless:1".to_string()],
             inbounds: Vec::new(),
+            dns: Default::default(),
         };
 
         assert_eq!(plan.listen_tags.len(), 1);
@@ -4416,6 +4456,40 @@ mod tests {
             config["dns"]["servers"][2]["domains"][1],
             "domain:example.com"
         );
+    }
+
+    #[test]
+    fn renders_keli_core_rs_dns_private_ip_guard() {
+        let node = test_node("socks", 44, "");
+        let mut plan = CorePlan::from_nodes(
+            CoreKind::KeliCoreRs,
+            PathBuf::from("/srv/v2node/keli-core-rs.json"),
+            &[node],
+        )
+        .unwrap();
+        plan.dns.servers = vec![
+            "9.9.9.9".to_string(),
+            "https://dns.example/dns-query".to_string(),
+        ];
+        plan.dns.block_private_ips = true;
+        plan.dns.private_ip_allowlist = vec![
+            "domain:internal.example".to_string(),
+            "ip:10.0.0.0/8".to_string(),
+        ];
+
+        let config = render_core_config(&plan).unwrap();
+
+        assert_eq!(config["dns"]["servers"][0]["address"], "9.9.9.9");
+        assert_eq!(
+            config["dns"]["servers"][1]["address"],
+            "https://dns.example/dns-query"
+        );
+        assert_eq!(config["dns"]["block_private_ips"], true);
+        assert_eq!(
+            config["dns"]["private_ip_allowlist"][0],
+            "domain:internal.example"
+        );
+        assert_eq!(config["dns"]["private_ip_allowlist"][1], "ip:10.0.0.0/8");
     }
 
     #[test]

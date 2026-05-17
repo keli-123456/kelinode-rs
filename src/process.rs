@@ -676,6 +676,7 @@ mod tests {
             config_path: PathBuf::from("/srv/v2node/config.json"),
             listen_tags: Vec::new(),
             inbounds: Vec::new(),
+            dns: Default::default(),
         };
 
         let spec = core_process_spec(&plan, None).unwrap();
@@ -696,6 +697,7 @@ mod tests {
             config_path: config_path.clone(),
             listen_tags: Vec::new(),
             inbounds: Vec::new(),
+            dns: Default::default(),
         };
 
         let spec = core_process_spec(&plan, None).unwrap();
@@ -734,6 +736,7 @@ mod tests {
             config_path: PathBuf::from("/etc/v2node/sing-box.json"),
             listen_tags: Vec::new(),
             inbounds: Vec::new(),
+            dns: Default::default(),
         };
 
         let spec = core_process_spec(&plan, Some("/usr/local/bin/sing-box")).unwrap();
@@ -821,6 +824,7 @@ mod tests {
             config_path: config_path.clone(),
             listen_tags: Vec::new(),
             inbounds: Vec::new(),
+            dns: Default::default(),
         };
         let spec = core_process_spec(&plan, None).unwrap();
         let mut supervisor = SystemProcessSupervisor::default();
@@ -852,6 +856,7 @@ mod tests {
             config_path: rel_config.clone(),
             listen_tags: Vec::new(),
             inbounds: Vec::new(),
+            dns: Default::default(),
         };
 
         let spec = core_process_spec(&plan, None).unwrap();
@@ -948,6 +953,7 @@ mod tests {
             config_path: PathBuf::from("/srv/v2node/sidecar-naive-1.json"),
             listen_tags: Vec::new(),
             inbounds: Vec::new(),
+            dns: Default::default(),
         };
 
         let err = core_process_spec(&plan, None).unwrap_err();
@@ -962,6 +968,7 @@ mod tests {
             config_path: PathBuf::from("/srv/v2node/sidecar-mieru-2.json"),
             listen_tags: Vec::new(),
             inbounds: Vec::new(),
+            dns: Default::default(),
         };
 
         let spec = sidecar_process_spec(
@@ -992,6 +999,7 @@ mod tests {
             config_path: PathBuf::from("/srv/v2node/config.json"),
             listen_tags: Vec::new(),
             inbounds: Vec::new(),
+            dns: Default::default(),
         };
 
         let err =
@@ -1007,6 +1015,7 @@ mod tests {
             config_path: PathBuf::from("/srv/v2node/sidecar-naive-1.json"),
             listen_tags: Vec::new(),
             inbounds: Vec::new(),
+            dns: Default::default(),
         };
 
         let err = sidecar_process_spec(&plan, "  ", &["{config}".to_string()], &BTreeMap::new())
@@ -1022,6 +1031,7 @@ mod tests {
             config_path: PathBuf::from("/srv/v2node/config.json"),
             listen_tags: Vec::new(),
             inbounds: Vec::new(),
+            dns: Default::default(),
         };
         let spec = core_process_spec(&plan, None).unwrap();
         let mut supervisor = MemoryProcessSupervisor::default();

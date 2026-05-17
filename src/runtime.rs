@@ -148,6 +148,7 @@ pub fn build_runtime_bootstrap_plan_with_users(
         )
         .map_err(|err| err.message)?
     };
+    apply_kernel_dns_options(&resolved, &mut core_bundle);
     let (node_infos, node_failures) = filter_conflicting_runtime_listeners(
         &resolved,
         node_infos,
@@ -170,6 +171,14 @@ pub fn build_runtime_bootstrap_plan_with_users(
         hy2_port_forward: new_hysteria_port_forward_status(&hy2_rules, &hy2_errors, false),
         subscription_proxy_only,
     })
+}
+
+fn apply_kernel_dns_options(resolved: &ResolvedConfig, bundle: &mut CorePlanBundle) {
+    if let Some(plan) = bundle.xray.as_mut() {
+        if matches!(plan.kind, CoreKind::KeliCoreRs) {
+            plan.apply_kernel_dns_options(&resolved.kernel);
+        }
+    }
 }
 
 pub fn rebuild_runtime_plan_with_users(
@@ -702,6 +711,41 @@ mod tests {
         assert_eq!(
             plan.core_plan.as_ref().unwrap().inbounds[0].protocol,
             "socks"
+        );
+    }
+
+    #[test]
+    fn kernel_dns_security_options_reach_keli_core_rs_plan() {
+        let mut resolved = ResolvedConfig {
+            kernel: Default::default(),
+            realtime: Default::default(),
+            machine: ResolvedMachineConfig {
+                enabled: false,
+                continue_on_error: false,
+                profiles: Vec::new(),
+            },
+            agent: AgentConfig::default(),
+            nodes: vec![NodeConfig {
+                url: "https://panel.example.test".to_string(),
+                node_id: 7,
+                ..NodeConfig::default()
+            }],
+        };
+        resolved.kernel.r#type = "keli-core-rs".to_string();
+        resolved.kernel.dns_servers = vec!["9.9.9.9".to_string()];
+        resolved.kernel.dns_block_private_ips = true;
+        resolved.kernel.dns_private_ip_allowlist = vec!["domain:internal.example".to_string()];
+        let node = test_node("socks", 7, 1080, "");
+
+        let plan = build_runtime_bootstrap_plan(resolved, vec![node], Vec::new()).unwrap();
+        let core_plan = plan.core_plan.as_ref().unwrap();
+
+        assert_eq!(core_plan.kind, CoreKind::KeliCoreRs);
+        assert_eq!(core_plan.dns.servers, vec!["9.9.9.9".to_string()]);
+        assert!(core_plan.dns.block_private_ips);
+        assert_eq!(
+            core_plan.dns.private_ip_allowlist,
+            vec!["domain:internal.example".to_string()]
         );
     }
 

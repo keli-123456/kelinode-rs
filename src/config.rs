@@ -52,6 +52,10 @@ pub struct KernelConfig {
     #[serde(default)]
     pub dns_servers: Vec<String>,
     #[serde(default)]
+    pub dns_block_private_ips: bool,
+    #[serde(default)]
+    pub dns_private_ip_allowlist: Vec<String>,
+    #[serde(default)]
     pub ip_strategy: String,
 }
 
@@ -291,6 +295,7 @@ impl AppConfig {
         kernel.config_dir = normalize_config_dir(&kernel.config_dir);
         kernel.sidecars = normalize_sidecar_processes(&kernel.sidecars);
         kernel.dns_servers = normalize_string_list(&kernel.dns_servers);
+        kernel.dns_private_ip_allowlist = normalize_string_list(&kernel.dns_private_ip_allowlist);
         kernel.ip_strategy = kernel.ip_strategy.trim().to_string();
         kernel.log_level = kernel.log_level.trim().to_string();
 
@@ -404,6 +409,8 @@ impl Default for KernelConfig {
             sidecars: BTreeMap::new(),
             log_level: String::new(),
             dns_servers: Vec::new(),
+            dns_block_private_ips: false,
+            dns_private_ip_allowlist: Vec::new(),
             ip_strategy: String::new(),
         }
     }
@@ -669,6 +676,8 @@ mod tests {
         assert_eq!(kernel.r#type, "xray");
         assert!(kernel.core_command.is_empty());
         assert_eq!(kernel.config_dir, DEFAULT_CONFIG_DIR);
+        assert!(!kernel.dns_block_private_ips);
+        assert!(kernel.dns_private_ip_allowlist.is_empty());
     }
 
     #[test]
@@ -888,6 +897,43 @@ mod tests {
 
         assert_eq!(resolved.kernel.r#type, "keli-core-rs");
         assert_eq!(resolved.kernel.core_command, "/usr/local/bin/keli-core-rs");
+    }
+
+    #[test]
+    fn resolve_runtime_normalizes_dns_security_options() {
+        let mut config = AppConfig::default();
+        config.panel.url = "https://panel.example.test".to_string();
+        config.panel.token = "token".to_string();
+        config.panel.node_id = 1;
+        config.kernel.dns_servers = vec![
+            " 9.9.9.9 ".to_string(),
+            "".to_string(),
+            " https://dns.example/dns-query ".to_string(),
+        ];
+        config.kernel.dns_block_private_ips = true;
+        config.kernel.dns_private_ip_allowlist = vec![
+            " domain:internal.example ".to_string(),
+            "".to_string(),
+            " ip:10.0.0.0/8 ".to_string(),
+        ];
+
+        let resolved = config.resolve_runtime().unwrap();
+
+        assert_eq!(
+            resolved.kernel.dns_servers,
+            vec![
+                "9.9.9.9".to_string(),
+                "https://dns.example/dns-query".to_string()
+            ]
+        );
+        assert!(resolved.kernel.dns_block_private_ips);
+        assert_eq!(
+            resolved.kernel.dns_private_ip_allowlist,
+            vec![
+                "domain:internal.example".to_string(),
+                "ip:10.0.0.0/8".to_string()
+            ]
+        );
     }
 
     #[test]

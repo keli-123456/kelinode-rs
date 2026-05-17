@@ -1072,6 +1072,7 @@ mod tests {
                 users: vec![user(7, "uuid-a"), user(8, "uuid-b")],
                 routes: Vec::new(),
             }],
+            dns: Default::default(),
         }
     }
 
