@@ -272,23 +272,29 @@ pub fn repair_hysteria_port_forward<E: PortForwardExecutor>(
             &plan.allow_ports,
         );
         if tool_status.available {
-            match execute_reconcile_port_forward_tool(
-                executor,
-                tool,
-                &plan.nat_rules,
-                &plan.allow_ports,
-            ) {
-                Ok(()) => {
-                    tool_status = inspect_port_forward_tool_with_allow_ports(
-                        executor,
-                        tool,
-                        &plan.nat_rules,
-                        &plan.allow_ports,
-                    );
-                }
-                Err(error) => {
-                    tool_status.error = error.clone();
-                    status.errors.push(format!("{tool}: {error}"));
+            let needs_repair = tool_status.error.is_empty()
+                && (!tool_status.missing.is_empty()
+                    || !tool_status.extra.is_empty()
+                    || tool_status.stale_chain);
+            if needs_repair {
+                match execute_reconcile_port_forward_tool(
+                    executor,
+                    tool,
+                    &plan.nat_rules,
+                    &plan.allow_ports,
+                ) {
+                    Ok(()) => {
+                        tool_status = inspect_port_forward_tool_with_allow_ports(
+                            executor,
+                            tool,
+                            &plan.nat_rules,
+                            &plan.allow_ports,
+                        );
+                    }
+                    Err(error) => {
+                        tool_status.error = error.clone();
+                        status.errors.push(format!("{tool}: {error}"));
+                    }
                 }
             }
         }
@@ -1682,6 +1688,35 @@ mod tests {
             "{:?}",
             status.tools[0].extra
         );
+    }
+
+    #[test]
+    fn repair_hysteria_port_forward_noops_when_rules_are_current() {
+        let infos = vec![node(1, 10088, "32000-33000", "")];
+        let mut executor = FakePortForwardExecutor::root();
+        executor.available.insert("iptables".to_string());
+        executor.output(
+            "iptables",
+            &["-t", "nat", "-S", "PREROUTING"],
+            Ok("-A PREROUTING -p udp --dport 32000:33000 -m comment --comment V2NODE-HY2 -j REDIRECT --to-ports 10088\n".to_string()),
+        );
+        executor.output(
+            "iptables",
+            &["-S", "INPUT"],
+            Ok("-A INPUT -p udp -m udp --dport 10088 -m comment --comment V2NODE-HY2 -j ACCEPT\n".to_string()),
+        );
+        executor.output(
+            "iptables",
+            &["-t", "nat", "-S", "V2NODE-HY2"],
+            Err("missing chain".to_string()),
+        );
+
+        let status = repair_hysteria_port_forward(&infos, &mut executor);
+
+        assert!(status.errors.is_empty(), "{:?}", status.errors);
+        assert!(status.tools[0].missing.is_empty());
+        assert!(status.tools[0].extra.is_empty());
+        assert!(executor.ran.is_empty(), "{:?}", executor.ran);
     }
 
     #[test]
