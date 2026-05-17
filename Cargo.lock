@@ -984,6 +984,7 @@ dependencies = [
  "hkdf",
  "hmac",
  "http",
+ "libc",
  "md-5",
  "quinn",
  "rcgen",
@@ -1004,7 +1005,7 @@ dependencies = [
 
 [[package]]
 name = "kelinode-rs"
-version = "0.1.76"
+version = "0.1.77"
 dependencies = [
  "anyhow",
  "futures-util",
