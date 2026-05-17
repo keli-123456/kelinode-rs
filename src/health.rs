@@ -316,6 +316,44 @@ fn native_core_gray_health_value(metrics: &Map<String, Value>) -> Value {
         "keli_core_dns",
         "keli_core_dns_private_ip_block_total",
     );
+    let connection_error_total =
+        nested_metric_object_sum_u64(metrics, "keli_core_rs", "keli_core_connection_error_total");
+    let hy2_connection_timeout_total = nested_metric_object_u64(
+        metrics,
+        "keli_core_rs",
+        "keli_core_connection_error_total",
+        "hysteria2.connection.timeout",
+    );
+    let hy2_tcp_relay_timeout_total = nested_metric_object_u64(
+        metrics,
+        "keli_core_rs",
+        "keli_core_connection_error_total",
+        "hysteria2.tcp_relay.timeout",
+    );
+    let vless_tcp_auth_failed_total = nested_metric_object_u64(
+        metrics,
+        "keli_core_rs",
+        "keli_core_connection_error_total",
+        "vless.tcp.auth_failed",
+    );
+    let vless_tcp_upstream_timeout_total = nested_metric_object_u64(
+        metrics,
+        "keli_core_rs",
+        "keli_core_connection_error_total",
+        "vless.tcp.upstream_timeout",
+    );
+    let vless_tcp_upstream_connect_failed_total = nested_metric_object_u64(
+        metrics,
+        "keli_core_rs",
+        "keli_core_connection_error_total",
+        "vless.tcp.upstream_connect_failed",
+    );
+    let vless_tcp_dns_private_blocked_total = nested_metric_object_u64(
+        metrics,
+        "keli_core_rs",
+        "keli_core_connection_error_total",
+        "vless.tcp.dns_private_blocked",
+    );
     let quic_utilization_pct = if quic_total_limit == 0 {
         0
     } else {
@@ -326,6 +364,11 @@ fn native_core_gray_health_value(metrics: &Map<String, Value>) -> Value {
         || tcp_auth_backoff_reject_total > 0
         || tcp_auth_backoff_blocked_ips > 0;
     let dns_guard_pressure = dns_private_ip_block_total > 0 || dns_resolve_error_total > 0;
+    let connection_error_pressure = hy2_connection_timeout_total > 0
+        || hy2_tcp_relay_timeout_total > 0
+        || vless_tcp_upstream_timeout_total > 0
+        || vless_tcp_upstream_connect_failed_total > 0
+        || vless_tcp_dns_private_blocked_total > 0;
     let metrics_failure = metrics.get("keli_core_rs_error").is_some();
 
     if native_success == 0
@@ -355,6 +398,7 @@ fn native_core_gray_health_value(metrics: &Map<String, Value>) -> Value {
         && dns_resolve_error_total == 0
         && dns_private_ip_filter_total == 0
         && dns_private_ip_block_total == 0
+        && connection_error_total == 0
         && !metrics_failure
     {
         return Value::Null;
@@ -397,6 +441,15 @@ fn native_core_gray_health_value(metrics: &Map<String, Value>) -> Value {
     if dns_private_ip_block_total > 0 {
         reasons.push("dns_private_ip_block");
     }
+    if hy2_connection_timeout_total > 0 || hy2_tcp_relay_timeout_total > 0 {
+        reasons.push("hy2_timeout");
+    }
+    if vless_tcp_upstream_timeout_total > 0 || vless_tcp_upstream_connect_failed_total > 0 {
+        reasons.push("vless_upstream_error");
+    }
+    if vless_tcp_dns_private_blocked_total > 0 {
+        reasons.push("vless_dns_private_block");
+    }
 
     let mode = if metrics_failure || native_failed > 0 || core_apply_errors > 0 {
         "degraded"
@@ -415,6 +468,8 @@ fn native_core_gray_health_value(metrics: &Map<String, Value>) -> Value {
         "client abuse backoff observed; monitor CPU and auth failure rate before widening"
     } else if dns_guard_pressure {
         "DNS guard or resolve errors observed; verify route rules and upstream DNS before widening"
+    } else if connection_error_pressure {
+        "native core connection errors observed; inspect HY2/VLESS counters before widening"
     } else {
         match mode {
             "degraded" => "native core metrics unavailable or apply errors observed",
@@ -436,6 +491,9 @@ fn native_core_gray_health_value(metrics: &Map<String, Value>) -> Value {
         gate = "hold_monitor";
     }
     if dns_guard_pressure && gate == "allow_widen" {
+        gate = "hold_monitor";
+    }
+    if connection_error_pressure && gate == "allow_widen" {
         gate = "hold_monitor";
     }
 
@@ -575,6 +633,41 @@ fn native_core_gray_health_value(metrics: &Map<String, Value>) -> Value {
         "dns_private_ip_block_total",
         dns_private_ip_block_total,
     );
+    insert_u64(
+        &mut summary,
+        "connection_error_total",
+        connection_error_total,
+    );
+    insert_u64(
+        &mut summary,
+        "hy2_connection_timeout_total",
+        hy2_connection_timeout_total,
+    );
+    insert_u64(
+        &mut summary,
+        "hy2_tcp_relay_timeout_total",
+        hy2_tcp_relay_timeout_total,
+    );
+    insert_u64(
+        &mut summary,
+        "vless_tcp_auth_failed_total",
+        vless_tcp_auth_failed_total,
+    );
+    insert_u64(
+        &mut summary,
+        "vless_tcp_upstream_timeout_total",
+        vless_tcp_upstream_timeout_total,
+    );
+    insert_u64(
+        &mut summary,
+        "vless_tcp_upstream_connect_failed_total",
+        vless_tcp_upstream_connect_failed_total,
+    );
+    insert_u64(
+        &mut summary,
+        "vless_tcp_dns_private_blocked_total",
+        vless_tcp_dns_private_blocked_total,
+    );
     summary.insert("metrics_available".to_string(), json!(!metrics_failure));
     summary.insert("reasons".to_string(), json!(reasons));
     Value::Object(summary)
@@ -606,6 +699,20 @@ fn nested_metric_object_u64(
         .and_then(Value::as_object)
         .and_then(|object| object.get(key))
         .and_then(Value::as_u64)
+        .unwrap_or(0)
+}
+
+fn nested_metric_object_sum_u64(
+    metrics: &Map<String, Value>,
+    section: &str,
+    object_key: &str,
+) -> u64 {
+    metrics
+        .get(section)
+        .and_then(Value::as_object)
+        .and_then(|section| section.get(object_key))
+        .and_then(Value::as_object)
+        .map(|object| object.values().filter_map(Value::as_u64).sum())
         .unwrap_or(0)
 }
 
@@ -1426,6 +1533,47 @@ mod tests {
         let serialized = summary.to_string();
         assert!(!serialized.contains("KELI_CORE_CONTROL_TOKEN"));
         assert!(!serialized.contains("api.rebind.example"));
+    }
+
+    #[test]
+    fn native_core_metrics_summary_holds_widen_on_connection_errors_without_dynamic_labels() {
+        let metrics = json!({
+            "user_delta": {
+                "kelinode_user_delta_native_apply_success_total": 12
+            },
+            "keli_core_rs": {
+                "keli_core_user_delta_incremental_total": 12,
+                "keli_core_connection_error_total": {
+                    "hysteria2.connection.timeout": 3,
+                    "hysteria2.tcp_relay.timeout": 2,
+                    "vless.tcp.upstream_timeout": 4,
+                    "vless.tcp.auth_failed": 1
+                }
+            }
+        });
+
+        let summary = metrics_value(metrics)["native_core_gray_health"].clone();
+
+        assert_eq!(summary["mode"], json!("native_delta"));
+        assert_eq!(summary["gate"], json!("hold_monitor"));
+        assert_eq!(summary["can_widen"], json!(false));
+        assert_eq!(summary["rollback_recommended"], json!(false));
+        assert_eq!(
+            summary["warning"],
+            json!("native core connection errors observed; inspect HY2/VLESS counters before widening")
+        );
+        assert_eq!(summary["connection_error_total"], json!(10));
+        assert_eq!(summary["hy2_connection_timeout_total"], json!(3));
+        assert_eq!(summary["hy2_tcp_relay_timeout_total"], json!(2));
+        assert_eq!(summary["vless_tcp_upstream_timeout_total"], json!(4));
+        assert_eq!(summary["vless_tcp_auth_failed_total"], json!(1));
+        assert_eq!(
+            summary["reasons"],
+            json!(["hy2_timeout", "vless_upstream_error"])
+        );
+        let serialized = summary.to_string();
+        assert!(!serialized.contains("KELI_CORE_CONTROL_TOKEN"));
+        assert!(!serialized.contains("11111111-1111-1111-1111-111111111111"));
     }
 
     #[test]
