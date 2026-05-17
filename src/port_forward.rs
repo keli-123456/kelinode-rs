@@ -128,7 +128,7 @@ pub fn build_hysteria_port_forward_rules(
             continue;
         }
 
-        let (matchers, ranges) =
+        let (_, ranges) =
             match parse_port_forward_matchers_and_ranges_except(&external_port, target_port) {
                 Ok(result) => result,
                 Err(error) => {
@@ -139,21 +139,19 @@ pub fn build_hysteria_port_forward_rules(
                     continue;
                 }
             };
-        if let Some(conflict_port) = find_target_port_conflict(&ranges, target_port, &target_ports)
-        {
+        if ranges.is_empty() {
+            continue;
+        }
+        let ranges = trim_target_port_conflicts(ranges, target_port, &target_ports);
+        let ranges = trim_allocated_range_conflicts(ranges, target_port, &allocated);
+        if ranges.is_empty() {
             errors.push(format!(
-                "node {} port {:?} overlaps server_port {} from another HY2 node",
-                info.id, external_port, conflict_port
+                "node {} port {:?} is fully covered by other HY2 port-forward ranges",
+                info.id, external_port
             ));
             continue;
         }
-        if let Some(conflict) = find_range_conflict(&ranges, target_port, &allocated) {
-            errors.push(format!(
-                "node {} port {:?} overlaps node {} port {}-{} with different target server_port",
-                info.id, external_port, conflict.node_id, conflict.range.start, conflict.range.end
-            ));
-            continue;
-        }
+        let matchers = port_forward_matchers_from_ranges(&ranges);
 
         for range in ranges {
             allocated.push(AllocatedPortForwardRange {
@@ -1181,38 +1179,89 @@ fn collect_hysteria_target_ports(infos: &[NodeInfo]) -> BTreeMap<u16, u32> {
         .collect()
 }
 
-fn find_target_port_conflict(
-    ranges: &[PortForwardRange],
+fn trim_target_port_conflicts(
+    mut ranges: Vec<PortForwardRange>,
     target_port: u16,
     target_ports: &BTreeMap<u16, u32>,
-) -> Option<u16> {
+) -> Vec<PortForwardRange> {
     for port in target_ports.keys() {
         if *port == target_port {
             continue;
         }
-        if ranges.iter().any(|range| range.contains(*port)) {
-            return Some(*port);
-        }
+        ranges = subtract_single_port(ranges, *port);
     }
-    None
+    ranges
 }
 
-fn find_range_conflict(
-    ranges: &[PortForwardRange],
+fn trim_allocated_range_conflicts(
+    mut ranges: Vec<PortForwardRange>,
     target_port: u16,
     allocated: &[AllocatedPortForwardRange],
-) -> Option<AllocatedPortForwardRange> {
+) -> Vec<PortForwardRange> {
+    for existing in allocated {
+        if existing.target_port == target_port {
+            continue;
+        }
+        ranges = subtract_range(ranges, existing.range);
+    }
+    ranges
+}
+
+fn subtract_single_port(ranges: Vec<PortForwardRange>, port: u16) -> Vec<PortForwardRange> {
+    subtract_range(
+        ranges,
+        PortForwardRange {
+            start: port,
+            end: port,
+        },
+    )
+}
+
+fn subtract_range(
+    ranges: Vec<PortForwardRange>,
+    blocked: PortForwardRange,
+) -> Vec<PortForwardRange> {
+    let mut output = Vec::new();
     for range in ranges {
-        for existing in allocated {
-            if existing.target_port == target_port {
-                continue;
-            }
-            if range.overlaps(existing.range) {
-                return Some(existing.clone());
-            }
+        if !range.overlaps(blocked) {
+            output.push(range);
+            continue;
+        }
+        if range.start < blocked.start {
+            output.push(PortForwardRange {
+                start: range.start,
+                end: blocked.start.saturating_sub(1),
+            });
+        }
+        if blocked.end < range.end {
+            output.push(PortForwardRange {
+                start: blocked.end.saturating_add(1),
+                end: range.end,
+            });
         }
     }
-    None
+    output
+}
+
+fn port_forward_matchers_from_ranges(ranges: &[PortForwardRange]) -> Vec<PortForwardMatcher> {
+    let mut matchers = Vec::new();
+    let mut singles = Vec::new();
+    for range in ranges {
+        if range.start == range.end {
+            singles.push(range.start);
+            continue;
+        }
+        flush_singles(&mut singles, &mut matchers);
+        matchers.push(PortForwardMatcher {
+            args: vec![
+                "--dport".to_string(),
+                format!("{}:{}", range.start, range.end),
+            ],
+            single_port: None,
+        });
+    }
+    flush_singles(&mut singles, &mut matchers);
+    matchers
 }
 
 fn first_non_empty(value: &str, fallback: &str) -> String {
@@ -1226,10 +1275,6 @@ fn first_non_empty(value: &str, fallback: &str) -> String {
 impl PortForwardRange {
     fn overlaps(self, other: Self) -> bool {
         self.start <= other.end && other.start <= self.end
-    }
-
-    fn contains(self, port: u16) -> bool {
-        self.start <= port && port <= self.end
     }
 }
 
@@ -1315,7 +1360,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_overlapping_external_ports() {
+    fn trims_overlapping_external_ports_without_skipping_node() {
         let infos = vec![
             node(1, 443, "30000-30002", ""),
             node(2, 8443, "30002-30004", ""),
@@ -1323,20 +1368,73 @@ mod tests {
 
         let (rules, errors) = build_hysteria_port_forward_rules(&infos);
 
-        assert_eq!(errors.len(), 1);
-        assert!(errors[0].contains("overlaps node 1"));
-        assert_eq!(rules.len(), 1);
+        assert!(errors.is_empty(), "{errors:?}");
+        let got = rules
+            .iter()
+            .map(|rule| {
+                let mut args = rule.matcher.args.clone();
+                args.push(format!("to={}", rule.target_port));
+                args
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            got,
+            string_rows(vec![
+                vec!["--dport", "30000:30002", "to=443"],
+                vec!["--dport", "30003:30004", "to=8443"],
+            ])
+        );
     }
 
     #[test]
-    fn rejects_external_port_over_another_server_port() {
+    fn trims_boundary_overlap_between_adjacent_hysteria_port_ranges() {
+        let infos = vec![
+            node(11, 10003, "39000-40000", ""),
+            node(8, 10002, "38000-39000", ""),
+        ];
+
+        let (rules, errors) = build_hysteria_port_forward_rules(&infos);
+
+        assert!(errors.is_empty(), "{errors:?}");
+        let got = rules
+            .iter()
+            .map(|rule| {
+                let mut args = rule.matcher.args.clone();
+                args.push(format!("to={}", rule.target_port));
+                args
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            got,
+            string_rows(vec![
+                vec!["--dport", "39000:40000", "to=10003"],
+                vec!["--dport", "38000:38999", "to=10002"],
+            ])
+        );
+    }
+
+    #[test]
+    fn trims_external_port_over_another_server_port() {
         let infos = vec![node(1, 443, "", ""), node(2, 8443, "440-445", "")];
 
         let (rules, errors) = build_hysteria_port_forward_rules(&infos);
 
-        assert_eq!(errors.len(), 1);
-        assert!(errors[0].contains("server_port"));
-        assert!(rules.is_empty());
+        assert!(errors.is_empty(), "{errors:?}");
+        let got = rules
+            .iter()
+            .map(|rule| {
+                let mut args = rule.matcher.args.clone();
+                args.push(format!("to={}", rule.target_port));
+                args
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            got,
+            string_rows(vec![
+                vec!["--dport", "440:442", "to=8443"],
+                vec!["--dport", "444:445", "to=8443"],
+            ])
+        );
     }
 
     #[test]
