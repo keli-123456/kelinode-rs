@@ -367,6 +367,7 @@ write_machine_config_from_profiles() {
         echo "  dns_servers:"
         echo "    - \"1.1.1.1\""
         echo "    - \"8.8.8.8\""
+        echo "  dns_block_private_ips: true"
         echo
         echo "log:"
         echo "  level: \"warning\""

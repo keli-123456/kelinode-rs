@@ -51,7 +51,7 @@ pub struct KernelConfig {
     pub log_level: String,
     #[serde(default)]
     pub dns_servers: Vec<String>,
-    #[serde(default)]
+    #[serde(default = "default_dns_block_private_ips")]
     pub dns_block_private_ips: bool,
     #[serde(default)]
     pub dns_private_ip_allowlist: Vec<String>,
@@ -409,7 +409,7 @@ impl Default for KernelConfig {
             sidecars: BTreeMap::new(),
             log_level: String::new(),
             dns_servers: Vec::new(),
-            dns_block_private_ips: false,
+            dns_block_private_ips: default_dns_block_private_ips(),
             dns_private_ip_allowlist: Vec::new(),
             ip_strategy: String::new(),
         }
@@ -422,6 +422,10 @@ fn default_core_type() -> String {
 
 fn default_config_dir() -> String {
     DEFAULT_CONFIG_DIR.to_string()
+}
+
+fn default_dns_block_private_ips() -> bool {
+    true
 }
 
 pub fn resolve_config_path(path: impl AsRef<Path>) -> PathBuf {
@@ -676,7 +680,7 @@ mod tests {
         assert_eq!(kernel.r#type, "xray");
         assert!(kernel.core_command.is_empty());
         assert_eq!(kernel.config_dir, DEFAULT_CONFIG_DIR);
-        assert!(!kernel.dns_block_private_ips);
+        assert!(kernel.dns_block_private_ips);
         assert!(kernel.dns_private_ip_allowlist.is_empty());
     }
 
@@ -983,6 +987,7 @@ kernel:
 
         assert_eq!(resolved.nodes[0].node_id, 7);
         assert_eq!(resolved.nodes[0].config_dir, "/var/lib/v2node");
+        assert!(resolved.kernel.dns_block_private_ips);
 
         let _ = fs::remove_dir_all(dir);
     }
