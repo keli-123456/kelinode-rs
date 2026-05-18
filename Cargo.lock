@@ -1004,7 +1004,7 @@ dependencies = [
 
 [[package]]
 name = "kelinode-rs"
-version = "0.1.99"
+version = "0.1.100"
 dependencies = [
  "anyhow",
  "futures-util",
