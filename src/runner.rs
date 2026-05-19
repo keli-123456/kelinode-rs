@@ -211,6 +211,13 @@ struct RuntimeUserDeltaChange {
     diff: UserListDiff,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RuntimeUserDeltaApplyOutcome {
+    Applied,
+    Rebuild,
+    Deferred,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct RuntimeUserDeltaMetrics {
     kelinode_user_delta_full_snapshot_fallback_total: u64,
@@ -351,7 +358,7 @@ where
                     &mut *self.process_supervisor,
                     options.control.core_command.as_deref(),
                 )?;
-                let applied_user_delta = if native_core_running.unwrap_or(true) {
+                let user_delta_outcome = if native_core_running.unwrap_or(true) {
                     try_apply_keli_core_rs_user_deltas(
                         &self.plan,
                         &self.user_sync,
@@ -359,59 +366,76 @@ where
                         &mut self.user_delta_metrics,
                     )
                 } else {
-                    false
+                    RuntimeUserDeltaApplyOutcome::Rebuild
                 };
-                if applied_user_delta {
-                    logging::info(
-                        "core",
-                        format!(
-                            "user delta applied natively tags={}",
-                            user_change_tags.len()
-                        ),
-                    );
-                    options.control.keli_core_rs_user_delta_applied = true;
-                    sync_runtime_user_id_lookup_from_state(
-                        &mut self.user_id_lookup,
-                        &self.user_sync,
-                        &user_change_tags,
-                    );
-                    for node_tag in &user_change_tags {
-                        if let Some(entry) = self.user_sync.get_mut(node_tag) {
-                            entry.last_change = None;
-                        }
-                    }
-                    if !options.report_to_panel {
-                        return Ok(RuntimeLoopSignal::Continue);
-                    }
-                } else {
-                    if native_core_running == Some(false) {
+                match user_delta_outcome {
+                    RuntimeUserDeltaApplyOutcome::Applied => {
                         logging::info(
                             "core",
                             format!(
-                                "user delta uses full runtime rebuild because native core is not running tags={}",
+                                "user delta applied natively tags={}",
                                 user_change_tags.len()
                             ),
                         );
-                    } else {
+                        options.control.keli_core_rs_user_delta_applied = true;
+                        sync_runtime_user_id_lookup_from_state(
+                            &mut self.user_id_lookup,
+                            &self.user_sync,
+                            &user_change_tags,
+                        );
+                        for node_tag in &user_change_tags {
+                            if let Some(entry) = self.user_sync.get_mut(node_tag) {
+                                entry.last_change = None;
+                            }
+                        }
+                        if !options.report_to_panel {
+                            return Ok(RuntimeLoopSignal::Continue);
+                        }
+                    }
+                    RuntimeUserDeltaApplyOutcome::Deferred => {
                         logging::warn(
                             "core",
                             format!(
-                                "user delta fell back to full runtime rebuild tags={}",
+                                "user delta deferred; keeping runtime unchanged tags={}",
                                 user_change_tags.len()
                             ),
                         );
+                        if !options.report_to_panel {
+                            options.users_by_node_tag.clear();
+                            return Ok(RuntimeLoopSignal::Continue);
+                        }
                     }
-                    if native_core_running == Some(false) {
-                        startup_full_snapshot_tags = user_change_tags.clone();
+                    RuntimeUserDeltaApplyOutcome::Rebuild => {
+                        if native_core_running == Some(false) {
+                            logging::info(
+                                "core",
+                                format!(
+                                    "user delta uses full runtime rebuild because native core is not running tags={}",
+                                    user_change_tags.len()
+                                ),
+                            );
+                        } else {
+                            logging::warn(
+                                "core",
+                                format!(
+                                    "user delta fell back to full runtime rebuild tags={}",
+                                    user_change_tags.len()
+                                ),
+                            );
+                        }
+                        if native_core_running == Some(false) {
+                            startup_full_snapshot_tags = user_change_tags.clone();
+                        }
+                        self.user_delta_metrics.record_full_rebuild();
+                        let users_for_rebuild = user_sync_users_for_tags(
+                            &self.user_sync,
+                            &user_change_tags,
+                            &options.users_by_node_tag,
+                        );
+                        self.plan =
+                            rebuild_runtime_plan_with_users(&self.plan, &users_for_rebuild)?;
+                        self.user_id_lookup = runtime_user_id_lookup_from_plan(&self.plan);
                     }
-                    self.user_delta_metrics.record_full_rebuild();
-                    let users_for_rebuild = user_sync_users_for_tags(
-                        &self.user_sync,
-                        &user_change_tags,
-                        &options.users_by_node_tag,
-                    );
-                    self.plan = rebuild_runtime_plan_with_users(&self.plan, &users_for_rebuild)?;
-                    self.user_id_lookup = runtime_user_id_lookup_from_plan(&self.plan);
                 }
                 options.users_by_node_tag.clear();
             }
@@ -529,12 +553,12 @@ fn try_apply_keli_core_rs_user_deltas(
     sync_state: &BTreeMap<String, RuntimeUserSyncEntry>,
     users_by_node_tag: &BTreeMap<String, Vec<UserInfo>>,
     metrics: &mut RuntimeUserDeltaMetrics,
-) -> bool {
+) -> RuntimeUserDeltaApplyOutcome {
     let Some(core_plan) = plan.core_plan.as_ref() else {
-        return false;
+        return RuntimeUserDeltaApplyOutcome::Rebuild;
     };
     if core_plan.kind != CoreKind::KeliCoreRs {
-        return false;
+        return RuntimeUserDeltaApplyOutcome::Rebuild;
     }
     let skipped_port_range = users_by_node_tag
         .keys()
@@ -554,7 +578,7 @@ fn try_apply_keli_core_rs_user_deltas(
                 "user delta skipped because port-range inbound exists count={skipped_port_range}"
             ),
         );
-        return false;
+        return RuntimeUserDeltaApplyOutcome::Rebuild;
     }
     if users_by_node_tag.keys().any(|node_tag| {
         sync_state
@@ -563,25 +587,37 @@ fn try_apply_keli_core_rs_user_deltas(
             .map(|change| change.full)
             .unwrap_or(true)
     }) {
-        return false;
+        return RuntimeUserDeltaApplyOutcome::Rebuild;
     }
 
     let client = match keli_core_rs_control_client(&core_plan.config_path) {
         Ok(client) => client.with_timeout(KELI_CORE_APPLY_CONTROL_TIMEOUT),
-        Err(_) => return false,
+        Err(_) => return RuntimeUserDeltaApplyOutcome::Rebuild,
     };
     for node_tag in users_by_node_tag.keys() {
         let Some(entry) = sync_state.get(node_tag) else {
-            return false;
+            return RuntimeUserDeltaApplyOutcome::Rebuild;
         };
         let Some(change) = entry.last_change.as_ref() else {
-            return false;
+            return RuntimeUserDeltaApplyOutcome::Rebuild;
         };
         let delta = keli_core_user_delta_payload(node_tag, change);
         match client.apply_user_delta(node_tag.clone(), delta) {
             Ok(_) => metrics.record_success(),
             Err(error) => {
                 metrics.record_failed();
+                if plan.resolved.machine.continue_on_error
+                    && keli_core_user_delta_missing_inbound(&error.message)
+                {
+                    logging::warn(
+                        "core",
+                        format!(
+                            "user delta deferred for missing inbound node_tag={node_tag} error={}",
+                            error.message
+                        ),
+                    );
+                    return RuntimeUserDeltaApplyOutcome::Deferred;
+                }
                 if !keli_core_user_delta_requires_full_snapshot(&error.message) {
                     logging::warn(
                         "core",
@@ -590,7 +626,7 @@ fn try_apply_keli_core_rs_user_deltas(
                             error.message
                         ),
                     );
-                    return false;
+                    return RuntimeUserDeltaApplyOutcome::Rebuild;
                 }
                 metrics.record_full_snapshot_fallback();
                 logging::warn(
@@ -603,19 +639,31 @@ fn try_apply_keli_core_rs_user_deltas(
                 let full_delta = keli_core_user_full_snapshot_payload(node_tag, entry);
                 match client.apply_user_delta(node_tag.clone(), full_delta) {
                     Ok(_) => metrics.record_success(),
-                    Err(_) => {
+                    Err(error) => {
                         metrics.record_failed();
+                        if plan.resolved.machine.continue_on_error
+                            && keli_core_user_delta_missing_inbound(&error.message)
+                        {
+                            logging::warn(
+                                "core",
+                                format!(
+                                    "full snapshot user delta deferred for missing inbound node_tag={node_tag} error={}",
+                                    error.message
+                                ),
+                            );
+                            return RuntimeUserDeltaApplyOutcome::Deferred;
+                        }
                         logging::error(
                             "core",
                             format!("full snapshot user delta failed node_tag={node_tag}"),
                         );
-                        return false;
+                        return RuntimeUserDeltaApplyOutcome::Rebuild;
                     }
                 }
             }
         }
     }
-    true
+    RuntimeUserDeltaApplyOutcome::Applied
 }
 
 fn try_establish_keli_core_rs_revision_baseline(
@@ -694,6 +742,11 @@ where
 fn keli_core_user_delta_requires_full_snapshot(error: &str) -> bool {
     let error = error.to_ascii_lowercase();
     error.contains("revision mismatch") || error.contains("full snapshot required")
+}
+
+fn keli_core_user_delta_missing_inbound(error: &str) -> bool {
+    let error = error.to_ascii_lowercase();
+    error.contains("unknown inbound") || error.contains("inbound not found")
 }
 
 fn keli_core_user_full_snapshot_payload(node_tag: &str, entry: &RuntimeUserSyncEntry) -> Value {
@@ -1277,7 +1330,23 @@ async fn load_users_by_node_tag_from_panel_with_state(
         let entry = sync_state
             .entry(node.tag.clone())
             .or_insert_with(|| load_runtime_user_sync_entry(config));
-        let users = load_users_for_node(config, entry, &mut client).await?;
+        let users = match load_users_for_node(config, entry, &mut client).await {
+            Ok(users) => users,
+            Err(error) if plan.resolved.machine.continue_on_error => {
+                logging::warn(
+                    "users",
+                    format!(
+                        "user refresh skipped api_host={} node_id={} node_tag={} error={}",
+                        config.url.trim_end_matches('/'),
+                        config.node_id,
+                        node.tag,
+                        error
+                    ),
+                );
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
         if entry.last_change.is_some() {
             users_by_tag.insert(node.tag.clone(), users);
         }
@@ -1453,13 +1522,14 @@ mod tests {
     use super::{
         handle_runtime_loop_event, keli_core_rs_metrics_snapshot, keli_core_user_delta_payload,
         keli_core_user_delta_requires_full_snapshot, keli_core_user_full_snapshot_payload,
-        node_config_for_info, nonfatal_keli_core_activity_report, nonfatal_panel_status_report,
-        refresh_runtime_health, refresh_subscription_proxy_health, run_runtime_loop,
-        run_runtime_loop_async, run_runtime_loop_async_with_events, runtime_loop_event_for_task,
-        runtime_user_delta_change, should_run, try_apply_keli_core_rs_user_deltas,
-        user_delta_body_is_revision_only, user_delta_not_supported, AsyncRuntimeLoopCallbacks,
-        PanelRuntimeLoop, RuntimeLoopCallbacks, RuntimeLoopEvent, RuntimeLoopEventKind,
-        RuntimeLoopExit, RuntimeLoopExitReason, RuntimeLoopFuture, RuntimeLoopOptions,
+        load_users_by_node_tag_from_panel_with_state, node_config_for_info,
+        nonfatal_keli_core_activity_report, nonfatal_panel_status_report, refresh_runtime_health,
+        refresh_subscription_proxy_health, run_runtime_loop, run_runtime_loop_async,
+        run_runtime_loop_async_with_events, runtime_loop_event_for_task, runtime_user_delta_change,
+        should_run, try_apply_keli_core_rs_user_deltas, user_delta_body_is_revision_only,
+        user_delta_not_supported, AsyncRuntimeLoopCallbacks, PanelRuntimeLoop,
+        RuntimeLoopCallbacks, RuntimeLoopEvent, RuntimeLoopEventKind, RuntimeLoopExit,
+        RuntimeLoopExitReason, RuntimeLoopFuture, RuntimeLoopOptions, RuntimeUserDeltaApplyOutcome,
         RuntimeUserDeltaChange, RuntimeUserDeltaMetrics, RuntimeUserSyncEntry,
     };
     use crate::config::{NodeConfig, ResolvedConfig, ResolvedMachineConfig};
@@ -1821,12 +1891,10 @@ mod tests {
         });
 
         let mut metrics = RuntimeUserDeltaMetrics::default();
-        assert!(try_apply_keli_core_rs_user_deltas(
-            &plan,
-            &sync_state,
-            &users_by_tag,
-            &mut metrics
-        ));
+        assert_eq!(
+            try_apply_keli_core_rs_user_deltas(&plan, &sync_state, &users_by_tag, &mut metrics),
+            RuntimeUserDeltaApplyOutcome::Applied
+        );
         assert_eq!(metrics.kelinode_user_delta_native_apply_failed_total, 1);
         assert_eq!(metrics.kelinode_user_delta_full_snapshot_fallback_total, 1);
         assert_eq!(metrics.kelinode_user_delta_native_apply_success_total, 1);
@@ -1865,12 +1933,15 @@ mod tests {
         users_by_tag.insert(tag, Vec::new());
         let mut metrics = RuntimeUserDeltaMetrics::default();
 
-        assert!(!try_apply_keli_core_rs_user_deltas(
-            &plan,
-            &BTreeMap::new(),
-            &users_by_tag,
-            &mut metrics
-        ));
+        assert_eq!(
+            try_apply_keli_core_rs_user_deltas(
+                &plan,
+                &BTreeMap::new(),
+                &users_by_tag,
+                &mut metrics
+            ),
+            RuntimeUserDeltaApplyOutcome::Rebuild
+        );
 
         assert_eq!(metrics.kelinode_user_delta_skipped_port_range_total, 1);
         assert_eq!(metrics.kelinode_user_delta_full_rebuild_total, 0);
@@ -1923,12 +1994,15 @@ mod tests {
         users_by_tag.insert(tag, Vec::new());
         let mut metrics = RuntimeUserDeltaMetrics::default();
 
-        assert!(!try_apply_keli_core_rs_user_deltas(
-            &plan,
-            &BTreeMap::new(),
-            &users_by_tag,
-            &mut metrics
-        ));
+        assert_eq!(
+            try_apply_keli_core_rs_user_deltas(
+                &plan,
+                &BTreeMap::new(),
+                &users_by_tag,
+                &mut metrics
+            ),
+            RuntimeUserDeltaApplyOutcome::Rebuild
+        );
 
         assert_eq!(metrics.kelinode_user_delta_skipped_port_range_total, 0);
         let _ = fs::remove_dir_all(dir);
@@ -2426,6 +2500,37 @@ mod tests {
 
         assert_eq!(matched.url, "https://panel-b.example.test");
         assert_eq!(matched.token, "b");
+    }
+
+    #[tokio::test]
+    async fn user_refresh_skips_panel_request_failure_when_continue_on_error() {
+        let resolved = ResolvedConfig {
+            kernel: Default::default(),
+            realtime: Default::default(),
+            machine: ResolvedMachineConfig {
+                enabled: true,
+                continue_on_error: true,
+                profiles: Vec::new(),
+            },
+            agent: Default::default(),
+            nodes: vec![NodeConfig {
+                url: "http://127.0.0.1:9".to_string(),
+                token: "token".to_string(),
+                node_id: 41,
+                machine_id: 41,
+                timeout: 1,
+                ..NodeConfig::default()
+            }],
+        };
+        let node = test_node_with_host("http://127.0.0.1:9", "vless", 41);
+        let plan = build_runtime_bootstrap_plan(resolved, vec![node], Vec::new()).unwrap();
+        let mut sync_state = BTreeMap::new();
+
+        let users = load_users_by_node_tag_from_panel_with_state(&plan, &mut sync_state)
+            .await
+            .unwrap();
+
+        assert!(users.is_empty());
     }
 
     #[tokio::test]
@@ -3334,6 +3439,167 @@ mod tests {
             .flat_map(|inbound| inbound.users.iter())
             .any(|user| user.uuid == new_user.uuid));
         assert!(runner.process_supervisor.stops.len() > stops_before);
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn panel_runtime_loop_keeps_runtime_when_delta_reports_unknown_inbound() {
+        let dir = temp_test_dir("panel-runtime-loop-user-delta-unknown-inbound");
+        let mut resolved = ResolvedConfig {
+            kernel: Default::default(),
+            realtime: Default::default(),
+            machine: ResolvedMachineConfig {
+                enabled: true,
+                continue_on_error: true,
+                profiles: Vec::new(),
+            },
+            agent: Default::default(),
+            nodes: vec![NodeConfig {
+                url: "https://panel.example.test".to_string(),
+                token: "token".to_string(),
+                node_id: 13,
+                machine_id: 13,
+                ..NodeConfig::default()
+            }],
+        };
+        resolved.kernel.r#type = "keli-core-rs".to_string();
+        resolved.kernel.config_dir = dir.join("v2node").display().to_string();
+        let node = test_node_with_host("https://panel.example.test", "vless", 13);
+        let tag = node.tag.clone();
+        let plan = build_runtime_bootstrap_plan(resolved, vec![node], Vec::new()).unwrap();
+        let mut process = MemoryProcessSupervisor::default();
+        let mut port_forward = FakePortForwardExecutor::default();
+        let mut runner = PanelRuntimeLoop::new(plan, &mut process, &mut port_forward, None);
+        let old_user = UserInfo {
+            id: 13,
+            uuid: "33333333-3333-3333-3333-333333333333".to_string(),
+            speed_limit: 0,
+            device_limit: 0,
+        };
+        let new_user = UserInfo {
+            id: 14,
+            uuid: "44444444-4444-4444-4444-444444444444".to_string(),
+            speed_limit: 30,
+            device_limit: 3,
+        };
+        let mut initial_users_by_tag = BTreeMap::new();
+        initial_users_by_tag.insert(tag.clone(), vec![old_user.clone()]);
+
+        AsyncRuntimeLoopCallbacks::run_tick(
+            &mut runner,
+            RuntimeTickOptions {
+                control: RuntimeControlOptions {
+                    machine_id: 13,
+                    start_core: true,
+                    ..RuntimeControlOptions::default()
+                },
+                report_to_panel: false,
+                users_by_node_tag: initial_users_by_tag,
+            },
+        )
+        .await
+        .unwrap();
+        let config_path = runner.plan.core_plan.as_ref().unwrap().config_path.clone();
+        let saved_before = fs::read_to_string(&config_path).unwrap();
+        let stops_before = runner.process_supervisor.stops.len();
+        let full_rebuilds_before = runner
+            .user_delta_metrics
+            .kelinode_user_delta_full_rebuild_total;
+
+        runner.user_sync.insert(
+            tag.clone(),
+            RuntimeUserSyncEntry {
+                state: UserSyncState {
+                    revision: 43,
+                    users: vec![old_user.clone(), new_user.clone()],
+                    updated_at: None,
+                },
+                delta_supported: true,
+                path: String::new(),
+                last_change: Some(RuntimeUserDeltaChange {
+                    full: false,
+                    base_revision: 42,
+                    revision: 43,
+                    diff: UserListDiff {
+                        added: vec![new_user.clone()],
+                        updated: Vec::new(),
+                        deleted: Vec::new(),
+                    },
+                }),
+            },
+        );
+        let control_addr = keli_core_rs_control_addr(&config_path);
+        let listener = TcpListener::bind(&control_addr).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let tag_for_thread = tag.clone();
+        let control_thread = thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(2);
+            let (mut stream, _) = loop {
+                match listener.accept() {
+                    Ok(accepted) => break accepted,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        if Instant::now() >= deadline {
+                            panic!("keli-core-rs user delta control command was not received");
+                        }
+                        thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(error) => panic!("accept keli-core-rs control command: {error}"),
+                }
+            };
+            let mut command = String::new();
+            BufReader::new(stream.try_clone().unwrap())
+                .read_line(&mut command)
+                .unwrap();
+            let command = serde_json::from_str::<serde_json::Value>(command.trim()).unwrap();
+            assert_eq!(command["type"], "apply_user_delta");
+            assert_eq!(command["node_tag"], tag_for_thread);
+            writeln!(
+                stream,
+                "{}",
+                json!({
+                    "type": "error",
+                    "message": format!("unknown inbound node_tag {tag_for_thread}")
+                })
+            )
+            .unwrap();
+        });
+        let mut current_users_by_tag = BTreeMap::new();
+        current_users_by_tag.insert(tag.clone(), vec![old_user, new_user.clone()]);
+
+        let signal = AsyncRuntimeLoopCallbacks::run_tick(
+            &mut runner,
+            RuntimeTickOptions {
+                control: RuntimeControlOptions {
+                    machine_id: 13,
+                    start_core: true,
+                    ..RuntimeControlOptions::default()
+                },
+                report_to_panel: false,
+                users_by_node_tag: current_users_by_tag,
+            },
+        )
+        .await
+        .unwrap();
+        control_thread.join().unwrap();
+        let saved_after = fs::read_to_string(&config_path).unwrap();
+
+        assert_eq!(signal, RuntimeLoopSignal::Continue);
+        assert_eq!(saved_after, saved_before);
+        assert_eq!(runner.process_supervisor.stops.len(), stops_before);
+        assert!(runner.user_sync.get(&tag).unwrap().last_change.is_some());
+        assert_eq!(
+            runner
+                .user_delta_metrics
+                .kelinode_user_delta_native_apply_failed_total,
+            1
+        );
+        assert_eq!(
+            runner
+                .user_delta_metrics
+                .kelinode_user_delta_full_rebuild_total,
+            full_rebuilds_before
+        );
 
         let _ = fs::remove_dir_all(dir);
     }
