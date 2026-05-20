@@ -2,7 +2,6 @@
 
 use kelinode_rs::config::{AppConfig, MachineProfileConfig, DEFAULT_TIMEOUT_SECS};
 use kelinode_rs::control::{handle_runtime_signal, RuntimeControlOptions, RuntimeLoopSignal};
-use kelinode_rs::core::CoreKind;
 use kelinode_rs::logging;
 use kelinode_rs::panel::client::{PanelClient, PanelClientOptions};
 use kelinode_rs::panel::contract::NODE_API_CONTRACT_VERSION;
@@ -10,9 +9,7 @@ use kelinode_rs::port_forward::{
     cleanup_hysteria_port_forward, inspect_hysteria_port_forward, repair_hysteria_port_forward,
     HysteriaPortForwardStatus, SystemPortForwardExecutor,
 };
-use kelinode_rs::process::{
-    core_process_spec, sidecar_process_spec, ProcessSupervisor, SystemProcessSupervisor,
-};
+use kelinode_rs::process::{core_process_spec, ProcessSupervisor, SystemProcessSupervisor};
 use kelinode_rs::runner::{
     run_runtime_loop_async_with_events, start_realtime_runtime_workers, PanelRuntimeLoop,
     RuntimeLoopExit, RuntimeLoopExitReason, RuntimeLoopOptions,
@@ -317,31 +314,13 @@ fn native_gray_preflight_report(plan: &RuntimeBootstrapPlan) -> NativeGrayPrefli
         return report;
     };
 
-    if core_plan.kind != CoreKind::KeliCoreRs {
-        report.errors.push(format!(
-            "primary core plan is {:?}; set kernel.type: keli-core-rs for native gray release",
-            core_plan.kind
-        ));
-    }
-
     report
         .details
         .push(format!("native_inbounds={}", core_plan.inbounds.len()));
-    report
-        .details
-        .push(format!("sidecar_plans={}", plan.sidecar_core_plans.len()));
-
     if core_plan.inbounds.is_empty() {
         report
             .errors
             .push("native core plan has no inbounds".to_string());
-    }
-
-    if !plan.sidecar_core_plans.is_empty() {
-        report.warnings.push(format!(
-            "{} sidecar core plan(s) exist; gray metrics cover the primary native core only",
-            plan.sidecar_core_plans.len()
-        ));
     }
 
     if core_plan
@@ -547,21 +526,6 @@ where
             .map_err(|err| err.message)?;
     }
 
-    for sidecar_plan in &runner.plan.sidecar_core_plans {
-        let CoreKind::Sidecar(name) = &sidecar_plan.kind else {
-            continue;
-        };
-        let Some(config) = runner.plan.resolved.kernel.sidecars.get(name) else {
-            continue;
-        };
-        let spec = sidecar_process_spec(sidecar_plan, &config.command, &config.args, &config.env)
-            .map_err(|err| err.message)?;
-        runner
-            .process_supervisor
-            .stop(&spec.name)
-            .map_err(|err| err.message)?;
-    }
-
     Ok(())
 }
 
@@ -701,7 +665,6 @@ fn runtime_loop_options(plan: &RuntimeBootstrapPlan, report_to_panel: bool) -> R
             core_command: non_empty_command_override(&plan.resolved.kernel.core_command)
                 .map(str::to_string),
             start_core: true,
-            sidecar_processes: plan.resolved.kernel.sidecars.clone(),
             hot_apply_keli_core_rs: true,
             repair_port_forward: true,
             ..RuntimeControlOptions::default()
@@ -1020,15 +983,16 @@ mod tests {
     }
 
     #[test]
-    fn native_gray_preflight_rejects_non_native_core_plan() {
-        let plan = test_plan(vec![test_node_with_intervals(7, 30, 45)], Vec::new());
+    fn native_gray_preflight_rejects_missing_core_plan() {
+        let mut plan = test_plan(Vec::new(), Vec::new());
+        plan.core_plan = None;
 
         let report = native_gray_preflight_report(&plan);
 
         assert!(report
             .errors
             .iter()
-            .any(|error| error.contains("kernel.type: keli-core-rs")));
+            .any(|error| error.contains("no primary core plan")));
     }
 
     #[test]

@@ -1,8 +1,8 @@
 # Kelinode RS
 
-`kelinode-rs` is the Rust rewrite track for `kelinode`.
+`kelinode-rs` is the Rust native node agent for Keli.
 
-The goal is a future drop-in node agent that can speak the same `keliboard` API contract as the Go implementation while gradually replacing runtime pieces with safer Rust modules.
+The goal is a drop-in node agent that speaks the same `keliboard` API contract while using `keli-core-rs` as the primary data plane.
 
 ## Scope
 
@@ -13,10 +13,10 @@ First cut:
 - Pull node config, user list, user delta, alive list, and report traffic through the same endpoints.
 - Pull machine-bound nodes and report machine status through the same machine endpoints.
 - Keep Docker direct node mode and binary machine binding as explicit compatibility targets.
-- Define a core adapter boundary before choosing whether each protocol is external-core, sidecar, or Rust-native.
+- Use the native `keli-core-rs` data plane as the default runtime boundary.
 - Plan and inspect HY2 port-forward rules, with repair/cleanup executor boundaries.
 - Build runtime bootstrap plans that combine resolved config, node bootstrap, core config planning, and HY2 status.
-- Render an Xray-compatible core config skeleton and write it through a stable file layout.
+- Render a native `keli-core-rs` config and write it through a stable file layout.
 - Provide process supervisor and health payload aggregation layers for runtime integration.
 - Apply a runtime plan by writing core config, reconciling HY2 forwarding state, starting/reloading core, and building the machine status payload.
 - Report machine status to `keliboard` and normalize returned reload/upgrade commands for the runtime loop.
@@ -24,11 +24,11 @@ First cut:
 - Track machine self-upgrade status and launch verified GitHub Release upgrades through a systemd-run or detached-shell boundary.
 - Feed upgrade signals into the self-upgrade state machine so the next status report can include running/failed/succeeded state.
 - Collect basic host resource snapshots for system metadata, Linux memory/swap, and uptime.
-- Render panel users into Xray client entries for UUID/password based protocols.
-- Use Go-compatible `node_tag|uuid` user emails in generated core clients.
+- Render panel users into native core user entries for UUID/password based protocols.
+- Preserve user IDs in native traffic records so deleted-user tail traffic can still be billed.
 - Load panel users per active node and pass them into runtime bootstrap planning by node tag to keep multi-site nodes distinct.
 - Build a runtime plan from config with both node configs and panel user lists loaded.
-- Pass Xray stream transport settings through for websocket, grpc, httpupgrade, xhttp, tcp, and related networks.
+- Pass native stream transport settings through for websocket, grpc, httpupgrade, xhttp, tcp, and related networks.
 - Render PROXY protocol socket options from panel network settings.
 - Render Go-compatible default inbound sniffing for HTTP and TLS targets.
 - Render TLS `rejectUnknownSni` from panel certificate metadata.
@@ -36,21 +36,14 @@ First cut:
 - Render VLESS flow and Shadowsocks cipher/method options from panel node fields.
 - Render supported VLESS encryption decryption strings instead of silently forcing `none`.
 - Render Shadowsocks HTTP obfs transport headers and TCP-only network mode.
-- Render Xray DNS, block, protocol, and custom outbound route rules from panel node routes.
+- Render native DNS, block, protocol, and custom outbound route rules from panel node routes.
 - Render Go-compatible default outbound and DNS fallback settings.
-- Render Xray stats and user traffic policy defaults needed for traffic reporting.
+- Render native stats and user traffic policy defaults needed for traffic reporting.
 - Let runtime ticks rebuild the core plan from refreshed panel user sets before applying config.
 - Render SOCKS/HTTP account settings and AnyTLS client/padding settings from panel users.
-- Render HY2 bandwidth/obfs stream settings, Xray TUIC congestion/0-RTT settings, and native TUIC congestion settings.
+- Render HY2 bandwidth/obfs stream settings and native TUIC congestion settings.
 - Render Shadowsocks 2022 server keys and Go-compatible per-user keys.
-- Parse Naive and Mieru node protocols while refusing to fake them inside the Xray renderer.
-- Split mixed node sets into Xray and per-node sidecar core plans for Naive/Mieru; keep Mieru native when `kernel.type: keli-core-rs`.
-- Build explicit sidecar process specs only when a command and arguments are provided.
-- Preserve sidecar core plans in runtime bootstrap without forcing them through Xray.
-- Render Mieru sidecar `mita` server configs from panel ports and user credentials.
-- Write sidecar config files during runtime apply without starting unconfigured sidecar processes.
-- Start configured sidecar processes through explicit per-protocol command and argument settings.
-- Pass configured sidecar process environment variables with `{config}` path replacement for tools such as `mita`.
+- Parse Naive and Mieru node protocols and render supported variants directly into `keli-core-rs`.
 - Report node traffic/online snapshots through the unified panel endpoint with legacy fallback.
 - Batch report per-node activity snapshots by runtime tag for multi-node machines.
 - Advance cached user sync state from delta or full-list responses with Go-compatible empty-list semantics.
@@ -70,7 +63,7 @@ First cut:
 - Compute Linux CPU usage from `/proc/stat` samples, with `/proc/loadavg` as a fallback.
 - Collect local and public IPv4/IPv6 candidates for machine status payloads without external network calls.
 - Compute network byte rates across runtime loop samples for machine status payloads.
-- Surface non-enforced per-user speed/device limits in machine status while external-core enforcement is pending.
+- Surface native per-user speed/device limit enforcement in machine status.
 - Add a runtime loop scheduler for periodic user refresh, panel reports, and reload/upgrade signal exits.
 - Add an async runtime loop variant for panel-backed user refresh and report ticks.
 - Add a panel-backed runtime loop adapter that reloads users by node tag before applying ticks.
@@ -108,16 +101,14 @@ First cut:
 Not implemented yet:
 
 - Complete advanced protocol-specific limit edge cases and credentials beyond the native core's current per-user speed/device enforcement.
-- Naive sidecar runtime still needs a concrete Caddy forward_proxy integration before it can serve traffic.
-- Mieru sidecar traffic on the default Xray path requires operators to configure the `mita` command, arguments, and optional environment for their deployment style.
-- Experimental `keli-core-rs` native rendering covers SOCKS/HTTP, Shadowsocks, VMess, VLESS, Trojan, AnyTLS, Hysteria2, TUIC, Mieru TCP with expanded port ranges and stream multiplexing, common TCP/WS/HTTPUpgrade/gRPC transports, VLESS REALITY config, direct outbound, per-user credentials, and common block/route rules.
-- Set `kernel.type: keli-core-rs` to select the experimental Rust-native core plan; `xray` remains the default.
+- Native rendering covers SOCKS/HTTP, Shadowsocks, VMess, VLESS, Trojan, AnyTLS, Hysteria2, TUIC, Mieru TCP with expanded port ranges and stream multiplexing, Naive H2/TLS, common TCP/WS/HTTPUpgrade/gRPC transports, VLESS REALITY config, direct outbound, per-user credentials, and common block/route rules.
+- `kernel.type` defaults to `keli-core-rs`; the Rust-native core is the primary runtime path for new installs.
 - Set `kernel.core_command` when the native core binary is installed outside `PATH`, such as from a `keli-core-rs` release tarball.
 - When `keli-core-rs` is already running, `kelinode-rs` hot-applies changed native configs through the local `ApplyConfig` control socket and falls back to a process reload if that control path is unavailable.
 - For native core control, `kelinode-rs` generates a per-config local token, injects it into the `keli-core-rs` process as `KELI_CORE_CONTROL_TOKEN`, and uses the same token for `ApplyConfig`, `ApplyUserDelta`, metrics, traffic drain, and requeue commands. The token is stored beside the generated config as a local control secret and is not written into the core config or machine status payload.
 - Native core DNS uses `kernel.dns_servers` when configured, and supports opt-in DNS private-address blocking through `kernel.dns_block_private_ips` plus `kernel.dns_private_ip_allowlist` for intentional internal domains or CIDRs.
-- Run `kelinode-rs gray-preflight /etc/v2node/config.yml` before moving a node into the native gray path. It resolves the runtime plan and fails early when the primary core is not `keli-core-rs`, nodes fail to resolve, or no native inbounds are available; warnings call out sidecar plans, missing user-sync validation, and explicit single-stack listen addresses.
-- Real-client interop and production soak testing are still required before making `keli-core-rs` the default.
+- Run `kelinode gray-preflight /etc/kelinode/config.yml` before widening a node. It resolves the runtime plan and fails early when nodes fail to resolve or no native inbounds are available; warnings call out missing user-sync validation and explicit single-stack listen addresses.
+- Real-client interop and production soak testing are still required before removing the rollback path entirely.
 - Subscription reverse proxy.
 
 The native renderer parity gate is tracked in `docs/NATIVE_CORE_PARITY.md`.
@@ -125,7 +116,7 @@ The native production gray release runbook is tracked in `docs/NATIVE_CORE_GRAY_
 
 ## Native Core Binary Example
 
-When built without `embedded-core`, `kelinode-rs` starts `keli-core-rs run-config <generated-config> --control <local-addr>` when the native core path is selected. Install the `keli-core-rs` release binary on the same machine and either keep it in `PATH` or point the runtime at the absolute binary path:
+When built without `embedded-core`, `kelinode-rs` starts `keli-core-rs run-config <generated-config> --control <local-addr>`. Install the `keli-core-rs` release binary on the same machine and either keep it in `PATH` or point the runtime at the absolute binary path:
 
 ```yaml
 kernel:
@@ -137,10 +128,10 @@ kernel:
 Leave `core_command` empty when the binary name `keli-core-rs` resolves from `PATH`.
 
 The native bundle builds with the `embedded-core` feature, so the Rust data-plane runs inside the
-agent process. The package keeps the old Go-compatible entry name as the only shipped binary:
+agent process. The package ships a single native node binary:
 
 ```text
-bin/v2node
+bin/kelinode
 ```
 
 Linux release packages are built as static `x86_64-unknown-linux-musl` binaries under the
@@ -254,33 +245,17 @@ custom mirror/list.
 Rule files live next to the generated core config:
 
 ```text
-/etc/v2node/geoip/<rule>.txt
-/etc/v2node/geosite/<rule>.txt
+/etc/kelinode/geoip/<rule>.txt
+/etc/kelinode/geosite/<rule>.txt
 ```
 
-For example, `geosite:apple` reads `/etc/v2node/geosite/apple.txt` and recursively follows
+For example, `geosite:apple` reads `/etc/kelinode/geosite/apple.txt` and recursively follows
 `include:` lines when those included rule files are present. Multi-node deployments that use
 per-node config directories keep their rule files under each node's generated config directory.
 Built-in `geoip:private`, `geosite:private`, and a small set of common domains such as
-`geosite:apple` work without files. External `.dat` files from Xray are not parsed by the native
-Rust core; use one text file per rule group for native gray releases.
-For Docker, mount those folders together with `/etc/v2node` or a custom `kernel.config_dir`.
-
-## Sidecar Process Example
-
-Mieru sidecar nodes can run `mita` with the generated config path passed through an environment variable:
-
-```yaml
-kernel:
-  sidecars:
-    mieru:
-      command: "/usr/local/bin/mita"
-      args: ["run"]
-      env:
-        MITA_CONFIG_JSON_FILE: "{config}"
-```
-
-Use a small wrapper command instead when a sidecar needs a multi-step apply/start flow.
+`geosite:apple` work without files. Binary `.dat` geodata files are not parsed by the native
+Rust core; use one text file per rule group.
+For Docker, mount those folders together with `/etc/kelinode` or a custom `kernel.config_dir`.
 
 ## Compatibility Targets
 

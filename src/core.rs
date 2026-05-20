@@ -14,11 +14,7 @@ use crate::panel::types::{CertInfo, NodeInfo, Protocol, Security, TlsSettings, U
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CoreKind {
-    Xray,
-    SingBox,
-    Mihomo,
     KeliCoreRs,
-    Sidecar(String),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -39,8 +35,7 @@ pub struct CorePlanDnsOptions {
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct CorePlanBundle {
-    pub xray: Option<CorePlan>,
-    pub sidecars: Vec<CorePlan>,
+    pub core: Option<CorePlan>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -152,7 +147,6 @@ impl CorePlan {
         nodes: &[NodeInfo],
         users_by_node_tag: &BTreeMap<String, Vec<UserInfo>>,
     ) -> Result<Self, CoreError> {
-        reject_sidecar_protocols_for_core(&kind, nodes)?;
         let mut inbounds = nodes
             .iter()
             .map(|node| {
@@ -163,9 +157,7 @@ impl CorePlan {
                 build_inbound_plan_with_users(node, users)
             })
             .collect::<Result<Vec<_>, _>>()?;
-        if matches!(kind, CoreKind::KeliCoreRs) {
-            strip_native_user_emails(&mut inbounds);
-        }
+        strip_native_user_emails(&mut inbounds);
         let listen_tags = inbounds.iter().map(|inbound| inbound.tag.clone()).collect();
 
         Ok(Self {
@@ -201,11 +193,14 @@ fn strip_native_user_emails(inbounds: &mut [InboundPlan]) {
 pub fn core_kind_from_name(value: &str) -> Result<CoreKind, CoreError> {
     let normalized = value.trim().to_ascii_lowercase().replace('_', "-");
     match normalized.as_str() {
-        "" | "xray" => Ok(CoreKind::Xray),
-        "sing-box" | "singbox" => Ok(CoreKind::SingBox),
-        "mihomo" | "clash-meta" => Ok(CoreKind::Mihomo),
+        "" => Ok(CoreKind::KeliCoreRs),
         "keli-core-rs" | "kelicore-rs" | "kelicorers" => Ok(CoreKind::KeliCoreRs),
-        other => Err(CoreError::new(format!("unsupported core type {other}"))),
+        "xray" | "sing-box" | "singbox" | "mihomo" | "clash-meta" => Err(CoreError::new(
+            "legacy external core types are no longer supported; use keli-core-rs",
+        )),
+        other => Err(CoreError::new(format!(
+            "unsupported core type {other}; use keli-core-rs"
+        ))),
     }
 }
 
@@ -214,7 +209,12 @@ pub fn split_core_plans_for_nodes(
     nodes: &[NodeInfo],
     users_by_node_tag: &BTreeMap<String, Vec<UserInfo>>,
 ) -> Result<CorePlanBundle, CoreError> {
-    split_core_plans_for_nodes_with_kind(CoreKind::Xray, config_path, nodes, users_by_node_tag)
+    split_core_plans_for_nodes_with_kind(
+        CoreKind::KeliCoreRs,
+        config_path,
+        nodes,
+        users_by_node_tag,
+    )
 }
 
 pub fn split_core_plans_for_nodes_with_kind(
@@ -225,11 +225,7 @@ pub fn split_core_plans_for_nodes_with_kind(
 ) -> Result<CorePlanBundle, CoreError> {
     let core_nodes = nodes
         .iter()
-        .filter(|node| sidecar_protocol_name_for_kind(&core_kind, node.protocol).is_none())
         .filter(|node| {
-            if core_kind != CoreKind::KeliCoreRs {
-                return true;
-            }
             match node_supported_by_keli_core_rs(&config_path, node, users_by_node_tag) {
                 Ok(()) => true,
                 Err(error) => {
@@ -246,7 +242,7 @@ pub fn split_core_plans_for_nodes_with_kind(
         })
         .cloned()
         .collect::<Vec<_>>();
-    let xray = if core_nodes.is_empty() {
+    let core = if core_nodes.is_empty() {
         None
     } else {
         Some(CorePlan::from_nodes_with_users(
@@ -257,20 +253,7 @@ pub fn split_core_plans_for_nodes_with_kind(
         )?)
     };
 
-    let mut sidecars = Vec::new();
-    for node in nodes {
-        let Some(protocol) = sidecar_protocol_name_for_kind(&core_kind, node.protocol) else {
-            continue;
-        };
-        sidecars.push(CorePlan::from_nodes_with_users(
-            CoreKind::Sidecar(protocol.to_string()),
-            sidecar_config_path(&config_path, protocol, node.id),
-            std::slice::from_ref(node),
-            users_by_node_tag,
-        )?);
-    }
-
-    Ok(CorePlanBundle { xray, sidecars })
+    Ok(CorePlanBundle { core })
 }
 
 fn node_supported_by_keli_core_rs(
@@ -278,6 +261,15 @@ fn node_supported_by_keli_core_rs(
     node: &NodeInfo,
     users_by_node_tag: &BTreeMap<String, Vec<UserInfo>>,
 ) -> Result<(), CoreError> {
+    if keli_core_rs_protocol_requires_users(node.protocol)
+        && !node_has_keli_core_rs_users(&node.tag, users_by_node_tag)
+    {
+        return Err(CoreError::new(format!(
+            "keli-core-rs {} inbound {} requires panel users before rendering",
+            core_protocol_name(node.protocol),
+            node.tag
+        )));
+    }
     let probe = CorePlan::from_nodes_with_users(
         CoreKind::KeliCoreRs,
         config_path.to_path_buf(),
@@ -290,50 +282,25 @@ fn node_supported_by_keli_core_rs(
     Ok(())
 }
 
-pub fn sidecar_protocol_name(protocol: Protocol) -> Option<&'static str> {
-    match protocol {
-        Protocol::Naive => Some("naive"),
-        Protocol::Mieru => Some("mieru"),
-        _ => None,
-    }
+fn keli_core_rs_protocol_requires_users(protocol: Protocol) -> bool {
+    matches!(
+        protocol,
+        Protocol::Vmess
+            | Protocol::Shadowsocks
+            | Protocol::Anytls
+            | Protocol::Mieru
+            | Protocol::Naive
+    )
 }
 
-fn sidecar_protocol_name_for_kind(kind: &CoreKind, protocol: Protocol) -> Option<&'static str> {
-    if matches!(kind, CoreKind::KeliCoreRs) && protocol == Protocol::Mieru {
-        return None;
-    }
-    sidecar_protocol_name(protocol)
-}
-
-pub fn sidecar_config_path(
-    base_config_path: impl AsRef<Path>,
-    protocol: &str,
-    node_id: u32,
-) -> PathBuf {
-    let base = base_config_path.as_ref();
-    let dir = base.parent().unwrap_or_else(|| Path::new("."));
-    let extension = if protocol == "naive" {
-        "Caddyfile"
-    } else {
-        "json"
-    };
-    dir.join(format!("sidecar-{protocol}-{node_id}.{extension}"))
-}
-
-fn reject_sidecar_protocols_for_core(kind: &CoreKind, nodes: &[NodeInfo]) -> Result<(), CoreError> {
-    if !matches!(kind, CoreKind::Xray) {
-        return Ok(());
-    }
-    let Some((node, protocol)) = nodes
-        .iter()
-        .find_map(|node| sidecar_protocol_name(node.protocol).map(|protocol| (node, protocol)))
-    else {
-        return Ok(());
-    };
-    Err(CoreError::new(format!(
-        "protocol {protocol} for node {} requires a sidecar runtime and cannot be rendered into Xray",
-        node.tag
-    )))
+fn node_has_keli_core_rs_users(
+    node_tag: &str,
+    users_by_node_tag: &BTreeMap<String, Vec<UserInfo>>,
+) -> bool {
+    users_by_node_tag
+        .get(node_tag)
+        .map(|users| users.iter().any(|user| !user.uuid.trim().is_empty()))
+        .unwrap_or(false)
 }
 
 pub fn core_file_layout(config_path: impl AsRef<Path>) -> CoreFileLayout {
@@ -353,118 +320,8 @@ pub fn core_file_layout(config_path: impl AsRef<Path>) -> CoreFileLayout {
 
 pub fn render_core_config(plan: &CorePlan) -> Result<Value, CoreError> {
     match &plan.kind {
-        CoreKind::Xray => Ok(render_xray_config(plan)),
         CoreKind::KeliCoreRs => render_keli_core_rs_config(plan),
-        CoreKind::SingBox => Err(CoreError::new(
-            "sing-box core config rendering is not implemented yet",
-        )),
-        CoreKind::Mihomo => Err(CoreError::new(
-            "mihomo core config rendering is not implemented yet",
-        )),
-        CoreKind::Sidecar(name) => render_sidecar_config(plan, name),
     }
-}
-
-fn render_sidecar_config(plan: &CorePlan, name: &str) -> Result<Value, CoreError> {
-    match name {
-        "mieru" => render_mieru_sidecar_config(plan),
-        "naive" => Ok(Value::String(render_naive_sidecar_config(plan)?)),
-        value => Err(CoreError::new(format!(
-            "sidecar core config rendering is not implemented for {value}",
-        ))),
-    }
-}
-
-fn render_naive_sidecar_config(plan: &CorePlan) -> Result<String, CoreError> {
-    if plan.inbounds.len() != 1 {
-        return Err(CoreError::new(
-            "naive sidecar config must contain exactly one inbound",
-        ));
-    }
-    let inbound = &plan.inbounds[0];
-    if inbound.protocol != "naive" {
-        return Err(CoreError::new(format!(
-            "naive sidecar cannot render protocol {}",
-            inbound.protocol
-        )));
-    }
-
-    let listen = naive_caddy_listen(inbound);
-    let server_name = inbound.server_name.trim();
-    let site = if server_name.is_empty() {
-        listen
-    } else {
-        format!("{listen}, {server_name}")
-    };
-    let tls = if !inbound.cert_file.trim().is_empty() && !inbound.key_file.trim().is_empty() {
-        format!(
-            "    tls {} {}\n",
-            caddy_token(&inbound.cert_file),
-            caddy_token(&inbound.key_file)
-        )
-    } else {
-        String::new()
-    };
-    let users = inbound
-        .users
-        .iter()
-        .map(|user| {
-            format!(
-                "            basic_auth {} {}\n",
-                caddy_token(&user.uuid),
-                caddy_token(&user.uuid)
-            )
-        })
-        .collect::<String>();
-
-    Ok(format!(
-        "{{\n    order forward_proxy first\n}}\n\n{} {{\n{}    route {{\n        forward_proxy {{\n{}            hide_ip\n            hide_via\n        }}\n        respond \"OK\" 200\n    }}\n}}\n",
-        site, tls, users
-    ))
-}
-
-fn render_mieru_sidecar_config(plan: &CorePlan) -> Result<Value, CoreError> {
-    let mut port_bindings = Vec::new();
-    let mut users = Vec::new();
-
-    for inbound in &plan.inbounds {
-        if inbound.protocol != "mieru" {
-            return Err(CoreError::new(format!(
-                "mieru sidecar cannot render protocol {}",
-                inbound.protocol
-            )));
-        }
-
-        let mut binding = Map::new();
-        if inbound.port_range.is_empty() {
-            binding.insert("port".to_string(), json!(inbound.port));
-        } else {
-            binding.insert("portRange".to_string(), json!(&inbound.port_range));
-        }
-        binding.insert(
-            "protocol".to_string(),
-            json!(resolve_mieru_transport(&inbound.network)?),
-        );
-        port_bindings.push(Value::Object(binding));
-
-        for user in &inbound.users {
-            let credential = user.uuid.trim();
-            if credential.is_empty() {
-                continue;
-            }
-            users.push(json!({
-                "name": credential,
-                "password": credential
-            }));
-        }
-    }
-
-    Ok(json!({
-        "portBindings": port_bindings,
-        "users": users,
-        "loggingLevel": "INFO",
-        "mtu": 1400
-    }))
 }
 
 fn render_keli_core_rs_config(plan: &CorePlan) -> Result<Value, CoreError> {
@@ -646,6 +503,19 @@ fn push_keli_core_rs_outbound_once(outbounds: &mut Vec<Value>, tag: &str, outbou
         return;
     }
     outbounds.push(outbound);
+}
+
+fn parse_route_outbound(route: &RoutePlan) -> Option<(String, Value)> {
+    let raw = route.action_value.as_deref()?.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    let outbound: Value = serde_json::from_str(raw).ok()?;
+    let tag = outbound.get("tag").and_then(Value::as_str)?.trim();
+    if tag.is_empty() {
+        return None;
+    }
+    Some((tag.to_string(), outbound))
 }
 
 fn keli_core_rs_route_outbound(
@@ -1721,6 +1591,7 @@ fn validate_keli_core_rs_inbound(inbound: &InboundPlan) -> Result<(), CoreError>
             validate_keli_core_rs_plain_tcp_inbound(inbound)?;
             Ok(())
         }
+        "naive" => validate_keli_core_rs_naive_inbound(inbound),
         "vless" | "trojan" | "vmess" => {
             validate_keli_core_rs_tcp_or_ws_inbound(inbound)?;
             Ok(())
@@ -1728,7 +1599,7 @@ fn validate_keli_core_rs_inbound(inbound: &InboundPlan) -> Result<(), CoreError>
         "tuic" => validate_keli_core_rs_tuic_inbound(inbound),
         "hysteria" => validate_keli_core_rs_hysteria2_inbound(inbound),
         value => Err(CoreError::new(format!(
-            "keli-core-rs native renderer only supports socks/http/shadowsocks/vmess/vless/trojan/anytls/mieru tcp, vmess/vless/trojan ws/httpupgrade/grpc, tuic tcp/udp relay, and hysteria2 tcp/udp relay today; inbound {} uses {}",
+            "keli-core-rs native renderer only supports socks/http/shadowsocks/vmess/vless/trojan/anytls/mieru tcp, naive h2/tls, vmess/vless/trojan ws/httpupgrade/grpc, tuic tcp/udp relay, and hysteria2 tcp/udp relay today; inbound {} uses {}",
             inbound.tag, value
         ))),
     }
@@ -1814,6 +1685,42 @@ fn validate_keli_core_rs_plain_tcp_inbound(inbound: &InboundPlan) -> Result<(), 
     if !json_value_is_empty(&inbound.network_settings) {
         return Err(CoreError::new(format!(
             "keli-core-rs {protocol} currently does not support transport settings on inbound {}",
+            inbound.tag
+        )));
+    }
+    Ok(())
+}
+
+fn validate_keli_core_rs_naive_inbound(inbound: &InboundPlan) -> Result<(), CoreError> {
+    let network = first_non_empty(inbound.network.trim(), "tcp").to_ascii_lowercase();
+    if network != "tcp" {
+        return Err(CoreError::new(format!(
+            "keli-core-rs naive currently supports only tcp transport; inbound {} uses {}",
+            inbound.tag, network
+        )));
+    }
+    if inbound.security != "tls" {
+        return Err(CoreError::new(format!(
+            "keli-core-rs naive currently requires tls security; inbound {} uses {}",
+            inbound.tag, inbound.security
+        )));
+    }
+    validate_keli_core_rs_tls_inbound(inbound)?;
+    if !inbound.port_range.trim().is_empty() {
+        return Err(CoreError::new(format!(
+            "keli-core-rs naive currently supports only a single port; inbound {} uses port range {}",
+            inbound.tag, inbound.port_range
+        )));
+    }
+    if !inbound.flow.trim().is_empty() {
+        return Err(CoreError::new(format!(
+            "keli-core-rs naive does not support flow; inbound {} uses {}",
+            inbound.tag, inbound.flow
+        )));
+    }
+    if !json_value_is_empty(&inbound.network_settings) {
+        return Err(CoreError::new(format!(
+            "keli-core-rs naive currently does not support transport settings on inbound {}",
             inbound.tag
         )));
     }
@@ -2487,6 +2394,14 @@ fn grpc_service_name_setting(settings: &Value) -> Option<String> {
     network_setting_string(settings, &["serviceName", "service_name"])
 }
 
+fn network_setting_string(settings: &Value, keys: &[&str]) -> Option<String> {
+    keys.iter()
+        .find_map(|key| settings.get(*key).and_then(Value::as_str))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
 fn render_keli_core_rs_user(user: &InboundUserPlan) -> Value {
     json!({
         "id": user.id,
@@ -2501,20 +2416,8 @@ fn render_keli_core_rs_user(user: &InboundUserPlan) -> Value {
 pub fn write_core_config(plan: &CorePlan) -> Result<CoreConfigWriteResult, CoreError> {
     ensure_core_plan_certificates(plan)?;
 
-    if matches!(&plan.kind, CoreKind::Sidecar(name) if name == "naive") {
-        let content = render_naive_sidecar_config(plan)?;
-        return write_core_config_bytes(
-            &plan.config_path,
-            content.into_bytes(),
-            plan.inbounds.len(),
-        );
-    }
-    if matches!(plan.kind, CoreKind::KeliCoreRs) {
-        let content = render_keli_core_rs_config_bytes(plan)?;
-        return write_core_config_bytes(&plan.config_path, content, plan.inbounds.len());
-    }
-    let value = render_core_config(plan)?;
-    write_core_config_value(&plan.config_path, &value, plan.inbounds.len())
+    let content = render_keli_core_rs_config_bytes(plan)?;
+    write_core_config_bytes(&plan.config_path, content, plan.inbounds.len())
 }
 
 #[derive(Serialize)]
@@ -3100,670 +3003,6 @@ fn value_to_u64(value: &Value) -> u64 {
         .unwrap_or(0)
 }
 
-fn render_xray_config(plan: &CorePlan) -> Value {
-    let inbounds = plan
-        .inbounds
-        .iter()
-        .map(render_xray_inbound)
-        .collect::<Vec<_>>();
-
-    let mut config = Map::new();
-    config.insert(
-        "log".to_string(),
-        json!({
-            "loglevel": "warning"
-        }),
-    );
-    config.insert("inbounds".to_string(), Value::Array(inbounds));
-    config.insert(
-        "outbounds".to_string(),
-        Value::Array(render_xray_outbounds(plan)),
-    );
-    config.insert("stats".to_string(), json!({}));
-    config.insert("policy".to_string(), render_xray_policy());
-    config.insert("routing".to_string(), render_xray_routing(plan));
-    if let Some(dns) = render_xray_dns(plan) {
-        config.insert("dns".to_string(), dns);
-    }
-
-    Value::Object(config)
-}
-
-fn render_xray_policy() -> Value {
-    json!({
-        "levels": {
-            "0": {
-                "statsUserUplink": true,
-                "statsUserDownlink": true,
-                "handshake": 4,
-                "connIdle": 120,
-                "uplinkOnly": 2,
-                "downlinkOnly": 4,
-                "bufferSize": 128
-            }
-        }
-    })
-}
-
-fn render_xray_outbounds(plan: &CorePlan) -> Vec<Value> {
-    let mut outbounds = vec![
-        json!({
-            "tag": "Default",
-            "protocol": "freedom",
-            "settings": {
-                "domainStrategy": "UseIPv4"
-            }
-        }),
-        json!({
-            "tag": "block",
-            "protocol": "blackhole"
-        }),
-        json!({
-            "tag": "dns_out",
-            "protocol": "dns"
-        }),
-    ];
-
-    for inbound in &plan.inbounds {
-        for route in &inbound.routes {
-            if !matches!(route.action.as_str(), "route" | "route_ip" | "default_out") {
-                continue;
-            }
-            let Some((tag, outbound)) = parse_route_outbound(route) else {
-                continue;
-            };
-            if outbounds
-                .iter()
-                .any(|item| item.get("tag").and_then(Value::as_str) == Some(tag.as_str()))
-            {
-                continue;
-            }
-            outbounds.push(outbound);
-        }
-    }
-
-    outbounds
-}
-
-fn render_xray_routing(plan: &CorePlan) -> Value {
-    let mut rules = vec![json!({
-        "port": "53",
-        "network": "udp",
-        "outboundTag": "dns_out"
-    })];
-
-    for inbound in &plan.inbounds {
-        for route in &inbound.routes {
-            if let Some(rule) = render_xray_route_rule(&inbound.tag, route) {
-                rules.push(rule);
-            }
-        }
-    }
-
-    json!({
-        "domainStrategy": "AsIs",
-        "rules": rules
-    })
-}
-
-fn render_xray_route_rule(inbound_tag: &str, route: &RoutePlan) -> Option<Value> {
-    if route.match_rules.is_empty() && route.action != "default_out" {
-        return None;
-    }
-
-    match route.action.as_str() {
-        "block" => Some(json!({
-            "inboundTag": inbound_tag,
-            "domain": &route.match_rules,
-            "outboundTag": "block"
-        })),
-        "block_ip" => Some(json!({
-            "inboundTag": inbound_tag,
-            "ip": &route.match_rules,
-            "outboundTag": "block"
-        })),
-        "block_port" => Some(json!({
-            "inboundTag": inbound_tag,
-            "port": route.match_rules.join(","),
-            "outboundTag": "block"
-        })),
-        "protocol" => Some(json!({
-            "inboundTag": inbound_tag,
-            "protocol": &route.match_rules,
-            "outboundTag": "block"
-        })),
-        "route" => route_outbound_tag(route).map(|tag| {
-            json!({
-                "inboundTag": inbound_tag,
-                "domain": &route.match_rules,
-                "outboundTag": tag
-            })
-        }),
-        "route_ip" => route_outbound_tag(route).map(|tag| {
-            json!({
-                "inboundTag": inbound_tag,
-                "ip": &route.match_rules,
-                "outboundTag": tag
-            })
-        }),
-        "default_out" => route_outbound_tag(route).map(|tag| {
-            json!({
-                "inboundTag": inbound_tag,
-                "network": "tcp,udp",
-                "outboundTag": tag
-            })
-        }),
-        _ => None,
-    }
-}
-
-fn render_xray_dns(plan: &CorePlan) -> Option<Value> {
-    let mut servers = vec![
-        json!({
-            "address": "1.1.1.1"
-        }),
-        json!({
-            "address": "8.8.8.8"
-        }),
-    ];
-    for inbound in &plan.inbounds {
-        for route in &inbound.routes {
-            if route.action != "dns" {
-                continue;
-            }
-            let Some(address) = route.action_value.as_deref().map(str::trim) else {
-                continue;
-            };
-            if address.is_empty() {
-                continue;
-            }
-            let mut server = Map::new();
-            server.insert("address".to_string(), json!(address));
-            if !route.match_rules.is_empty() {
-                server.insert("domains".to_string(), json!(&route.match_rules));
-            }
-            servers.push(Value::Object(server));
-        }
-    }
-
-    Some(json!({
-        "servers": servers,
-        "queryStrategy": "UseIPv4"
-    }))
-}
-
-fn route_outbound_tag(route: &RoutePlan) -> Option<String> {
-    parse_route_outbound(route).map(|(tag, _)| tag)
-}
-
-fn parse_route_outbound(route: &RoutePlan) -> Option<(String, Value)> {
-    let raw = route.action_value.as_deref()?.trim();
-    if raw.is_empty() {
-        return None;
-    }
-    let outbound: Value = serde_json::from_str(raw).ok()?;
-    let tag = outbound.get("tag").and_then(Value::as_str)?.trim();
-    if tag.is_empty() {
-        return None;
-    }
-    Some((tag.to_string(), outbound))
-}
-
-fn render_xray_inbound(inbound: &InboundPlan) -> Value {
-    let mut item = Map::new();
-    item.insert("tag".to_string(), json!(&inbound.tag));
-    item.insert("listen".to_string(), json!(&inbound.listen));
-    item.insert("port".to_string(), json!(inbound.port));
-    item.insert("protocol".to_string(), json!(&inbound.protocol));
-    item.insert(
-        "settings".to_string(),
-        render_xray_inbound_settings(inbound),
-    );
-    item.insert("sniffing".to_string(), render_xray_sniffing());
-
-    let stream_settings = render_xray_stream_settings(inbound);
-    if !stream_settings.is_empty() {
-        item.insert("streamSettings".to_string(), Value::Object(stream_settings));
-    }
-
-    Value::Object(item)
-}
-
-fn render_xray_sniffing() -> Value {
-    json!({
-        "enabled": true,
-        "destOverride": ["http", "tls"]
-    })
-}
-
-fn render_xray_inbound_settings(inbound: &InboundPlan) -> Value {
-    let clients = render_xray_clients(inbound);
-    match inbound.protocol.as_str() {
-        "vless" => json!({
-            "clients": clients,
-            "decryption": render_vless_decryption(inbound)
-        }),
-        "vmess" | "trojan" => json!({
-            "clients": clients
-        }),
-        "shadowsocks" => render_xray_shadowsocks_settings(inbound, clients),
-        "socks" => render_xray_socks_settings(inbound),
-        "http" => render_xray_http_settings(inbound),
-        "anytls" => render_xray_anytls_settings(inbound, clients),
-        "hysteria" => render_xray_hysteria_settings(clients),
-        "tuic" => render_xray_tuic_settings(inbound, clients),
-        _ => json!({}),
-    }
-}
-
-fn render_vless_decryption(inbound: &InboundPlan) -> &str {
-    if inbound.vless_decryption.trim().is_empty() {
-        "none"
-    } else {
-        inbound.vless_decryption.as_str()
-    }
-}
-
-fn render_xray_clients(inbound: &InboundPlan) -> Vec<Value> {
-    inbound
-        .users
-        .iter()
-        .map(|user| match inbound.protocol.as_str() {
-            "shadowsocks" => render_xray_shadowsocks_client(inbound, user),
-            "trojan" | "hysteria" | "tuic" | "anytls" => json!({
-                "password": &user.uuid,
-                "email": &user.email
-            }),
-            "vmess" => json!({
-                "id": &user.uuid,
-                "email": &user.email,
-                "alterId": 0
-            }),
-            "vless" => render_xray_vless_client(inbound, user),
-            _ => render_xray_id_client(user),
-        })
-        .collect()
-}
-
-fn render_xray_vless_client(inbound: &InboundPlan, user: &InboundUserPlan) -> Value {
-    let mut client = Map::new();
-    client.insert("id".to_string(), json!(&user.uuid));
-    client.insert("email".to_string(), json!(&user.email));
-    if !inbound.flow.trim().is_empty() {
-        client.insert("flow".to_string(), json!(&inbound.flow));
-    }
-    Value::Object(client)
-}
-
-fn render_xray_id_client(user: &InboundUserPlan) -> Value {
-    json!({
-        "id": &user.uuid,
-        "email": &user.email
-    })
-}
-
-fn render_xray_shadowsocks_client(inbound: &InboundPlan, user: &InboundUserPlan) -> Value {
-    let mut client = Map::new();
-    if inbound.server_key.trim().is_empty() {
-        client.insert("password".to_string(), json!(&user.uuid));
-        if !inbound.cipher.trim().is_empty() {
-            client.insert("method".to_string(), json!(&inbound.cipher));
-        }
-    } else {
-        client.insert(
-            "password".to_string(),
-            json!(shadowsocks_2022_user_key(&user.uuid, &inbound.cipher)),
-        );
-    }
-    client.insert("email".to_string(), json!(&user.email));
-    Value::Object(client)
-}
-
-fn render_xray_shadowsocks_settings(inbound: &InboundPlan, clients: Vec<Value>) -> Value {
-    let mut settings = Map::new();
-    settings.insert("clients".to_string(), Value::Array(clients));
-    settings.insert(
-        "network".to_string(),
-        if shadowsocks_has_http_obfs(inbound) {
-            json!("tcp")
-        } else {
-            json!("tcp,udp")
-        },
-    );
-    if !inbound.cipher.trim().is_empty() {
-        settings.insert("method".to_string(), json!(&inbound.cipher));
-    }
-    if !inbound.server_key.trim().is_empty() {
-        settings.insert("password".to_string(), json!(&inbound.server_key));
-    }
-    Value::Object(settings)
-}
-
-fn shadowsocks_2022_user_key(uuid: &str, cipher: &str) -> String {
-    let key_length = match cipher.trim() {
-        "2022-blake3-aes-128-gcm" => 16,
-        "2022-blake3-aes-256-gcm" | "2022-blake3-chacha20-poly1305" => 32,
-        _ => 0,
-    };
-    let bytes = uuid.as_bytes();
-    base64_standard_encode(&bytes[..bytes.len().min(key_length)])
-}
-
-fn base64_standard_encode(bytes: &[u8]) -> String {
-    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut output = String::with_capacity(((bytes.len() + 2) / 3) * 4);
-
-    for chunk in bytes.chunks(3) {
-        let b0 = chunk[0];
-        let b1 = chunk.get(1).copied().unwrap_or(0);
-        let b2 = chunk.get(2).copied().unwrap_or(0);
-
-        output.push(TABLE[(b0 >> 2) as usize] as char);
-        output.push(TABLE[(((b0 & 0b0000_0011) << 4) | (b1 >> 4)) as usize] as char);
-        if chunk.len() > 1 {
-            output.push(TABLE[(((b1 & 0b0000_1111) << 2) | (b2 >> 6)) as usize] as char);
-        } else {
-            output.push('=');
-        }
-        if chunk.len() > 2 {
-            output.push(TABLE[(b2 & 0b0011_1111) as usize] as char);
-        } else {
-            output.push('=');
-        }
-    }
-
-    output
-}
-
-fn render_xray_socks_settings(inbound: &InboundPlan) -> Value {
-    let accounts = inbound
-        .users
-        .iter()
-        .map(|user| {
-            json!({
-                "user": &user.uuid,
-                "pass": &user.uuid
-            })
-        })
-        .collect::<Vec<_>>();
-
-    json!({
-        "auth": "password",
-        "accounts": accounts,
-        "udp": true
-    })
-}
-
-fn render_xray_http_settings(inbound: &InboundPlan) -> Value {
-    let accounts = inbound
-        .users
-        .iter()
-        .map(|user| {
-            json!({
-                "user": &user.uuid,
-                "pass": &user.uuid
-            })
-        })
-        .collect::<Vec<_>>();
-
-    json!({
-        "accounts": accounts
-    })
-}
-
-fn render_xray_anytls_settings(inbound: &InboundPlan, clients: Vec<Value>) -> Value {
-    let mut settings = Map::new();
-    settings.insert("clients".to_string(), Value::Array(clients));
-    if !inbound.padding_scheme.is_empty() {
-        settings.insert("paddingScheme".to_string(), json!(&inbound.padding_scheme));
-    }
-    Value::Object(settings)
-}
-
-fn render_xray_hysteria_settings(clients: Vec<Value>) -> Value {
-    json!({
-        "version": 2,
-        "clients": clients
-    })
-}
-
-fn render_xray_tuic_settings(inbound: &InboundPlan, clients: Vec<Value>) -> Value {
-    let mut settings = Map::new();
-    settings.insert("clients".to_string(), Value::Array(clients));
-    if !inbound.congestion_control.trim().is_empty() {
-        settings.insert(
-            "congestionControl".to_string(),
-            json!(&inbound.congestion_control),
-        );
-    }
-    if inbound.zero_rtt_handshake {
-        settings.insert("zeroRttHandshake".to_string(), json!(true));
-    }
-    Value::Object(settings)
-}
-
-fn render_xray_stream_settings(inbound: &InboundPlan) -> Map<String, Value> {
-    let mut stream = Map::new();
-    if !inbound.network.trim().is_empty() {
-        stream.insert("network".to_string(), json!(&inbound.network));
-        if let Some((key, value)) =
-            render_xray_network_settings(&inbound.network, &inbound.network_settings)
-        {
-            stream.insert(key.to_string(), value);
-        }
-    }
-    if let Some(tcp_settings) = render_shadowsocks_tcp_stream_settings(inbound) {
-        stream.insert("network".to_string(), json!("tcp"));
-        stream.insert("tcpSettings".to_string(), tcp_settings);
-    }
-    if accepts_proxy_protocol(&inbound.network_settings) {
-        stream.insert(
-            "sockopt".to_string(),
-            json!({
-                "acceptProxyProtocol": true
-            }),
-        );
-    }
-    if inbound.security != "none" {
-        stream.insert("security".to_string(), json!(&inbound.security));
-    }
-
-    match inbound.security.as_str() {
-        "tls" => {
-            stream.insert("tlsSettings".to_string(), render_xray_tls_settings(inbound));
-        }
-        "reality" => {
-            stream.insert(
-                "realitySettings".to_string(),
-                render_xray_reality_settings(inbound),
-            );
-        }
-        _ => {}
-    }
-    if inbound.protocol == "hysteria" {
-        stream.insert(
-            "hysteriaSettings".to_string(),
-            render_xray_hysteria_stream_settings(inbound),
-        );
-    }
-
-    stream
-}
-
-fn render_xray_hysteria_stream_settings(inbound: &InboundPlan) -> Value {
-    let mut settings = Map::new();
-    settings.insert("version".to_string(), json!(2));
-
-    let mut final_mask = Map::new();
-    if !inbound.ignore_client_bandwidth && (inbound.up_mbps > 0 || inbound.down_mbps > 0) {
-        final_mask.insert(
-            "quicParams".to_string(),
-            json!({
-                "congestion": "force-brutal",
-                "brutalUp": format!("{}mbps", inbound.up_mbps),
-                "brutalDown": format!("{}mbps", inbound.down_mbps)
-            }),
-        );
-    }
-    if !inbound.obfs.is_empty() && !inbound.obfs_password.is_empty() {
-        final_mask.insert(
-            "udp".to_string(),
-            json!([
-                {
-                    "type": &inbound.obfs,
-                    "settings": {
-                        "password": &inbound.obfs_password
-                    }
-                }
-            ]),
-        );
-    }
-    if !final_mask.is_empty() {
-        settings.insert("finalMask".to_string(), Value::Object(final_mask));
-    }
-
-    Value::Object(settings)
-}
-
-fn render_xray_network_settings(network: &str, settings: &Value) -> Option<(&'static str, Value)> {
-    if settings.is_null()
-        || settings
-            .as_object()
-            .map(|value| value.is_empty())
-            .unwrap_or(false)
-    {
-        return None;
-    }
-
-    let key = match network.trim().to_ascii_lowercase().as_str() {
-        "tcp" => "tcpSettings",
-        "kcp" => "kcpSettings",
-        "ws" | "websocket" => "wsSettings",
-        "http" | "h2" => "httpSettings",
-        "quic" => "quicSettings",
-        "grpc" => "grpcSettings",
-        "httpupgrade" => "httpupgradeSettings",
-        "xhttp" => "xhttpSettings",
-        _ => return None,
-    };
-    Some((key, settings.clone()))
-}
-
-fn render_shadowsocks_tcp_stream_settings(inbound: &InboundPlan) -> Option<Value> {
-    if inbound.protocol != "shadowsocks" {
-        return None;
-    }
-
-    let accept_proxy_protocol = accepts_proxy_protocol(&inbound.network_settings);
-    let path = network_setting_string(&inbound.network_settings, &["path"]);
-    let host = network_setting_string(&inbound.network_settings, &["Host", "host"]);
-    if !accept_proxy_protocol && path.is_none() && host.is_none() {
-        return None;
-    }
-
-    let mut settings = Map::new();
-    if accept_proxy_protocol {
-        settings.insert("acceptProxyProtocol".to_string(), json!(true));
-    }
-    if path.is_some() || host.is_some() {
-        let path = path.unwrap_or_else(|| "/".to_string());
-        let mut request = Map::new();
-        request.insert("path".to_string(), json!([path]));
-        if let Some(host) = host {
-            request.insert(
-                "headers".to_string(),
-                json!({
-                    "Host": [host]
-                }),
-            );
-        }
-        settings.insert(
-            "header".to_string(),
-            json!({
-                "type": "http",
-                "request": request
-            }),
-        );
-    }
-
-    Some(Value::Object(settings))
-}
-
-fn shadowsocks_has_http_obfs(inbound: &InboundPlan) -> bool {
-    inbound.protocol == "shadowsocks"
-        && (network_setting_string(&inbound.network_settings, &["path"]).is_some()
-            || network_setting_string(&inbound.network_settings, &["Host", "host"]).is_some())
-}
-
-fn accepts_proxy_protocol(settings: &Value) -> bool {
-    settings
-        .get("acceptProxyProtocol")
-        .and_then(Value::as_bool)
-        .unwrap_or(false)
-}
-
-fn network_setting_string(settings: &Value, keys: &[&str]) -> Option<String> {
-    keys.iter()
-        .find_map(|key| settings.get(*key).and_then(Value::as_str))
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_string)
-}
-
-fn render_xray_tls_settings(inbound: &InboundPlan) -> Value {
-    let mut settings = Map::new();
-    if !inbound.server_name.trim().is_empty() {
-        settings.insert("serverName".to_string(), json!(&inbound.server_name));
-    }
-    if !inbound.alpn.is_empty() {
-        settings.insert("alpn".to_string(), json!(&inbound.alpn));
-    }
-    if inbound.reject_unknown_sni {
-        settings.insert("rejectUnknownSni".to_string(), json!(true));
-    }
-    if !inbound.cert_file.trim().is_empty() && !inbound.key_file.trim().is_empty() {
-        settings.insert(
-            "certificates".to_string(),
-            json!([{
-                "certificateFile": &inbound.cert_file,
-                "keyFile": &inbound.key_file
-            }]),
-        );
-    }
-
-    Value::Object(settings)
-}
-
-fn render_xray_reality_settings(inbound: &InboundPlan) -> Value {
-    let mut settings = Map::new();
-    if !inbound.reality_dest.trim().is_empty() {
-        settings.insert("dest".to_string(), json!(&inbound.reality_dest));
-    }
-    if !inbound.server_name.trim().is_empty() {
-        settings.insert("serverNames".to_string(), json!([&inbound.server_name]));
-    }
-    if !inbound.reality_private_key.trim().is_empty() {
-        settings.insert(
-            "privateKey".to_string(),
-            json!(&inbound.reality_private_key),
-        );
-    }
-    if inbound.reality_xver > 0 {
-        settings.insert("xver".to_string(), json!(inbound.reality_xver));
-    }
-    if !inbound.reality_short_id.trim().is_empty() {
-        settings.insert("shortIds".to_string(), json!([&inbound.reality_short_id]));
-    }
-    if !inbound.reality_mldsa65_seed.trim().is_empty() {
-        settings.insert(
-            "mldsa65Seed".to_string(),
-            json!(&inbound.reality_mldsa65_seed),
-        );
-    }
-
-    Value::Object(settings)
-}
-
 fn replace_file(from: &Path, to: &Path) -> Result<(), std::io::Error> {
     match fs::rename(from, to) {
         Ok(()) => Ok(()),
@@ -3785,28 +3024,6 @@ fn key_file(cert: &CertInfo) -> String {
 
 fn cert_domain(cert: &CertInfo) -> String {
     cert.cert_domain.clone()
-}
-
-fn naive_caddy_listen(inbound: &InboundPlan) -> String {
-    let listen = inbound.listen.trim();
-    if listen.is_empty() || listen == "::" || listen == "0.0.0.0" {
-        return format!(":{}", inbound.port);
-    }
-    if listen.contains(':') && !listen.starts_with('[') {
-        format!("[{}]:{}", listen, inbound.port)
-    } else {
-        format!("{}:{}", listen, inbound.port)
-    }
-}
-
-fn caddy_token(value: &str) -> String {
-    if value.chars().all(|character| {
-        character.is_ascii_alphanumeric() || matches!(character, '.' | '_' | '-' | '/' | ':' | '$')
-    }) {
-        return value.to_string();
-    }
-
-    format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
 }
 
 fn first_non_empty(value: &str, fallback: &str) -> String {
@@ -3863,32 +3080,21 @@ mod tests {
 
     use super::{
         build_inbound_plan, core_file_layout, core_kind_from_name, render_core_config,
-        resolve_node_listen_ip, should_fallback_node_listen_ip, sidecar_config_path,
-        split_core_plans_for_nodes, split_core_plans_for_nodes_with_kind, write_core_config,
-        CoreKind, CorePlan,
+        resolve_node_listen_ip, should_fallback_node_listen_ip, split_core_plans_for_nodes,
+        split_core_plans_for_nodes_with_kind, write_core_config, CoreKind, CorePlan,
     };
-    use crate::panel::types::{CommonNode, NodeInfo, PortValue, Route, Security, UserInfo};
-
-    #[test]
-    fn core_plan_can_represent_external_xray() {
-        let plan = CorePlan {
-            kind: CoreKind::Xray,
-            config_path: PathBuf::from("/etc/v2node/config.json"),
-            listen_tags: vec!["[panel]-vless:1".to_string()],
-            inbounds: Vec::new(),
-            dns: Default::default(),
-        };
-
-        assert_eq!(plan.listen_tags.len(), 1);
-    }
+    use crate::panel::types::{
+        CertInfo, CommonNode, NodeInfo, PortValue, Route, Security, UserInfo,
+    };
 
     #[test]
     fn parses_kernel_core_kind_names() {
-        assert_eq!(core_kind_from_name(" xray ").unwrap(), CoreKind::Xray);
+        assert_eq!(core_kind_from_name("").unwrap(), CoreKind::KeliCoreRs);
         assert_eq!(
             core_kind_from_name("keli_core_rs").unwrap(),
             CoreKind::KeliCoreRs
         );
+        assert!(core_kind_from_name(" xray ").is_err());
         assert!(core_kind_from_name("unknown").is_err());
     }
 
@@ -3897,7 +3103,7 @@ mod tests {
         let node = test_node("vless", 1, "0.0.0.0");
 
         let plan = CorePlan::from_nodes(
-            CoreKind::Xray,
+            CoreKind::KeliCoreRs,
             PathBuf::from("/etc/v2node/config.json"),
             &[node],
         )
@@ -3909,70 +3115,85 @@ mod tests {
     }
 
     #[test]
-    fn xray_plan_rejects_sidecar_only_protocols() {
-        let node = test_node("naive", 33, "");
-
-        let err = CorePlan::from_nodes(
-            CoreKind::Xray,
-            PathBuf::from("/srv/v2node/config.json"),
-            &[node],
-        )
-        .unwrap_err();
-
-        assert!(err.message.contains("protocol naive"));
-        assert!(err.message.contains("requires a sidecar runtime"));
-    }
-
-    #[test]
-    fn splits_xray_and_sidecar_protocol_plans() {
-        let nodes = vec![test_node("vless", 34, ""), test_node("mieru", 35, "")];
+    fn default_split_uses_native_core_plan() {
+        let mieru = test_node("mieru", 35, "");
+        let mieru_tag = mieru.tag.clone();
+        let nodes = vec![test_node("vless", 34, ""), mieru];
+        let mut users = std::collections::BTreeMap::new();
+        users.insert(
+            mieru_tag,
+            vec![UserInfo {
+                id: 35,
+                uuid: "mieru-secret".to_string(),
+                speed_limit: 0,
+                device_limit: 0,
+            }],
+        );
         let bundle = split_core_plans_for_nodes(
             PathBuf::from("/srv/v2node/config.json"),
             &nodes,
-            &std::collections::BTreeMap::new(),
+            &users,
         )
         .unwrap();
 
-        let xray = bundle.xray.unwrap();
-        assert_eq!(xray.inbounds.len(), 1);
-        assert_eq!(xray.inbounds[0].protocol, "vless");
-        assert_eq!(bundle.sidecars.len(), 1);
-        assert_eq!(
-            bundle.sidecars[0].kind,
-            CoreKind::Sidecar("mieru".to_string())
-        );
-        assert_eq!(bundle.sidecars[0].inbounds[0].protocol, "mieru");
-        assert_eq!(
-            bundle.sidecars[0].config_path,
-            PathBuf::from("/srv/v2node/sidecar-mieru-35.json")
-        );
-    }
-
-    #[test]
-    fn keeps_mieru_native_for_keli_core_rs_and_splits_naive() {
-        let nodes = vec![
-            test_node("vless", 34, ""),
-            test_node("mieru", 35, ""),
-            test_node("naive", 36, ""),
-        ];
-        let bundle = split_core_plans_for_nodes_with_kind(
-            CoreKind::KeliCoreRs,
-            PathBuf::from("/srv/v2node/config.json"),
-            &nodes,
-            &std::collections::BTreeMap::new(),
-        )
-        .unwrap();
-
-        let core = bundle.xray.unwrap();
+        let core = bundle.core.unwrap();
         assert_eq!(core.kind, CoreKind::KeliCoreRs);
         assert_eq!(core.inbounds.len(), 2);
         assert_eq!(core.inbounds[0].protocol, "vless");
         assert_eq!(core.inbounds[1].protocol, "mieru");
-        assert_eq!(bundle.sidecars.len(), 1);
-        assert_eq!(
-            bundle.sidecars[0].kind,
-            CoreKind::Sidecar("naive".to_string())
+    }
+
+    #[test]
+    fn keeps_mieru_and_naive_native_for_keli_core_rs() {
+        let mieru = test_node("mieru", 35, "");
+        let mieru_tag = mieru.tag.clone();
+        let mut naive = test_node("naive", 36, "");
+        let naive_tag = naive.tag.clone();
+        naive.security = Security::Tls;
+        naive.common.tls = 1;
+        naive.common.cert_info = Some(CertInfo {
+            cert_mode: "file".to_string(),
+            cert_file: "/tmp/naive.crt".to_string(),
+            key_file: "/tmp/naive.key".to_string(),
+            cert_domain: "naive.example.test".to_string(),
+            dns_env: Default::default(),
+            provider: String::new(),
+            reject_unknown_sni: false,
+        });
+        let nodes = vec![test_node("vless", 34, ""), mieru, naive];
+        let mut users = std::collections::BTreeMap::new();
+        users.insert(
+            mieru_tag,
+            vec![UserInfo {
+                id: 35,
+                uuid: "mieru-secret".to_string(),
+                speed_limit: 0,
+                device_limit: 0,
+            }],
         );
+        users.insert(
+            naive_tag,
+            vec![UserInfo {
+                id: 36,
+                uuid: "naive-password".to_string(),
+                speed_limit: 0,
+                device_limit: 0,
+            }],
+        );
+        let bundle = split_core_plans_for_nodes_with_kind(
+            CoreKind::KeliCoreRs,
+            PathBuf::from("/srv/v2node/config.json"),
+            &nodes,
+            &users,
+        )
+        .unwrap();
+
+        let core = bundle.core.unwrap();
+        assert_eq!(core.kind, CoreKind::KeliCoreRs);
+        assert_eq!(core.inbounds.len(), 3);
+        assert_eq!(core.inbounds[0].protocol, "vless");
+        assert_eq!(core.inbounds[1].protocol, "mieru");
+        assert_eq!(core.inbounds[2].protocol, "naive");
     }
 
     #[test]
@@ -3990,67 +3211,64 @@ mod tests {
         )
         .unwrap();
 
-        let core = bundle.xray.unwrap();
+        let core = bundle.core.unwrap();
         assert_eq!(core.kind, CoreKind::KeliCoreRs);
         assert_eq!(core.inbounds.len(), 1);
         assert_eq!(core.inbounds[0].protocol, "vless");
     }
 
     #[test]
-    fn derives_sidecar_config_path_next_to_core_config() {
-        assert_eq!(
-            sidecar_config_path("/srv/v2node/config.json", "naive", 36),
-            PathBuf::from("/srv/v2node/sidecar-naive-36.Caddyfile")
-        );
-    }
+    fn keli_core_rs_waits_for_users_before_rendering_user_required_inbounds() {
+        let supported_without_users = test_node("vless", 43, "");
+        let mut anytls = test_node("anytls", 44, "");
+        anytls.security = Security::Tls;
+        anytls.common.tls = 1;
+        anytls.common.cert_info = Some(CertInfo {
+            cert_mode: "file".to_string(),
+            cert_file: "/tmp/anytls.crt".to_string(),
+            key_file: "/tmp/anytls.key".to_string(),
+            cert_domain: "anytls.example.test".to_string(),
+            dns_env: Default::default(),
+            provider: String::new(),
+            reject_unknown_sni: false,
+        });
+        let anytls_tag = anytls.tag.clone();
+        let nodes = vec![supported_without_users, anytls.clone()];
 
-    #[test]
-    fn renders_mieru_sidecar_server_config_from_users() {
-        let mut node = test_node("mieru", 37, "");
-        node.common.transport = "udp".to_string();
-        let tag = node.tag.clone();
+        let cold_bundle = split_core_plans_for_nodes_with_kind(
+            CoreKind::KeliCoreRs,
+            PathBuf::from("/srv/v2node/config.json"),
+            &nodes,
+            &std::collections::BTreeMap::new(),
+        )
+        .unwrap();
+
+        let cold_core = cold_bundle.core.unwrap();
+        assert_eq!(cold_core.inbounds.len(), 1);
+        assert_eq!(cold_core.inbounds[0].protocol, "vless");
+
         let mut users = std::collections::BTreeMap::new();
         users.insert(
-            tag,
+            anytls_tag,
             vec![UserInfo {
-                id: 37,
-                uuid: "mieru-secret".to_string(),
+                id: 44,
+                uuid: "anytls-password".to_string(),
                 speed_limit: 0,
                 device_limit: 0,
             }],
         );
-        let plan = CorePlan::from_nodes_with_users(
-            CoreKind::Sidecar("mieru".to_string()),
-            PathBuf::from("/srv/v2node/sidecar-mieru-37.json"),
-            &[node],
+        let warm_bundle = split_core_plans_for_nodes_with_kind(
+            CoreKind::KeliCoreRs,
+            PathBuf::from("/srv/v2node/config.json"),
+            &nodes,
             &users,
         )
         .unwrap();
 
-        let config = render_core_config(&plan).unwrap();
-
-        assert_eq!(config["portBindings"][0]["port"], 10037);
-        assert_eq!(config["portBindings"][0]["protocol"], "UDP");
-        assert_eq!(config["users"][0]["name"], "mieru-secret");
-        assert_eq!(config["users"][0]["password"], "mieru-secret");
-        assert_eq!(config["loggingLevel"], "INFO");
-    }
-
-    #[test]
-    fn renders_mieru_sidecar_port_range_when_present() {
-        let mut node = test_node("mieru", 38, "");
-        node.common.ports = PortValue("2100-2200".to_string());
-        let plan = CorePlan::from_nodes(
-            CoreKind::Sidecar("mieru".to_string()),
-            PathBuf::from("/srv/v2node/sidecar-mieru-38.json"),
-            &[node],
-        )
-        .unwrap();
-
-        let config = render_core_config(&plan).unwrap();
-
-        assert_eq!(config["portBindings"][0]["portRange"], "2100-2200");
-        assert!(config["portBindings"][0]["port"].is_null());
+        let warm_core = warm_bundle.core.unwrap();
+        assert_eq!(warm_core.inbounds.len(), 2);
+        assert_eq!(warm_core.inbounds[0].protocol, "vless");
+        assert_eq!(warm_core.inbounds[1].protocol, "anytls");
     }
 
     #[test]
@@ -4161,48 +3379,7 @@ mod tests {
     }
 
     #[test]
-    fn renders_naive_sidecar_caddyfile_from_users() {
-        let node = test_node("naive", 39, "");
-        let tag = node.tag.clone();
-        let mut users = std::collections::BTreeMap::new();
-        users.insert(
-            tag,
-            vec![UserInfo {
-                id: 39,
-                uuid: "naive-secret".to_string(),
-                speed_limit: 0,
-                device_limit: 0,
-            }],
-        );
-        let plan = CorePlan::from_nodes_with_users(
-            CoreKind::Sidecar("naive".to_string()),
-            PathBuf::from("/srv/v2node/sidecar-naive-39.Caddyfile"),
-            &[node],
-            &users,
-        )
-        .unwrap();
-
-        let config = render_core_config(&plan).unwrap();
-        let caddyfile = config.as_str().unwrap();
-
-        assert!(caddyfile.contains("forward_proxy"));
-        assert!(caddyfile.contains("basic_auth naive-secret naive-secret"));
-
-        let dir = temp_test_dir("naive-caddyfile-write");
-        let path = dir.join("sidecar-naive-39.Caddyfile");
-        let mut plan = plan;
-        plan.config_path = path.clone();
-        let written = write_core_config(&plan).unwrap();
-        let saved = fs::read_to_string(&path).unwrap();
-
-        assert!(written.changed);
-        assert!(saved.starts_with("{\n    order forward_proxy first"));
-        assert!(!saved.starts_with('"'));
-        let _ = fs::remove_dir_all(dir);
-    }
-
-    #[test]
-    fn renders_keli_core_rs_native_socks_http_shadowsocks_vmess_vless_trojan_anytls_config_from_panel_users(
+    fn renders_keli_core_rs_native_socks_http_shadowsocks_vmess_vless_trojan_anytls_naive_config_from_panel_users(
     ) {
         let socks = test_node("socks", 40, "");
         let http = test_node("http", 41, "127.0.0.1");
@@ -4212,6 +3389,18 @@ mod tests {
         let vless = test_node("vless", 45, "127.0.0.1");
         let trojan = test_node("trojan", 50, "127.0.0.1");
         let anytls = test_node("anytls", 58, "127.0.0.1");
+        let mut naive = test_node("naive", 61, "127.0.0.1");
+        naive.security = Security::Tls;
+        naive.common.tls = 1;
+        naive.common.cert_info = Some(CertInfo {
+            cert_mode: "file".to_string(),
+            cert_file: "/srv/v2node/naive.cer".to_string(),
+            key_file: "/srv/v2node/naive.key".to_string(),
+            cert_domain: "naive.example.test".to_string(),
+            dns_env: Default::default(),
+            provider: String::new(),
+            reject_unknown_sni: false,
+        });
         let socks_tag = socks.tag.clone();
         let http_tag = http.tag.clone();
         let shadowsocks_tag = shadowsocks.tag.clone();
@@ -4219,6 +3408,7 @@ mod tests {
         let vless_tag = vless.tag.clone();
         let trojan_tag = trojan.tag.clone();
         let anytls_tag = anytls.tag.clone();
+        let naive_tag = naive.tag.clone();
         let mut users = std::collections::BTreeMap::new();
         users.insert(
             socks_tag.clone(),
@@ -4283,10 +3473,28 @@ mod tests {
                 device_limit: 5,
             }],
         );
+        users.insert(
+            naive_tag,
+            vec![UserInfo {
+                id: 61,
+                uuid: "naive-password".to_string(),
+                speed_limit: 5120,
+                device_limit: 6,
+            }],
+        );
         let plan = CorePlan::from_nodes_with_users(
             CoreKind::KeliCoreRs,
             PathBuf::from("/srv/v2node/keli-core-rs.json"),
-            &[socks, http, shadowsocks, vmess, vless, trojan, anytls],
+            &[
+                socks,
+                http,
+                shadowsocks,
+                vmess,
+                vless,
+                trojan,
+                anytls,
+                naive,
+            ],
             &users,
         )
         .unwrap();
@@ -4331,6 +3539,24 @@ mod tests {
         assert_eq!(config["inbounds"][6]["users"][0]["uuid"], "anytls-password");
         assert_eq!(config["inbounds"][6]["users"][0]["speed_limit"], 4096);
         assert_eq!(config["inbounds"][6]["users"][0]["device_limit"], 5);
+        assert_eq!(config["inbounds"][7]["protocol"], "naive");
+        assert_eq!(config["inbounds"][7]["listen"], "127.0.0.1");
+        assert_eq!(config["inbounds"][7]["transport"]["network"], "tcp");
+        assert_eq!(config["inbounds"][7]["users"][0]["uuid"], "naive-password");
+        assert_eq!(config["inbounds"][7]["users"][0]["speed_limit"], 5120);
+        assert_eq!(config["inbounds"][7]["users"][0]["device_limit"], 6);
+        assert_eq!(
+            config["inbounds"][7]["tls"]["server_name"],
+            "naive.example.test"
+        );
+        assert_eq!(
+            config["inbounds"][7]["tls"]["cert_file"],
+            "/srv/v2node/naive.cer"
+        );
+        assert_eq!(
+            config["inbounds"][7]["tls"]["key_file"],
+            "/srv/v2node/naive.key"
+        );
         assert_eq!(config["outbounds"][0]["tag"], "direct");
         assert_eq!(config["stats"]["per_user"], true);
     }
@@ -5430,7 +4656,7 @@ mod tests {
     }
 
     #[test]
-    fn keli_core_rs_rejects_unimplemented_protocols() {
+    fn keli_core_rs_rejects_naive_without_tls() {
         let node = test_node("naive", 43, "");
         let plan = CorePlan::from_nodes(
             CoreKind::KeliCoreRs,
@@ -5441,9 +4667,7 @@ mod tests {
 
         let err = render_core_config(&plan).unwrap_err();
 
-        assert!(err
-            .message
-            .contains("only supports socks/http/shadowsocks/vmess/vless/trojan/anytls"));
+        assert!(err.message.contains("naive currently requires tls"));
     }
 
     #[test]
@@ -6388,65 +5612,6 @@ mod tests {
     }
 
     #[test]
-    fn renders_default_sniffing_for_inbounds() {
-        let node = test_node("vless", 28, "");
-        let plan = CorePlan::from_nodes(
-            CoreKind::Xray,
-            PathBuf::from("/srv/v2node/config.json"),
-            &[node],
-        )
-        .unwrap();
-
-        let config = render_core_config(&plan).unwrap();
-
-        assert_eq!(config["inbounds"][0]["sniffing"]["enabled"], true);
-        assert_eq!(
-            config["inbounds"][0]["sniffing"]["destOverride"],
-            json!(["http", "tls"])
-        );
-    }
-
-    #[test]
-    fn renders_go_default_dns_and_outbound() {
-        let node = test_node("vless", 30, "");
-        let plan = CorePlan::from_nodes(
-            CoreKind::Xray,
-            PathBuf::from("/srv/v2node/config.json"),
-            &[node],
-        )
-        .unwrap();
-
-        let config = render_core_config(&plan).unwrap();
-
-        assert_eq!(config["outbounds"][0]["tag"], "Default");
-        assert_eq!(
-            config["outbounds"][0]["settings"]["domainStrategy"],
-            "UseIPv4"
-        );
-        assert_eq!(config["dns"]["queryStrategy"], "UseIPv4");
-        assert_eq!(config["dns"]["servers"][0]["address"], "1.1.1.1");
-        assert_eq!(config["dns"]["servers"][1]["address"], "8.8.8.8");
-    }
-
-    #[test]
-    fn renders_stats_policy_for_user_traffic() {
-        let node = test_node("vless", 31, "");
-        let plan = CorePlan::from_nodes(
-            CoreKind::Xray,
-            PathBuf::from("/srv/v2node/config.json"),
-            &[node],
-        )
-        .unwrap();
-
-        let config = render_core_config(&plan).unwrap();
-
-        assert!(config["stats"].is_object());
-        assert_eq!(config["policy"]["levels"]["0"]["statsUserUplink"], true);
-        assert_eq!(config["policy"]["levels"]["0"]["statsUserDownlink"], true);
-        assert_eq!(config["policy"]["levels"]["0"]["connIdle"], 120);
-    }
-
-    #[test]
     fn resolve_node_listen_ip_preserves_ipv4_wildcard() {
         assert_eq!(resolve_node_listen_ip("0.0.0.0"), "0.0.0.0");
         assert_eq!(resolve_node_listen_ip(" "), "0.0.0.0");
@@ -6494,186 +5659,6 @@ mod tests {
     }
 
     #[test]
-    fn renders_xray_config_with_tls_certificate_metadata() {
-        let mut node = test_node("vless", 9, "0.0.0.0");
-        node.common.tls = 1;
-        node.security = Security::Tls;
-        node.common.tls_settings.server_name = "node.example.test".to_string();
-        node.common.tls_settings.cert_file = "/srv/v2node/node.cer".to_string();
-        node.common.tls_settings.key_file = "/srv/v2node/node.key".to_string();
-        node.common.cert_info.as_mut().unwrap().cert_domain = "node.example.test".to_string();
-        node.common.cert_info.as_mut().unwrap().cert_file = "/srv/v2node/node.cer".to_string();
-        node.common.cert_info.as_mut().unwrap().key_file = "/srv/v2node/node.key".to_string();
-        node.common.cert_info.as_mut().unwrap().reject_unknown_sni = true;
-        let plan = CorePlan::from_nodes(
-            CoreKind::Xray,
-            PathBuf::from("/srv/v2node/config.json"),
-            &[node],
-        )
-        .unwrap();
-
-        let config = render_core_config(&plan).unwrap();
-
-        assert_eq!(config["inbounds"][0]["listen"], "0.0.0.0");
-        assert_eq!(config["inbounds"][0]["streamSettings"]["security"], "tls");
-        assert_eq!(
-            config["inbounds"][0]["streamSettings"]["tlsSettings"]["certificates"][0]
-                ["certificateFile"],
-            "/srv/v2node/node.cer"
-        );
-        assert_eq!(
-            config["inbounds"][0]["streamSettings"]["tlsSettings"]["rejectUnknownSni"],
-            true
-        );
-    }
-
-    #[test]
-    fn renders_reality_dest_xver_and_mldsa_seed() {
-        let mut node = test_node("vless", 29, "");
-        node.common.tls = 2;
-        node.security = Security::Reality;
-        node.common.tls_settings.server_name = "reality.example.test".to_string();
-        node.common.tls_settings.server_port = "443".to_string();
-        node.common.tls_settings.private_key = "private-key".to_string();
-        node.common.tls_settings.short_id = "abcd".to_string();
-        node.common.tls_settings.mldsa65_seed = "seed-value".to_string();
-        node.common.tls_settings.xver = json!("1");
-        let plan = CorePlan::from_nodes(
-            CoreKind::Xray,
-            PathBuf::from("/srv/v2node/config.json"),
-            &[node],
-        )
-        .unwrap();
-
-        let config = render_core_config(&plan).unwrap();
-
-        assert_eq!(
-            config["inbounds"][0]["streamSettings"]["realitySettings"]["dest"],
-            "reality.example.test:443"
-        );
-        assert_eq!(
-            config["inbounds"][0]["streamSettings"]["realitySettings"]["xver"],
-            1
-        );
-        assert_eq!(
-            config["inbounds"][0]["streamSettings"]["realitySettings"]["mldsa65Seed"],
-            "seed-value"
-        );
-    }
-
-    #[test]
-    fn renders_reality_ipv6_dest_with_brackets() {
-        let mut node = test_node("vless", 30, "");
-        node.common.tls = 2;
-        node.security = Security::Reality;
-        node.common.tls_settings.dest = "2607:f358:1a:e::d4d9:5831".to_string();
-        node.common.tls_settings.server_name = "ipv6.example.test".to_string();
-        node.common.tls_settings.server_port = "443".to_string();
-        let plan = CorePlan::from_nodes(
-            CoreKind::Xray,
-            PathBuf::from("/srv/v2node/config.json"),
-            &[node],
-        )
-        .unwrap();
-
-        let config = render_core_config(&plan).unwrap();
-
-        assert_eq!(
-            config["inbounds"][0]["streamSettings"]["realitySettings"]["dest"],
-            "[2607:f358:1a:e::d4d9:5831]:443"
-        );
-    }
-
-    #[test]
-    fn renders_xray_clients_from_users_by_node_tag() {
-        let node = test_node("vless", 9, "0.0.0.0");
-        let tag = node.tag.clone();
-        let uuid = "11111111-1111-1111-1111-111111111111";
-        let mut users = std::collections::BTreeMap::new();
-        users.insert(
-            tag.clone(),
-            vec![UserInfo {
-                id: 12,
-                uuid: uuid.to_string(),
-                speed_limit: 0,
-                device_limit: 2,
-            }],
-        );
-        let plan = CorePlan::from_nodes_with_users(
-            CoreKind::Xray,
-            PathBuf::from("/srv/v2node/config.json"),
-            &[node],
-            &users,
-        )
-        .unwrap();
-
-        let config = render_core_config(&plan).unwrap();
-
-        assert_eq!(
-            config["inbounds"][0]["settings"]["clients"][0]["id"],
-            "11111111-1111-1111-1111-111111111111"
-        );
-        assert_eq!(
-            config["inbounds"][0]["settings"]["clients"][0]["email"],
-            format!("{}|{}", tag, uuid)
-        );
-    }
-
-    #[test]
-    fn renders_vless_flow_for_users() {
-        let mut node = test_node("vless", 13, "");
-        node.common.flow = "xtls-rprx-vision".to_string();
-        let tag = node.tag.clone();
-        let mut users = std::collections::BTreeMap::new();
-        users.insert(
-            tag,
-            vec![UserInfo {
-                id: 13,
-                uuid: "22222222-2222-2222-2222-222222222222".to_string(),
-                speed_limit: 0,
-                device_limit: 0,
-            }],
-        );
-        let plan = CorePlan::from_nodes_with_users(
-            CoreKind::Xray,
-            PathBuf::from("/srv/v2node/config.json"),
-            &[node],
-            &users,
-        )
-        .unwrap();
-
-        let config = render_core_config(&plan).unwrap();
-
-        assert_eq!(
-            config["inbounds"][0]["settings"]["clients"][0]["flow"],
-            "xtls-rprx-vision"
-        );
-    }
-
-    #[test]
-    fn renders_supported_vless_encryption_decryption() {
-        let mut node = test_node("vless", 15, "");
-        node.common.encryption = "mlkem768x25519plus".to_string();
-        node.common.encryption_settings.mode = "0rtt".to_string();
-        node.common.encryption_settings.ticket = "ticket-value".to_string();
-        node.common.encryption_settings.server_padding = "padding".to_string();
-        node.common.encryption_settings.private_key = "private-key".to_string();
-        let plan = CorePlan::from_nodes(
-            CoreKind::Xray,
-            PathBuf::from("/srv/v2node/config.json"),
-            &[node],
-        )
-        .unwrap();
-
-        let config = render_core_config(&plan).unwrap();
-
-        assert_eq!(
-            config["inbounds"][0]["settings"]["decryption"],
-            "mlkem768x25519plus.0rtt.ticket-value.padding.private-key"
-        );
-    }
-
-    #[test]
     fn rejects_unsupported_vless_encryption() {
         let mut node = test_node("vless", 16, "");
         node.common.encryption = "unsupported".to_string();
@@ -6686,470 +5671,11 @@ mod tests {
     }
 
     #[test]
-    fn renders_password_based_clients_for_trojan() {
-        let node = test_node("trojan", 3, "");
-        let tag = node.tag.clone();
-        let mut users = std::collections::BTreeMap::new();
-        users.insert(
-            tag,
-            vec![UserInfo {
-                id: 5,
-                uuid: "password-value".to_string(),
-                speed_limit: 0,
-                device_limit: 0,
-            }],
-        );
-        let plan = CorePlan::from_nodes_with_users(
-            CoreKind::Xray,
-            PathBuf::from("/srv/v2node/config.json"),
-            &[node],
-            &users,
-        )
-        .unwrap();
-
-        let config = render_core_config(&plan).unwrap();
-
-        assert_eq!(
-            config["inbounds"][0]["settings"]["clients"][0]["password"],
-            "password-value"
-        );
-    }
-
-    #[test]
-    fn renders_shadowsocks_cipher_method() {
-        let mut node = test_node("shadowsocks", 14, "");
-        node.common.cipher = "aes-128-gcm".to_string();
-        let tag = node.tag.clone();
-        let mut users = std::collections::BTreeMap::new();
-        users.insert(
-            tag,
-            vec![UserInfo {
-                id: 14,
-                uuid: "ss-password".to_string(),
-                speed_limit: 0,
-                device_limit: 0,
-            }],
-        );
-        let plan = CorePlan::from_nodes_with_users(
-            CoreKind::Xray,
-            PathBuf::from("/srv/v2node/config.json"),
-            &[node],
-            &users,
-        )
-        .unwrap();
-
-        let config = render_core_config(&plan).unwrap();
-
-        assert_eq!(config["inbounds"][0]["settings"]["method"], "aes-128-gcm");
-        assert_eq!(
-            config["inbounds"][0]["settings"]["clients"][0]["method"],
-            "aes-128-gcm"
-        );
-    }
-
-    #[test]
-    fn renders_shadowsocks_2022_server_key_and_user_key() {
-        let mut node = test_node("shadowsocks", 25, "");
-        node.common.cipher = "2022-blake3-aes-128-gcm".to_string();
-        node.common.server_key = "server-secret".to_string();
-        let tag = node.tag.clone();
-        let mut users = std::collections::BTreeMap::new();
-        users.insert(
-            tag,
-            vec![UserInfo {
-                id: 25,
-                uuid: "0123456789abcdef0123456789abcdef".to_string(),
-                speed_limit: 0,
-                device_limit: 0,
-            }],
-        );
-        let plan = CorePlan::from_nodes_with_users(
-            CoreKind::Xray,
-            PathBuf::from("/srv/v2node/config.json"),
-            &[node],
-            &users,
-        )
-        .unwrap();
-
-        let config = render_core_config(&plan).unwrap();
-
-        assert_eq!(
-            config["inbounds"][0]["settings"]["method"],
-            "2022-blake3-aes-128-gcm"
-        );
-        assert_eq!(
-            config["inbounds"][0]["settings"]["password"],
-            "server-secret"
-        );
-        assert_eq!(
-            config["inbounds"][0]["settings"]["clients"][0]["password"],
-            "MDEyMzQ1Njc4OWFiY2RlZg=="
-        );
-        assert!(config["inbounds"][0]["settings"]["clients"][0]["method"].is_null());
-    }
-
-    #[test]
-    fn renders_shadowsocks_http_obfs_as_tcp_header() {
-        let mut node = test_node("shadowsocks", 27, "");
-        node.common.network_settings = json!({
-            "path": "/ss",
-            "Host": "edge.example.test"
-        });
-        let plan = CorePlan::from_nodes(
-            CoreKind::Xray,
-            PathBuf::from("/srv/v2node/config.json"),
-            &[node],
-        )
-        .unwrap();
-
-        let config = render_core_config(&plan).unwrap();
-
-        assert_eq!(config["inbounds"][0]["settings"]["network"], "tcp");
-        assert_eq!(config["inbounds"][0]["streamSettings"]["network"], "tcp");
-        assert_eq!(
-            config["inbounds"][0]["streamSettings"]["tcpSettings"]["header"]["type"],
-            "http"
-        );
-        assert_eq!(
-            config["inbounds"][0]["streamSettings"]["tcpSettings"]["header"]["request"]["path"][0],
-            "/ss"
-        );
-        assert_eq!(
-            config["inbounds"][0]["streamSettings"]["tcpSettings"]["header"]["request"]["headers"]
-                ["Host"][0],
-            "edge.example.test"
-        );
-    }
-
-    #[test]
-    fn renders_socks_accounts_from_users() {
-        let node = test_node("socks", 20, "");
-        let tag = node.tag.clone();
-        let mut users = std::collections::BTreeMap::new();
-        users.insert(
-            tag,
-            vec![UserInfo {
-                id: 20,
-                uuid: "socks-secret".to_string(),
-                speed_limit: 0,
-                device_limit: 0,
-            }],
-        );
-        let plan = CorePlan::from_nodes_with_users(
-            CoreKind::Xray,
-            PathBuf::from("/srv/v2node/config.json"),
-            &[node],
-            &users,
-        )
-        .unwrap();
-
-        let config = render_core_config(&plan).unwrap();
-
-        assert_eq!(config["inbounds"][0]["settings"]["auth"], "password");
-        assert_eq!(
-            config["inbounds"][0]["settings"]["accounts"][0]["user"],
-            "socks-secret"
-        );
-        assert_eq!(
-            config["inbounds"][0]["settings"]["accounts"][0]["pass"],
-            "socks-secret"
-        );
-        assert_eq!(config["inbounds"][0]["settings"]["udp"], true);
-    }
-
-    #[test]
-    fn renders_http_accounts_from_users() {
-        let node = test_node("http", 21, "");
-        let tag = node.tag.clone();
-        let mut users = std::collections::BTreeMap::new();
-        users.insert(
-            tag,
-            vec![UserInfo {
-                id: 21,
-                uuid: "http-secret".to_string(),
-                speed_limit: 0,
-                device_limit: 0,
-            }],
-        );
-        let plan = CorePlan::from_nodes_with_users(
-            CoreKind::Xray,
-            PathBuf::from("/srv/v2node/config.json"),
-            &[node],
-            &users,
-        )
-        .unwrap();
-
-        let config = render_core_config(&plan).unwrap();
-
-        assert_eq!(
-            config["inbounds"][0]["settings"]["accounts"][0]["user"],
-            "http-secret"
-        );
-        assert_eq!(
-            config["inbounds"][0]["settings"]["accounts"][0]["pass"],
-            "http-secret"
-        );
-    }
-
-    #[test]
-    fn renders_anytls_padding_and_clients() {
-        let mut node = test_node("anytls", 22, "");
-        node.common.padding_scheme = vec!["stop=8".to_string(), " ".to_string()];
-        let tag = node.tag.clone();
-        let mut users = std::collections::BTreeMap::new();
-        users.insert(
-            tag,
-            vec![UserInfo {
-                id: 22,
-                uuid: "anytls-password".to_string(),
-                speed_limit: 0,
-                device_limit: 0,
-            }],
-        );
-        let plan = CorePlan::from_nodes_with_users(
-            CoreKind::Xray,
-            PathBuf::from("/srv/v2node/config.json"),
-            &[node],
-            &users,
-        )
-        .unwrap();
-
-        let config = render_core_config(&plan).unwrap();
-
-        assert_eq!(
-            config["inbounds"][0]["settings"]["clients"][0]["password"],
-            "anytls-password"
-        );
-        assert_eq!(
-            config["inbounds"][0]["settings"]["paddingScheme"][0],
-            "stop=8"
-        );
-    }
-
-    #[test]
-    fn renders_hysteria2_bandwidth_and_obfs_settings() {
-        let mut node = test_node("hysteria2", 23, "");
-        node.common.up_mbps = 100;
-        node.common.down_mbps = 200;
-        node.common.obfs = "salamander".to_string();
-        node.common.obfs_password = "obfs-secret".to_string();
-        let tag = node.tag.clone();
-        let mut users = std::collections::BTreeMap::new();
-        users.insert(
-            tag,
-            vec![UserInfo {
-                id: 23,
-                uuid: "hy2-password".to_string(),
-                speed_limit: 0,
-                device_limit: 0,
-            }],
-        );
-        let plan = CorePlan::from_nodes_with_users(
-            CoreKind::Xray,
-            PathBuf::from("/srv/v2node/config.json"),
-            &[node],
-            &users,
-        )
-        .unwrap();
-
-        let config = render_core_config(&plan).unwrap();
-
-        assert_eq!(config["inbounds"][0]["settings"]["version"], 2);
-        assert_eq!(
-            config["inbounds"][0]["settings"]["clients"][0]["password"],
-            "hy2-password"
-        );
-        assert_eq!(
-            config["inbounds"][0]["streamSettings"]["hysteriaSettings"]["finalMask"]["quicParams"]
-                ["brutalUp"],
-            "100mbps"
-        );
-        assert_eq!(
-            config["inbounds"][0]["streamSettings"]["hysteriaSettings"]["finalMask"]["udp"][0]
-                ["settings"]["password"],
-            "obfs-secret"
-        );
-    }
-
-    #[test]
-    fn renders_tuic_congestion_and_zero_rtt_settings() {
-        let mut node = test_node("tuic", 24, "");
-        node.common.congestion_control = "bbr".to_string();
-        node.common.zero_rtt_handshake = true;
-        let tag = node.tag.clone();
-        let mut users = std::collections::BTreeMap::new();
-        users.insert(
-            tag,
-            vec![UserInfo {
-                id: 24,
-                uuid: "tuic-password".to_string(),
-                speed_limit: 0,
-                device_limit: 0,
-            }],
-        );
-        let plan = CorePlan::from_nodes_with_users(
-            CoreKind::Xray,
-            PathBuf::from("/srv/v2node/config.json"),
-            &[node],
-            &users,
-        )
-        .unwrap();
-
-        let config = render_core_config(&plan).unwrap();
-
-        assert_eq!(
-            config["inbounds"][0]["settings"]["congestionControl"],
-            "bbr"
-        );
-        assert_eq!(config["inbounds"][0]["settings"]["zeroRttHandshake"], true);
-        assert_eq!(
-            config["inbounds"][0]["settings"]["clients"][0]["password"],
-            "tuic-password"
-        );
-    }
-
-    #[test]
-    fn renders_stream_network_settings_for_websocket() {
-        let mut node = test_node("vless", 11, "");
-        node.common.network = "ws".to_string();
-        node.common.network_settings = json!({
-            "path": "/ws",
-            "headers": {
-                "Host": "node.example.test"
-            }
-        });
-        let plan = CorePlan::from_nodes(
-            CoreKind::Xray,
-            PathBuf::from("/srv/v2node/config.json"),
-            &[node],
-        )
-        .unwrap();
-
-        let config = render_core_config(&plan).unwrap();
-
-        assert_eq!(
-            config["inbounds"][0]["streamSettings"]["wsSettings"]["path"],
-            "/ws"
-        );
-    }
-
-    #[test]
-    fn renders_proxy_protocol_socket_option() {
-        let mut node = test_node("vless", 26, "");
-        node.common.network = "ws".to_string();
-        node.common.network_settings = json!({
-            "path": "/ws",
-            "acceptProxyProtocol": true
-        });
-        let plan = CorePlan::from_nodes(
-            CoreKind::Xray,
-            PathBuf::from("/srv/v2node/config.json"),
-            &[node],
-        )
-        .unwrap();
-
-        let config = render_core_config(&plan).unwrap();
-
-        assert_eq!(
-            config["inbounds"][0]["streamSettings"]["sockopt"]["acceptProxyProtocol"],
-            true
-        );
-    }
-
-    #[test]
-    fn renders_block_route_rules() {
-        let mut node = test_node("vless", 17, "");
-        node.common.routes = vec![Route {
-            id: 1,
-            action: "block".to_string(),
-            match_rules: vec!["domain:example.com".to_string()],
-            action_value: None,
-        }];
-        let tag = node.tag.clone();
-        let plan = CorePlan::from_nodes(
-            CoreKind::Xray,
-            PathBuf::from("/srv/v2node/config.json"),
-            &[node],
-        )
-        .unwrap();
-
-        let config = render_core_config(&plan).unwrap();
-
-        assert_eq!(config["outbounds"][1]["tag"], "block");
-        assert_eq!(config["routing"]["rules"][1]["inboundTag"], tag);
-        assert_eq!(
-            config["routing"]["rules"][1]["domain"][0],
-            "domain:example.com"
-        );
-        assert_eq!(config["routing"]["rules"][1]["outboundTag"], "block");
-    }
-
-    #[test]
-    fn renders_custom_route_outbound_once() {
-        let mut node = test_node("vless", 18, "");
-        node.common.routes = vec![
-            Route {
-                id: 1,
-                action: "default_out".to_string(),
-                match_rules: Vec::new(),
-                action_value: Some(r#"{"tag":"warp","protocol":"freedom"}"#.to_string()),
-            },
-            Route {
-                id: 2,
-                action: "route_ip".to_string(),
-                match_rules: vec!["geoip:private".to_string()],
-                action_value: Some(r#"{"tag":"warp","protocol":"freedom"}"#.to_string()),
-            },
-        ];
-        let plan = CorePlan::from_nodes(
-            CoreKind::Xray,
-            PathBuf::from("/srv/v2node/config.json"),
-            &[node],
-        )
-        .unwrap();
-
-        let config = render_core_config(&plan).unwrap();
-        let outbounds = config["outbounds"].as_array().unwrap();
-
-        assert_eq!(
-            outbounds
-                .iter()
-                .filter(|outbound| outbound["tag"] == "warp")
-                .count(),
-            1
-        );
-        assert_eq!(config["routing"]["rules"][1]["outboundTag"], "warp");
-        assert_eq!(config["routing"]["rules"][2]["ip"][0], "geoip:private");
-    }
-
-    #[test]
-    fn renders_dns_route_servers() {
-        let mut node = test_node("vless", 19, "");
-        node.common.routes = vec![Route {
-            id: 1,
-            action: "dns".to_string(),
-            match_rules: vec!["geosite:openai".to_string()],
-            action_value: Some("1.1.1.1".to_string()),
-        }];
-        let plan = CorePlan::from_nodes(
-            CoreKind::Xray,
-            PathBuf::from("/srv/v2node/config.json"),
-            &[node],
-        )
-        .unwrap();
-
-        let config = render_core_config(&plan).unwrap();
-
-        assert_eq!(config["dns"]["servers"][2]["address"], "1.1.1.1");
-        assert_eq!(config["dns"]["servers"][2]["domains"][0], "geosite:openai");
-    }
-
-    #[test]
     fn writes_core_config_atomically_and_detects_unchanged_content() {
         let dir = temp_test_dir("core-config-write");
         let path = dir.join("runtime").join("config.json");
         let node = test_node("vless", 10, "");
-        let plan = CorePlan::from_nodes(CoreKind::Xray, path.clone(), &[node]).unwrap();
+        let plan = CorePlan::from_nodes(CoreKind::KeliCoreRs, path.clone(), &[node]).unwrap();
 
         let first = write_core_config(&plan).unwrap();
         let second = write_core_config(&plan).unwrap();

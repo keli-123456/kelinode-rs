@@ -3,7 +3,7 @@ use std::path::PathBuf;
 
 use crate::config::{AgentConfig, AppConfig, NodeConfig, ResolvedConfig, SubscriptionProxyConfig};
 use crate::core::{
-    core_kind_from_name, split_core_plans_for_nodes_with_kind, CoreKind, CorePlan, CorePlanBundle,
+    core_kind_from_name, split_core_plans_for_nodes_with_kind, CorePlan, CorePlanBundle,
     InboundPlan,
 };
 use crate::logging;
@@ -37,7 +37,6 @@ pub struct RuntimeBootstrapPlan {
     pub node_infos: Vec<NodeInfo>,
     pub node_failures: Vec<NodeFailure>,
     pub core_plan: Option<CorePlan>,
-    pub sidecar_core_plans: Vec<CorePlan>,
     pub realtime_options: Vec<RealtimeOptions>,
     pub hy2_port_forward: HysteriaPortForwardStatus,
     pub subscription_proxy_only: bool,
@@ -165,8 +164,7 @@ pub fn build_runtime_bootstrap_plan_with_users(
         node_count: node_infos.len(),
         node_infos,
         node_failures,
-        core_plan: core_bundle.xray,
-        sidecar_core_plans: core_bundle.sidecars,
+        core_plan: core_bundle.core,
         realtime_options,
         hy2_port_forward: new_hysteria_port_forward_status(&hy2_rules, &hy2_errors, false),
         subscription_proxy_only,
@@ -174,10 +172,8 @@ pub fn build_runtime_bootstrap_plan_with_users(
 }
 
 fn apply_kernel_dns_options(resolved: &ResolvedConfig, bundle: &mut CorePlanBundle) {
-    if let Some(plan) = bundle.xray.as_mut() {
-        if matches!(plan.kind, CoreKind::KeliCoreRs) {
-            plan.apply_kernel_dns_options(&resolved.kernel);
-        }
+    if let Some(plan) = bundle.core.as_mut() {
+        plan.apply_kernel_dns_options(&resolved.kernel);
     }
 }
 
@@ -228,12 +224,9 @@ fn filter_conflicting_runtime_listeners(
     node_failures: Vec<NodeFailure>,
     core_bundle: &mut CorePlanBundle,
 ) -> Result<(Vec<NodeInfo>, Vec<NodeFailure>), String> {
-    let Some(core_plan) = core_bundle.xray.as_mut() else {
+    let Some(core_plan) = core_bundle.core.as_mut() else {
         return Ok((node_infos, node_failures));
     };
-    if core_plan.kind != CoreKind::KeliCoreRs {
-        return Ok((node_infos, node_failures));
-    }
 
     let mut seen = Vec::<RuntimeListenerSpec>::new();
     let mut skipped_tags = BTreeSet::new();
@@ -298,7 +291,7 @@ fn filter_conflicting_runtime_listeners(
         .listen_tags
         .retain(|tag| !skipped_tags.contains(tag));
     if core_plan.inbounds.is_empty() {
-        core_bundle.xray = None;
+        core_bundle.core = None;
     }
     let node_infos = node_infos
         .into_iter()
@@ -343,7 +336,15 @@ fn runtime_listener_specs(inbound: &InboundPlan) -> Vec<RuntimeListenerSpec> {
 fn inbound_binds_tcp(inbound: &InboundPlan) -> bool {
     matches!(
         inbound.protocol.as_str(),
-        "socks" | "http" | "vless" | "vmess" | "trojan" | "shadowsocks" | "anytls" | "mieru"
+        "socks"
+            | "http"
+            | "vless"
+            | "vmess"
+            | "trojan"
+            | "shadowsocks"
+            | "anytls"
+            | "mieru"
+            | "naive"
     )
 }
 
@@ -472,7 +473,7 @@ mod tests {
     };
     use crate::core::CoreKind;
     use crate::machine::MachineResolveSummary;
-    use crate::panel::types::{CommonNode, NodeInfo, UserInfo};
+    use crate::panel::types::{CertInfo, CommonNode, NodeInfo, Security, UserInfo};
 
     use super::{
         apply_machine_summary, build_runtime_bootstrap_plan,
@@ -584,7 +585,18 @@ mod tests {
                 ..NodeConfig::default()
             }],
         };
-        let node = test_node("hysteria2", 7, 443, "30000-30002");
+        let mut node = test_node("hysteria2", 7, 443, "30000-30002");
+        node.security = Security::Tls;
+        node.common.tls = 1;
+        node.common.cert_info = Some(CertInfo {
+            cert_mode: "file".to_string(),
+            cert_file: "/tmp/hy2.crt".to_string(),
+            key_file: "/tmp/hy2.key".to_string(),
+            cert_domain: "hy2.example.test".to_string(),
+            dns_env: Default::default(),
+            provider: String::new(),
+            reject_unknown_sni: false,
+        });
 
         let plan = build_runtime_bootstrap_plan(resolved, vec![node], Vec::new()).unwrap();
 
@@ -797,7 +809,7 @@ mod tests {
     }
 
     #[test]
-    fn builds_runtime_plan_with_sidecar_protocols() {
+    fn builds_runtime_plan_with_native_protocols() {
         let resolved = ResolvedConfig {
             kernel: Default::default(),
             realtime: Default::default(),
@@ -824,16 +836,29 @@ mod tests {
             test_node("vless", 7, 443, ""),
             test_node("mieru", 8, 8443, ""),
         ];
+        let mut users = BTreeMap::new();
+        users.insert(
+            nodes[1].tag.clone(),
+            vec![UserInfo {
+                id: 8,
+                uuid: "mieru-secret".to_string(),
+                speed_limit: 0,
+                device_limit: 0,
+            }],
+        );
 
-        let plan = build_runtime_bootstrap_plan(resolved, nodes, Vec::new()).unwrap();
+        let plan =
+            build_runtime_bootstrap_plan_with_users(resolved, nodes, Vec::new(), &users).unwrap();
 
-        assert_eq!(plan.core_plan.as_ref().unwrap().inbounds.len(), 1);
-        assert_eq!(plan.sidecar_core_plans.len(), 1);
-        assert_eq!(plan.sidecar_core_plans[0].inbounds[0].protocol, "mieru");
+        let core = plan.core_plan.as_ref().unwrap();
+        assert_eq!(core.kind, CoreKind::KeliCoreRs);
+        assert_eq!(core.inbounds.len(), 2);
+        assert_eq!(core.inbounds[0].protocol, "vless");
+        assert_eq!(core.inbounds[1].protocol, "mieru");
     }
 
     #[test]
-    fn sidecar_only_runtime_plan_does_not_fake_xray_core() {
+    fn native_only_runtime_plan_uses_keli_core_rs() {
         let resolved = ResolvedConfig {
             kernel: Default::default(),
             realtime: Default::default(),
@@ -849,13 +874,37 @@ mod tests {
                 ..NodeConfig::default()
             }],
         };
-        let nodes = vec![test_node("naive", 9, 9443, "")];
+        let mut naive = test_node("naive", 9, 9443, "");
+        naive.security = Security::Tls;
+        naive.common.tls = 1;
+        naive.common.cert_info = Some(CertInfo {
+            cert_mode: "file".to_string(),
+            cert_file: "/tmp/naive.crt".to_string(),
+            key_file: "/tmp/naive.key".to_string(),
+            cert_domain: "naive.example.test".to_string(),
+            dns_env: Default::default(),
+            provider: String::new(),
+            reject_unknown_sni: false,
+        });
+        let mut users = BTreeMap::new();
+        users.insert(
+            naive.tag.clone(),
+            vec![UserInfo {
+                id: 9,
+                uuid: "naive-password".to_string(),
+                speed_limit: 0,
+                device_limit: 0,
+            }],
+        );
 
-        let plan = build_runtime_bootstrap_plan(resolved, nodes, Vec::new()).unwrap();
+        let plan =
+            build_runtime_bootstrap_plan_with_users(resolved, vec![naive], Vec::new(), &users)
+                .unwrap();
 
-        assert!(plan.core_plan.is_none());
-        assert_eq!(plan.sidecar_core_plans.len(), 1);
-        assert_eq!(plan.sidecar_core_plans[0].inbounds[0].protocol, "naive");
+        let core = plan.core_plan.as_ref().unwrap();
+        assert_eq!(core.kind, CoreKind::KeliCoreRs);
+        assert_eq!(core.inbounds.len(), 1);
+        assert_eq!(core.inbounds[0].protocol, "naive");
     }
 
     #[test]
@@ -891,7 +940,7 @@ mod tests {
         };
         let nodes = vec![
             test_node_for_url("https://panel-a.example.test", "vless", 7, 443, ""),
-            test_node_for_url("https://panel-b.example.test", "vless", 7, 443, ""),
+            test_node_for_url("https://panel-b.example.test", "vless", 7, 444, ""),
         ];
 
         let plan = build_runtime_bootstrap_plan(resolved, nodes, Vec::new()).unwrap();

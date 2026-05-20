@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpListener, UdpSocket};
 use std::sync::{Mutex, OnceLock};
 
-use crate::config::{NodeConfig, SidecarProcessConfig};
+use crate::config::NodeConfig;
 use crate::core::{
     render_core_config, write_core_config, CoreConfigWriteResult, CoreKind, CorePlan,
 };
@@ -18,8 +18,7 @@ use crate::port_forward::{
     PortForwardExecutor,
 };
 use crate::process::{
-    core_process_spec, keli_core_rs_control_client, sidecar_process_spec, ProcessSpec,
-    ProcessStatus, ProcessSupervisor,
+    core_process_spec, keli_core_rs_control_client, ProcessSpec, ProcessStatus, ProcessSupervisor,
 };
 use crate::runtime::{
     node_config_for_info as runtime_node_config_for_info, rebuild_runtime_plan_with_users,
@@ -32,7 +31,6 @@ use serde_json::Value;
 pub struct RuntimeControlOptions {
     pub machine_id: u32,
     pub core_command: Option<String>,
-    pub sidecar_processes: BTreeMap<String, SidecarProcessConfig>,
     pub start_core: bool,
     pub hot_apply_keli_core_rs: bool,
     pub keli_core_rs_user_delta_applied: bool,
@@ -43,9 +41,7 @@ pub struct RuntimeControlOptions {
 #[derive(Clone, Debug, PartialEq)]
 pub struct RuntimeApplyResult {
     pub core_config: Option<CoreConfigWriteResult>,
-    pub sidecar_configs: Vec<CoreConfigWriteResult>,
     pub core_process: Option<ProcessStatus>,
-    pub sidecar_processes: Vec<ProcessStatus>,
     pub hy2_port_forward: HysteriaPortForwardStatus,
     pub machine_status: MachineStatusPayload,
 }
@@ -94,9 +90,7 @@ where
     F: PortForwardExecutor,
 {
     let mut core_config = None;
-    let mut sidecar_configs = Vec::new();
     let mut core_process = None;
-    let mut sidecar_processes = Vec::new();
     let mut report_plan = plan.clone();
 
     if options.start_core {
@@ -105,7 +99,7 @@ where
 
     if let Some(core_plan) = &plan.core_plan {
         let mut core_plan = core_plan.clone();
-        if options.start_core && core_plan.kind == CoreKind::KeliCoreRs {
+        if options.start_core {
             filter_unavailable_keli_core_rs_listeners(
                 &mut core_plan,
                 &mut report_plan,
@@ -130,25 +124,6 @@ where
         core_config = Some(write_result);
     }
 
-    for sidecar_plan in &plan.sidecar_core_plans {
-        let write_result = write_core_config(sidecar_plan).map_err(|err| err.message)?;
-        if options.start_core {
-            if let Some(config) = configured_sidecar_process(sidecar_plan, &options) {
-                let spec =
-                    sidecar_process_spec(sidecar_plan, &config.command, &config.args, &config.env)
-                        .map_err(|err| err.message)?;
-                let status = if write_result.changed {
-                    process_supervisor.reload(&spec)
-                } else {
-                    process_supervisor.start(&spec)
-                }
-                .map_err(|err| err.message)?;
-                sidecar_processes.push(status);
-            }
-        }
-        sidecar_configs.push(write_result);
-    }
-
     let hy2_port_forward = if options.repair_port_forward {
         repair_hysteria_port_forward(&report_plan.node_infos, port_forward_executor)
     } else {
@@ -165,16 +140,11 @@ where
     if health.core.is_none() {
         health.core = core_process.clone();
     }
-    if health.sidecars.is_empty() {
-        health.sidecars = sidecar_processes.clone();
-    }
     let machine_status = build_machine_status_payload(options.machine_id, &report_plan, health);
 
     Ok(RuntimeApplyResult {
         core_config,
-        sidecar_configs,
         core_process,
-        sidecar_processes,
         hy2_port_forward,
         machine_status,
     })
@@ -483,7 +453,7 @@ where
     let spec =
         core_process_spec(core_plan, options.core_command.as_deref()).map_err(|err| err.message)?;
     if write_result.changed {
-        if options.keli_core_rs_user_delta_applied && core_plan.kind == CoreKind::KeliCoreRs {
+        if options.keli_core_rs_user_delta_applied {
             if let Ok(mut status) = process_supervisor.status(&spec.name) {
                 if status.is_running() {
                     status.message = "kept running after keli-core-rs user delta apply".to_string();
@@ -522,10 +492,6 @@ fn try_hot_apply_keli_core_rs_config<P>(
 where
     P: ProcessSupervisor,
 {
-    if core_plan.kind != CoreKind::KeliCoreRs {
-        return Ok(None);
-    }
-
     let current = process_supervisor
         .status(&spec.name)
         .map_err(|err| HotApplyError::fallback(err.message))?;
@@ -572,7 +538,7 @@ impl HotApplyError {
 fn stop_unmanaged_core_processes<P>(
     plan: &RuntimeBootstrapPlan,
     process_supervisor: &mut P,
-    options: &RuntimeControlOptions,
+    _options: &RuntimeControlOptions,
 ) -> Result<(), String>
 where
     P: ProcessSupervisor,
@@ -588,39 +554,14 @@ where
         stop_if_running(process_supervisor, name)?;
     }
 
-    let active_sidecars = plan
-        .sidecar_core_plans
-        .iter()
-        .filter_map(|sidecar_plan| match &sidecar_plan.kind {
-            CoreKind::Sidecar(name) => Some(format!("core:sidecar-{name}")),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    for name in options.sidecar_processes.keys() {
-        let process_name = format!("core:sidecar-{name}");
-        if active_sidecars.iter().any(|active| active == &process_name) {
-            continue;
-        }
-        stop_if_running(process_supervisor, &process_name)?;
-    }
-
     Ok(())
 }
 
-const PRIMARY_CORE_PROCESS_NAMES: &[&str] = &[
-    "core:xray",
-    "core:sing-box",
-    "core:mihomo",
-    "core:keli-core-rs",
-];
+const PRIMARY_CORE_PROCESS_NAMES: &[&str] = &["core:keli-core-rs"];
 
 fn primary_core_process_name(kind: &CoreKind) -> Option<&'static str> {
     match kind {
-        CoreKind::Xray => Some("core:xray"),
-        CoreKind::SingBox => Some("core:sing-box"),
-        CoreKind::Mihomo => Some("core:mihomo"),
         CoreKind::KeliCoreRs => Some("core:keli-core-rs"),
-        CoreKind::Sidecar(_) => None,
     }
 }
 
@@ -633,17 +574,6 @@ where
         process_supervisor.stop(name).map_err(|err| err.message)?;
     }
     Ok(())
-}
-
-fn configured_sidecar_process<'a>(
-    plan: &CorePlan,
-    options: &'a RuntimeControlOptions,
-) -> Option<&'a SidecarProcessConfig> {
-    let CoreKind::Sidecar(name) = &plan.kind else {
-        return None;
-    };
-
-    options.sidecar_processes.get(name)
 }
 
 pub async fn report_runtime_apply_result(
@@ -843,7 +773,7 @@ mod tests {
 
     use serde_json::json;
 
-    use crate::config::{NodeConfig, ResolvedConfig, ResolvedMachineConfig, SidecarProcessConfig};
+    use crate::config::{NodeConfig, ResolvedConfig, ResolvedMachineConfig};
     use crate::panel::client::{PanelClient, PanelClientOptions};
     use crate::panel::types::{CommonNode, NodeInfo, UserInfo};
     use crate::port_forward::{
@@ -1342,156 +1272,6 @@ mod tests {
         assert!(result.core_config.is_none());
         assert!(result.core_process.is_none());
         assert_eq!(process.stops, vec!["core:keli-core-rs"]);
-    }
-
-    #[test]
-    fn applies_sidecar_configs_without_starting_xray_core() {
-        let dir = temp_test_dir("runtime-sidecar-config");
-        let mut resolved = ResolvedConfig {
-            kernel: Default::default(),
-            realtime: Default::default(),
-            machine: ResolvedMachineConfig {
-                enabled: true,
-                continue_on_error: true,
-                profiles: Vec::new(),
-            },
-            agent: Default::default(),
-            nodes: vec![NodeConfig {
-                url: "https://panel.example.test".to_string(),
-                token: "token".to_string(),
-                node_id: 22,
-                machine_id: 3,
-                ..NodeConfig::default()
-            }],
-        };
-        resolved.kernel.config_dir = dir.join("v2node").display().to_string();
-        let node = test_node("mieru", 22);
-        let tag = node.tag.clone();
-        let mut users = BTreeMap::new();
-        users.insert(
-            tag,
-            vec![UserInfo {
-                id: 22,
-                uuid: "mieru-secret".to_string(),
-                speed_limit: 0,
-                device_limit: 0,
-            }],
-        );
-        let plan =
-            build_runtime_bootstrap_plan_with_users(resolved, vec![node], Vec::new(), &users)
-                .unwrap();
-        let mut process = MemoryProcessSupervisor::default();
-        let mut port_forward = FakePortForwardExecutor::default();
-
-        let result = apply_runtime_plan(
-            &plan,
-            &mut process,
-            &mut port_forward,
-            RuntimeControlOptions {
-                machine_id: 3,
-                start_core: true,
-                ..RuntimeControlOptions::default()
-            },
-        )
-        .unwrap();
-        let saved = fs::read_to_string(dir.join("v2node").join("sidecar-mieru-22.json")).unwrap();
-
-        assert!(result.core_config.is_none());
-        assert_eq!(result.sidecar_configs.len(), 1);
-        assert!(result.sidecar_configs[0].changed);
-        assert!(result.sidecar_processes.is_empty());
-        assert!(process.starts.is_empty());
-        assert!(saved.contains("mieru-secret"));
-
-        let _ = fs::remove_dir_all(dir);
-    }
-
-    #[test]
-    fn applies_configured_sidecar_processes() {
-        let dir = temp_test_dir("runtime-sidecar-process");
-        let mut resolved = ResolvedConfig {
-            kernel: Default::default(),
-            realtime: Default::default(),
-            machine: ResolvedMachineConfig {
-                enabled: true,
-                continue_on_error: true,
-                profiles: Vec::new(),
-            },
-            agent: Default::default(),
-            nodes: vec![NodeConfig {
-                url: "https://panel.example.test".to_string(),
-                token: "token".to_string(),
-                node_id: 23,
-                machine_id: 3,
-                ..NodeConfig::default()
-            }],
-        };
-        resolved.kernel.config_dir = dir.join("v2node").display().to_string();
-        let node = test_node("mieru", 23);
-        let plan = build_runtime_bootstrap_plan(resolved, vec![node], Vec::new()).unwrap();
-        let mut process = MemoryProcessSupervisor::default();
-        let mut port_forward = FakePortForwardExecutor::default();
-        let mut sidecar_processes = BTreeMap::new();
-        sidecar_processes.insert(
-            "mieru".to_string(),
-            SidecarProcessConfig {
-                command: "/usr/local/bin/mita".to_string(),
-                args: vec![
-                    "run".to_string(),
-                    "--config".to_string(),
-                    "{config}".to_string(),
-                ],
-                env: BTreeMap::from([(
-                    "MITA_CONFIG_JSON_FILE".to_string(),
-                    "{config}".to_string(),
-                )]),
-            },
-        );
-
-        let result = apply_runtime_plan(
-            &plan,
-            &mut process,
-            &mut port_forward,
-            RuntimeControlOptions {
-                machine_id: 3,
-                start_core: true,
-                sidecar_processes,
-                ..RuntimeControlOptions::default()
-            },
-        )
-        .unwrap();
-
-        assert_eq!(result.sidecar_processes.len(), 1);
-        assert_eq!(
-            result.machine_status.status["core"]["sidecar_statuses"][0]["state"],
-            json!("running")
-        );
-        assert_eq!(
-            result.machine_status.status["core"]["sidecar_statuses"][0]["name"],
-            json!("core:sidecar-mieru")
-        );
-        assert_eq!(process.starts.len(), 1);
-        assert_eq!(process.starts[0].name, "core:sidecar-mieru");
-        assert_eq!(
-            process.starts[0].args,
-            vec![
-                "run".to_string(),
-                "--config".to_string(),
-                dir.join("v2node")
-                    .join("sidecar-mieru-23.json")
-                    .display()
-                    .to_string()
-            ]
-        );
-        assert_eq!(
-            process.starts[0].env["MITA_CONFIG_JSON_FILE"],
-            dir.join("v2node")
-                .join("sidecar-mieru-23.json")
-                .display()
-                .to_string()
-        );
-
-        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]

@@ -377,52 +377,9 @@ pub fn core_process_spec(
     })
 }
 
-pub fn sidecar_process_spec(
-    plan: &CorePlan,
-    command: &str,
-    args: &[String],
-    env: &BTreeMap<String, String>,
-) -> Result<ProcessSpec, ProcessError> {
-    let CoreKind::Sidecar(_) = &plan.kind else {
-        return Err(ProcessError::new(
-            "sidecar process spec requires a sidecar core plan",
-        ));
-    };
-    let command = command.trim();
-    if command.is_empty() {
-        return Err(ProcessError::new("sidecar command is not configured"));
-    }
-    let config_path = absolute_process_path(&plan.config_path);
-    let config = config_path.display().to_string();
-    Ok(ProcessSpec {
-        name: format!("core:{}", core_kind_label(&plan.kind)),
-        command: command.to_string(),
-        args: args
-            .iter()
-            .map(|arg| arg.replace("{config}", &config))
-            .collect(),
-        working_dir: config_path.parent().map(|path| path.to_path_buf()),
-        env: env
-            .iter()
-            .filter_map(|(key, value)| {
-                let key = key.trim();
-                if key.is_empty() {
-                    None
-                } else {
-                    Some((key.to_string(), value.replace("{config}", &config)))
-                }
-            })
-            .collect(),
-    })
-}
-
 fn default_core_command(kind: &CoreKind) -> Option<String> {
     match kind {
-        CoreKind::Xray => Some("xray".to_string()),
-        CoreKind::SingBox => Some("sing-box".to_string()),
-        CoreKind::Mihomo => Some("mihomo".to_string()),
         CoreKind::KeliCoreRs => Some(default_keli_core_rs_command()),
-        CoreKind::Sidecar(_) => None,
     }
 }
 
@@ -490,30 +447,20 @@ fn embedded_core_control_addr(spec: &ProcessSpec) -> Result<String, ProcessError
 fn core_process_args(kind: &CoreKind, config_path: &PathBuf) -> Result<Vec<String>, ProcessError> {
     let config = config_path.display().to_string();
     match kind {
-        CoreKind::Xray => Ok(vec!["run".to_string(), "-config".to_string(), config]),
-        CoreKind::SingBox => Ok(vec!["run".to_string(), "-c".to_string(), config]),
-        CoreKind::Mihomo => Ok(vec!["-f".to_string(), config]),
         CoreKind::KeliCoreRs => Ok(vec![
             "run-config".to_string(),
             config,
             "--control".to_string(),
             keli_core_rs_control_addr(config_path),
         ]),
-        CoreKind::Sidecar(name) => Err(ProcessError::new(format!(
-            "sidecar process args are not implemented for {name}",
-        ))),
     }
 }
 
 fn core_process_env(
-    kind: &CoreKind,
+    _kind: &CoreKind,
     config_path: &Path,
 ) -> Result<BTreeMap<String, String>, ProcessError> {
     let mut env = BTreeMap::new();
-    let CoreKind::KeliCoreRs = kind else {
-        return Ok(env);
-    };
-
     let Some(config_dir) = config_path.parent() else {
         return Ok(env);
     };
@@ -637,17 +584,12 @@ fn fnv1a64(bytes: &[u8]) -> u64 {
 
 fn core_kind_label(kind: &CoreKind) -> String {
     match kind {
-        CoreKind::Xray => "xray".to_string(),
-        CoreKind::SingBox => "sing-box".to_string(),
-        CoreKind::Mihomo => "mihomo".to_string(),
         CoreKind::KeliCoreRs => "keli-core-rs".to_string(),
-        CoreKind::Sidecar(name) => format!("sidecar-{name}"),
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
     use std::fs;
     use std::io::{BufRead, BufReader, Write};
     use std::net::TcpListener;
@@ -665,28 +607,8 @@ mod tests {
     use super::{
         core_process_spec, default_binary_command, keli_core_rs_control_addr,
         keli_core_rs_control_client, keli_core_rs_control_token, keli_core_rs_control_token_path,
-        sidecar_process_spec, MemoryProcessSupervisor, ProcessState, ProcessStatus,
-        ProcessSupervisor,
+        MemoryProcessSupervisor, ProcessState, ProcessStatus, ProcessSupervisor,
     };
-
-    #[test]
-    fn builds_xray_process_spec_from_core_plan() {
-        let plan = CorePlan {
-            kind: CoreKind::Xray,
-            config_path: PathBuf::from("/srv/v2node/config.json"),
-            listen_tags: Vec::new(),
-            inbounds: Vec::new(),
-            dns: Default::default(),
-        };
-
-        let spec = core_process_spec(&plan, None).unwrap();
-
-        assert_eq!(spec.name, "core:xray");
-        assert_eq!(spec.command, "xray");
-        assert_eq!(spec.args, vec!["run", "-config", "/srv/v2node/config.json"]);
-        assert_eq!(spec.working_dir, Some(PathBuf::from("/srv/v2node")));
-        assert!(spec.env.is_empty());
-    }
 
     #[test]
     fn builds_keli_core_rs_process_spec_from_core_plan() {
@@ -727,22 +649,6 @@ mod tests {
         assert!(!spec.env[KELI_CORE_CONTROL_TOKEN_ENV].is_empty());
         assert!(!config.contains(&spec.env[KELI_CORE_CONTROL_TOKEN_ENV]));
         fs::remove_dir_all(dir).ok();
-    }
-
-    #[test]
-    fn command_override_replaces_default_binary() {
-        let plan = CorePlan {
-            kind: CoreKind::SingBox,
-            config_path: PathBuf::from("/etc/v2node/sing-box.json"),
-            listen_tags: Vec::new(),
-            inbounds: Vec::new(),
-            dns: Default::default(),
-        };
-
-        let spec = core_process_spec(&plan, Some("/usr/local/bin/sing-box")).unwrap();
-
-        assert_eq!(spec.command, "/usr/local/bin/sing-box");
-        assert_eq!(spec.args, vec!["run", "-c", "/etc/v2node/sing-box.json"]);
     }
 
     #[test]
@@ -947,88 +853,11 @@ mod tests {
     }
 
     #[test]
-    fn core_process_spec_refuses_sidecar_without_explicit_args() {
-        let plan = CorePlan {
-            kind: CoreKind::Sidecar("naive".to_string()),
-            config_path: PathBuf::from("/srv/v2node/sidecar-naive-1.json"),
-            listen_tags: Vec::new(),
-            inbounds: Vec::new(),
-            dns: Default::default(),
-        };
-
-        let err = core_process_spec(&plan, None).unwrap_err();
-
-        assert!(err.message.contains("core command is not configured"));
-    }
-
-    #[test]
-    fn sidecar_process_spec_uses_explicit_command_and_args() {
-        let plan = CorePlan {
-            kind: CoreKind::Sidecar("mieru".to_string()),
-            config_path: PathBuf::from("/srv/v2node/sidecar-mieru-2.json"),
-            listen_tags: Vec::new(),
-            inbounds: Vec::new(),
-            dns: Default::default(),
-        };
-
-        let spec = sidecar_process_spec(
-            &plan,
-            "/usr/local/bin/mieru",
-            &["run".to_string(), "-c".to_string(), "{config}".to_string()],
-            &BTreeMap::from([("MITA_CONFIG_JSON_FILE".to_string(), "{config}".to_string())]),
-        )
-        .unwrap();
-
-        assert_eq!(spec.name, "core:sidecar-mieru");
-        assert_eq!(spec.command, "/usr/local/bin/mieru");
-        assert_eq!(
-            spec.args,
-            vec!["run", "-c", "/srv/v2node/sidecar-mieru-2.json"]
-        );
-        assert_eq!(
-            spec.env["MITA_CONFIG_JSON_FILE"],
-            "/srv/v2node/sidecar-mieru-2.json"
-        );
-        assert_eq!(spec.working_dir, Some(PathBuf::from("/srv/v2node")));
-    }
-
-    #[test]
-    fn sidecar_process_spec_rejects_non_sidecar_plan() {
-        let plan = CorePlan {
-            kind: CoreKind::Xray,
-            config_path: PathBuf::from("/srv/v2node/config.json"),
-            listen_tags: Vec::new(),
-            inbounds: Vec::new(),
-            dns: Default::default(),
-        };
-
-        let err =
-            sidecar_process_spec(&plan, "/usr/local/bin/naive", &[], &BTreeMap::new()).unwrap_err();
-
-        assert!(err.message.contains("requires a sidecar core plan"));
-    }
-
-    #[test]
-    fn sidecar_process_spec_rejects_empty_command() {
-        let plan = CorePlan {
-            kind: CoreKind::Sidecar("naive".to_string()),
-            config_path: PathBuf::from("/srv/v2node/sidecar-naive-1.json"),
-            listen_tags: Vec::new(),
-            inbounds: Vec::new(),
-            dns: Default::default(),
-        };
-
-        let err = sidecar_process_spec(&plan, "  ", &["{config}".to_string()], &BTreeMap::new())
-            .unwrap_err();
-
-        assert!(err.message.contains("sidecar command is not configured"));
-    }
-
-    #[test]
     fn memory_supervisor_start_reload_stop_status() {
+        let dir = temp_test_dir("memory-supervisor");
         let plan = CorePlan {
-            kind: CoreKind::Xray,
-            config_path: PathBuf::from("/srv/v2node/config.json"),
+            kind: CoreKind::KeliCoreRs,
+            config_path: dir.join("config.json"),
             listen_tags: Vec::new(),
             inbounds: Vec::new(),
             dns: Default::default(),
@@ -1044,18 +873,22 @@ mod tests {
         assert_eq!(reloaded.state, ProcessState::Running);
         assert_eq!(stopped.state, ProcessState::Stopped);
         assert_eq!(supervisor.starts.len(), 2);
-        assert_eq!(supervisor.stops, vec!["core:xray", "core:xray"]);
+        assert_eq!(
+            supervisor.stops,
+            vec!["core:keli-core-rs", "core:keli-core-rs"]
+        );
+        fs::remove_dir_all(dir).ok();
     }
 
     #[test]
     fn missing_status_is_stopped() {
         let mut supervisor = MemoryProcessSupervisor::default();
 
-        let status = supervisor.status("core:xray").unwrap();
+        let status = supervisor.status("core:keli-core-rs").unwrap();
 
         assert_eq!(
             status,
-            ProcessStatus::stopped("core:xray", "process was never started")
+            ProcessStatus::stopped("core:keli-core-rs", "process was never started")
         );
     }
 

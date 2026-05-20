@@ -1,4 +1,3 @@
-use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -46,8 +45,6 @@ pub struct KernelConfig {
     #[serde(default = "default_config_dir")]
     pub config_dir: String,
     #[serde(default)]
-    pub sidecars: BTreeMap<String, SidecarProcessConfig>,
-    #[serde(default)]
     pub log_level: String,
     #[serde(default)]
     pub dns_servers: Vec<String>,
@@ -57,16 +54,6 @@ pub struct KernelConfig {
     pub dns_private_ip_allowlist: Vec<String>,
     #[serde(default)]
     pub ip_strategy: String,
-}
-
-#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
-pub struct SidecarProcessConfig {
-    #[serde(default)]
-    pub command: String,
-    #[serde(default)]
-    pub args: Vec<String>,
-    #[serde(default)]
-    pub env: BTreeMap<String, String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
@@ -293,7 +280,6 @@ impl AppConfig {
         kernel.r#type = kernel.r#type.trim().to_string();
         kernel.core_command = kernel.core_command.trim().to_string();
         kernel.config_dir = normalize_config_dir(&kernel.config_dir);
-        kernel.sidecars = normalize_sidecar_processes(&kernel.sidecars);
         kernel.dns_servers = normalize_string_list(&kernel.dns_servers);
         kernel.dns_private_ip_allowlist = normalize_string_list(&kernel.dns_private_ip_allowlist);
         kernel.ip_strategy = kernel.ip_strategy.trim().to_string();
@@ -406,7 +392,6 @@ impl Default for KernelConfig {
             r#type: default_core_type(),
             core_command: String::new(),
             config_dir: default_config_dir(),
-            sidecars: BTreeMap::new(),
             log_level: String::new(),
             dns_servers: Vec::new(),
             dns_block_private_ips: default_dns_block_private_ips(),
@@ -417,7 +402,7 @@ impl Default for KernelConfig {
 }
 
 fn default_core_type() -> String {
-    "xray".to_string()
+    "keli-core-rs".to_string()
 }
 
 fn default_config_dir() -> String {
@@ -525,48 +510,6 @@ fn normalize_subscription_proxy_zerossl(
     }
 }
 
-fn normalize_sidecar_processes(
-    src: &BTreeMap<String, SidecarProcessConfig>,
-) -> BTreeMap<String, SidecarProcessConfig> {
-    let mut output = BTreeMap::new();
-    for (name, config) in src {
-        let name = name.trim().to_ascii_lowercase();
-        if name.is_empty() {
-            continue;
-        }
-        output.insert(
-            name,
-            SidecarProcessConfig {
-                command: config.command.trim().to_string(),
-                args: normalize_sidecar_args(&config.args),
-                env: normalize_sidecar_env(&config.env),
-            },
-        );
-    }
-    output
-}
-
-fn normalize_sidecar_args(values: &[String]) -> Vec<String> {
-    values
-        .iter()
-        .map(|value| value.trim())
-        .filter(|value| !value.is_empty())
-        .map(str::to_string)
-        .collect()
-}
-
-fn normalize_sidecar_env(values: &BTreeMap<String, String>) -> BTreeMap<String, String> {
-    let mut output = BTreeMap::new();
-    for (key, value) in values {
-        let key = key.trim();
-        if key.is_empty() {
-            continue;
-        }
-        output.insert(key.to_string(), value.trim().to_string());
-    }
-    output
-}
-
 fn normalize_string_list(values: &[String]) -> Vec<String> {
     let mut output: Vec<String> = Vec::new();
     for value in values {
@@ -663,21 +606,20 @@ fn config_extension(path: &Path) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::{
         normalize_config_dir, resolve_config_path, resolve_node_config_dir, AppConfig,
-        KernelConfig, MachineProfileConfig, NodeConfig, SidecarProcessConfig,
-        SubscriptionProxyProfile, DEFAULT_CONFIG_DIR,
+        KernelConfig, MachineProfileConfig, NodeConfig, SubscriptionProxyProfile,
+        DEFAULT_CONFIG_DIR,
     };
 
     #[test]
     fn kernel_defaults_match_binary_layout() {
         let kernel = KernelConfig::default();
 
-        assert_eq!(kernel.r#type, "xray");
+        assert_eq!(kernel.r#type, "keli-core-rs");
         assert!(kernel.core_command.is_empty());
         assert_eq!(kernel.config_dir, DEFAULT_CONFIG_DIR);
         assert!(kernel.dns_block_private_ips);
@@ -851,41 +793,6 @@ mod tests {
             "/.well-known/acme-challenge/token"
         );
         assert_eq!(proxy.zerossl.validation_content, "challenge");
-    }
-
-    #[test]
-    fn resolve_runtime_normalizes_sidecar_process_config() {
-        let mut config = AppConfig::default();
-        config.panel.url = "https://panel.example.test".to_string();
-        config.panel.token = "token".to_string();
-        config.panel.node_id = 1;
-        config.kernel.sidecars = BTreeMap::from([(
-            " Mieru ".to_string(),
-            SidecarProcessConfig {
-                command: " /usr/local/bin/mita ".to_string(),
-                args: vec![
-                    " run ".to_string(),
-                    " ".to_string(),
-                    "--config".to_string(),
-                    "{config}".to_string(),
-                ],
-                env: BTreeMap::from([
-                    (
-                        " MITA_CONFIG_JSON_FILE ".to_string(),
-                        " {config} ".to_string(),
-                    ),
-                    (" ".to_string(), "ignored".to_string()),
-                ]),
-            },
-        )]);
-
-        let resolved = config.resolve_runtime().unwrap();
-        let sidecar = resolved.kernel.sidecars.get("mieru").unwrap();
-
-        assert_eq!(sidecar.command, "/usr/local/bin/mita");
-        assert_eq!(sidecar.args, vec!["run", "--config", "{config}"]);
-        assert_eq!(sidecar.env["MITA_CONFIG_JSON_FILE"], "{config}".to_string());
-        assert!(!sidecar.env.contains_key(""));
     }
 
     #[test]

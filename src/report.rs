@@ -3,7 +3,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::config::NodeConfig;
-use crate::core::{CoreKind, CorePlan};
+use crate::core::CorePlan;
 use crate::core_control::{KeliCoreControlClient, KeliCoreTrafficRecord};
 use crate::panel::client::{PanelClient, PanelClientOptions};
 use crate::panel::types::UserTraffic;
@@ -379,9 +379,6 @@ pub async fn report_keli_core_activity_to_panel_with_user_lookup(
     let Some(core_plan) = &plan.core_plan else {
         return Ok(NodeActivityBatchReport::default());
     };
-    if core_plan.kind != CoreKind::KeliCoreRs {
-        return Ok(NodeActivityBatchReport::default());
-    }
 
     let mut client =
         keli_core_rs_control_client(&core_plan.config_path).map_err(|err| err.message)?;

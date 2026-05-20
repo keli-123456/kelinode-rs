@@ -3,7 +3,6 @@ use std::{fs, path::Path};
 use serde_json::{json, Map, Value};
 
 use crate::config::AgentConfig;
-use crate::core::CoreKind;
 use crate::machine::{MachineStatusPayload, NodeFailurePayload};
 use crate::node::NodeFailure;
 use crate::port_forward::{HysteriaPortForwardStatus, HysteriaPortForwardToolStatus};
@@ -37,7 +36,6 @@ pub struct HealthReportInput {
     pub version: String,
     pub resources: ResourceSnapshot,
     pub core: Option<ProcessStatus>,
-    pub sidecars: Vec<ProcessStatus>,
     pub subscription_proxy: Option<SubscriptionProxyStatus>,
     pub upgrade: Option<Value>,
     pub metrics: Option<Value>,
@@ -68,10 +66,7 @@ pub fn build_machine_status_payload(
     );
     payload.insert_status("version", version_value(input.version));
     payload.insert_status("runtime", runtime_value(plan));
-    payload.insert_status(
-        "core",
-        core_value(plan, input.core.as_ref(), &input.sidecars),
-    );
+    payload.insert_status("core", core_value(plan, input.core.as_ref()));
     payload.insert_status(
         "hy2_port_forward",
         hy2_port_forward_value(&plan.hy2_port_forward),
@@ -733,7 +728,6 @@ fn runtime_value(plan: &RuntimeBootstrapPlan) -> Value {
         "configured_nodes": plan.resolved.nodes.len(),
         "node_statuses": runtime_node_statuses_value(plan),
         "machine_profiles": plan.bootstrap.machine_profile_count,
-        "sidecars": plan.sidecar_core_plans.len(),
         "subscription_proxy_only": plan.subscription_proxy_only
     })
 }
@@ -762,11 +756,7 @@ fn runtime_node_statuses_value(plan: &RuntimeBootstrapPlan) -> Value {
     Value::Array(rows)
 }
 
-fn core_value(
-    plan: &RuntimeBootstrapPlan,
-    status: Option<&ProcessStatus>,
-    sidecars: &[ProcessStatus],
-) -> Value {
+fn core_value(plan: &RuntimeBootstrapPlan, status: Option<&ProcessStatus>) -> Value {
     let config_path = plan
         .core_plan
         .as_ref()
@@ -776,24 +766,12 @@ fn core_value(
         .as_ref()
         .map(|core| core.inbounds.len())
         .unwrap_or(0);
-    let sidecar_inbounds = plan
-        .sidecar_core_plans
-        .iter()
-        .map(|core| core.inbounds.len())
-        .sum::<usize>();
     let status = status.map(process_status_value);
-    let sidecar_statuses = sidecars
-        .iter()
-        .map(process_status_value)
-        .collect::<Vec<_>>();
 
     json!({
         "configured": plan.core_plan.is_some(),
         "config_path": config_path,
         "inbounds": inbounds,
-        "sidecars": plan.sidecar_core_plans.len(),
-        "sidecar_inbounds": sidecar_inbounds,
-        "sidecar_statuses": sidecar_statuses,
         "versions": installed_core_versions_value(Path::new(DEFAULT_INSTALL_DIR)),
         "user_limits": user_limit_value(plan),
         "status": status
@@ -825,10 +803,8 @@ fn user_limit_value(plan: &RuntimeBootstrapPlan) -> Value {
     let mut speed_limited_users = 0usize;
     let mut device_limited_users = 0usize;
     let mut enforced_limited_users = 0usize;
-    let mut pending_limited_users = 0usize;
 
-    for core in plan.core_plan.iter().chain(plan.sidecar_core_plans.iter()) {
-        let limits_enforced = matches!(core.kind, CoreKind::KeliCoreRs);
+    for core in plan.core_plan.iter() {
         for inbound in &core.inbounds {
             for user in &inbound.users {
                 users += 1;
@@ -841,11 +817,7 @@ fn user_limit_value(plan: &RuntimeBootstrapPlan) -> Value {
                     device_limited_users += 1;
                 }
                 if speed_limited || device_limited {
-                    if limits_enforced {
-                        enforced_limited_users += 1;
-                    } else {
-                        pending_limited_users += 1;
-                    }
+                    enforced_limited_users += 1;
                 }
             }
         }
@@ -854,27 +826,18 @@ fn user_limit_value(plan: &RuntimeBootstrapPlan) -> Value {
     let active = speed_limited_users > 0 || device_limited_users > 0;
     let enforcement = if !active {
         "none_required"
-    } else if pending_limited_users == 0 {
+    } else {
         "keli_core_rs"
-    } else if enforced_limited_users > 0 {
-        "partial"
-    } else {
-        "external_core_pending"
-    };
-    let warning = if pending_limited_users > 0 {
-        "per-user speed and device limits are not enforced by this external-core runtime yet"
-    } else {
-        ""
     };
     json!({
         "users": users,
         "speed_limited_users": speed_limited_users,
         "device_limited_users": device_limited_users,
         "enforced_limited_users": enforced_limited_users,
-        "pending_limited_users": pending_limited_users,
+        "pending_limited_users": 0usize,
         "active": active,
         "enforcement": enforcement,
-        "warning": warning
+        "warning": ""
     })
 }
 
@@ -1055,8 +1018,7 @@ mod tests {
                     },
                     ..ResourceSnapshot::default()
                 },
-                core: Some(ProcessStatus::running("core:xray", 42)),
-                sidecars: Vec::new(),
+                core: Some(ProcessStatus::running("core:keli-core-rs", 42)),
                 subscription_proxy: None,
                 upgrade: None,
                 metrics: None,
@@ -1125,47 +1087,6 @@ mod tests {
             payload.status["agent"]["subscription_proxy"]["profiles"][0]["site_id"],
             json!("site-a")
         );
-    }
-
-    #[test]
-    fn machine_status_surfaces_external_core_user_limit_gap() {
-        let resolved = ResolvedConfig {
-            kernel: Default::default(),
-            realtime: Default::default(),
-            machine: ResolvedMachineConfig {
-                enabled: true,
-                continue_on_error: true,
-                profiles: Vec::new(),
-            },
-            agent: AgentConfig::default(),
-            nodes: vec![node_config("https://panel.example.test", 7, 3)],
-        };
-        let node = test_node("vless", 7);
-        let tag = node.tag.clone();
-        let mut users = BTreeMap::new();
-        users.insert(
-            tag,
-            vec![UserInfo {
-                id: 1,
-                uuid: "11111111-1111-1111-1111-111111111111".to_string(),
-                speed_limit: 20,
-                device_limit: 2,
-            }],
-        );
-        let plan =
-            build_runtime_bootstrap_plan_with_users(resolved, vec![node], Vec::new(), &users)
-                .unwrap();
-
-        let payload = build_machine_status_payload(3, &plan, HealthReportInput::default());
-
-        let limits = &payload.status["core"]["user_limits"];
-        assert_eq!(limits["users"], json!(1));
-        assert_eq!(limits["speed_limited_users"], json!(1));
-        assert_eq!(limits["device_limited_users"], json!(1));
-        assert_eq!(limits["active"], json!(true));
-        assert_eq!(limits["enforcement"], json!("external_core_pending"));
-        assert_eq!(limits["pending_limited_users"], json!(1));
-        assert_eq!(limits["enforced_limited_users"], json!(0));
     }
 
     #[test]

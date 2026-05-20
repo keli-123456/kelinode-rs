@@ -21,7 +21,7 @@
 - HY2 port-forward repair/cleanup command planner.
 - HY2 port-forward executor abstraction for inspect/repair/cleanup.
 - Runtime bootstrap plan combining resolved config, node bootstrap, core plan, and HY2 status.
-- External core config file layout, Xray JSON rendering skeleton, and atomic writes.
+- Native core config file layout, `keli-core-rs` JSON rendering, and atomic writes.
 - Core process spec and supervisor abstraction for start/reload/stop/status.
 - Health and machine status payload aggregation matching keliboard status contract.
 - Runtime control apply path that writes core config, reconciles HY2 state, starts core, and builds machine status.
@@ -30,10 +30,10 @@
 - Machine self-upgrade state and launcher abstraction compatible with Go agent behavior.
 - Runtime signal handler that connects upgrade actions to the self-upgrade state machine.
 - Host resource snapshot basics for system metadata, Linux memory/swap, and uptime.
-- Core user client planning and Xray client rendering from panel user lists.
+- Core user client planning and native `keli-core-rs` user rendering from panel user lists.
 - Node user-set loading and runtime bootstrap planning with users keyed by node tag.
 - Full bootstrap entrypoint that resolves nodes and user lists before building the runtime plan.
-- Xray stream network settings passthrough for websocket/grpc/httpupgrade/xhttp/tcp-style transports.
+- Native stream network settings passthrough for websocket/grpc/httpupgrade/xhttp/tcp-style transports.
 - PROXY protocol socket option rendering from panel network settings.
 - Go-compatible default inbound sniffing for HTTP and TLS targets.
 - TLS `rejectUnknownSni` rendering from panel certificate metadata.
@@ -41,21 +41,16 @@
 - VLESS flow and Shadowsocks cipher/method rendering from panel node fields.
 - VLESS supported encryption/decryption string rendering with unsupported values rejected.
 - Shadowsocks HTTP obfs transport headers and TCP-only network mode.
-- Xray route rendering for DNS servers, block rules, protocol rules, and custom outbound rules.
+- Native route rendering for DNS servers, block rules, protocol rules, and custom outbound rules.
 - Go-compatible default outbound and DNS fallback settings.
-- Xray stats and user traffic policy defaults needed for traffic reporting.
+- Native stats and user traffic policy defaults needed for traffic reporting.
 - Runtime tick core-plan rebuild path for refreshed panel user sets.
 - SOCKS/HTTP account rendering and AnyTLS client/padding rendering from panel users.
-- HY2 bandwidth/obfs stream rendering, Xray TUIC congestion/0-RTT rendering, and native TUIC congestion rendering.
+- HY2 bandwidth/obfs stream rendering and native TUIC congestion rendering.
 - Unified node traffic/online activity reporting with legacy endpoint fallback.
 - Per-node activity batch reporting keyed by runtime tag for multi-node machines.
-- Naive and Mieru protocol parsing with explicit Xray rejection until sidecar runtimes are wired.
-- Core plan splitting for Xray-compatible nodes and per-node Naive/Mieru sidecars, while keeping Mieru native for `keli-core-rs`.
-- Explicit sidecar process spec construction from configured command and arguments.
-- Runtime bootstrap preservation of sidecar plans without fake Xray rendering.
-- Mieru sidecar `mita` server config rendering from panel port and user fields.
-- Runtime apply writes sidecar config files while process launch remains explicitly configured.
-- Configurable sidecar process launch using per-protocol command, argument, and environment templates.
+- Naive and Mieru protocol parsing/rendering through the native `keli-core-rs` plan.
+- Core plan construction routes supported nodes into the single native `keli-core-rs` data plane.
 - User sync state advancement for delta and full-list responses with empty-list no-change semantics.
 - Runtime user refresh backed by persisted user sync state with delta-first and full-list fallback.
 - Realtime protocol models for websocket messages, receipts, URL derivation, and invalidate actions.
@@ -74,7 +69,7 @@
 - Linux `/proc/stat` CPU usage sampler with loadavg fallback for machine status payloads.
 - Local/public IPv4/IPv6 candidate snapshot collection for machine status payloads.
 - Runtime resource sampler that derives network byte rates between machine status samples.
-- Machine status warning for non-enforced per-user speed/device limits while external-core enforcement is pending.
+- Machine status summary for native per-user speed/device limit enforcement.
 - Runtime loop scheduler for periodic user refresh, panel reports, and reload/upgrade signal exits.
 - Async runtime loop variant for panel-backed user refresh and report ticks.
 - Panel-backed runtime loop adapter that refreshes users by node tag before applying ticks.
@@ -109,9 +104,9 @@
 - Optional subscription proxy HTTP challenge server planning from `http_listen`.
 - Main subscription proxy server planning from `https_listen` for HTTPS and HTTP fallback modes.
 - Machine-profile panel reporting for subscription-proxy-only deployments.
-- Experimental `keli-core-rs` native config rendering for SOCKS/HTTP, Shadowsocks, VMess, VLESS, Trojan, AnyTLS, Hysteria2, TUIC, common TCP/WS/HTTPUpgrade/gRPC transports, VLESS REALITY config, users, direct outbound, stats, and domain block routes.
-- `keli-core-rs` process spec using `run-config <config>` while keeping Xray as the stable default core path.
-- `kernel.type` runtime selection for `xray` and the opt-in `keli-core-rs` plan.
+- `keli-core-rs` native config rendering for SOCKS/HTTP, Shadowsocks, VMess, VLESS, Trojan, AnyTLS, Hysteria2, TUIC, Naive, Mieru, common TCP/WS/HTTPUpgrade/gRPC transports, VLESS REALITY config, users, direct outbound, stats, and domain block routes.
+- `keli-core-rs` process spec using `run-config <config>` as the default core path.
+- `kernel.type` defaults to the native `keli-core-rs` path and rejects legacy core values.
 - Deterministic local control address wiring for `keli-core-rs run-config --control`.
 - JSON-line `keli-core-rs` control client for status, stop, `ApplyConfig`, and per-user traffic drain.
 - Runtime hot-apply path for running `keli-core-rs` configs, with process reload fallback for old or unavailable control sockets.
@@ -120,7 +115,7 @@
 
 ## Phase 2: Runtime Control
 
-- External core adapter for Xray-compatible generated configs.
+- Native `keli-core-rs` process adapter and control socket lifecycle.
 - Safe process lifecycle: start, reload, stop, status.
 - Health endpoint compatible with existing operational checks.
 - File layout matching binary deployment conventions.
@@ -142,5 +137,5 @@
 ## Phase 5: Protocol Coverage
 
 - Match Go `kelinode` for vmess, vless, trojan, shadowsocks, hysteria2, tuic, anytls, socks, and http.
-- Add sidecar path for protocols that should not be faked inside Xray, such as Naive and the default-path Mieru runtime.
-- Consider Rust-native fast paths only after contract and reporting are stable.
+- Keep Naive and Mieru on native protocol implementations inside `keli-core-rs`.
+- Continue optimizing Rust-native fast paths after contract and reporting remain stable.

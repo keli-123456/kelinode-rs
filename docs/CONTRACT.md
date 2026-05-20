@@ -46,12 +46,13 @@ Initial supported protocol names mirror Go `kelinode`:
 - `anytls`
 - `socks`
 - `http`
-- `mieru` natively with `kernel.type: keli-core-rs`, or through a matching sidecar process on the default Xray path
+- `mieru` natively
+- `naive` natively for H2/TLS
 
-Naive still requires explicit Caddy forward_proxy integration before the panel should expose it as a Rust node supported protocol.
+Naive H3/QUIC remains intentionally rejected until the native core has a real QUIC/H3 path.
 
-The experimental `keli-core-rs` native core path now renders SOCKS, HTTP, Shadowsocks, VMess, VLESS, Trojan, AnyTLS, Hysteria2, TUIC, Mieru TCP including expanded port ranges and stream multiplexing, common TCP/WS/HTTPUpgrade/H2/gRPC transports, XHTTP/splithttp stream-one route outbounds, old-QUIC route outbounds with `none`/`aes-128-gcm`/`chacha20-poly1305` packet security, VMess legacy alterId route outbounds, and VLESS REALITY config into the Rust core schema. Naive remains an explicit sidecar protocol.
+The `keli-core-rs` native core path renders SOCKS, HTTP, Shadowsocks, VMess, VLESS, Trojan, AnyTLS, Hysteria2, TUIC, Mieru TCP including expanded port ranges and stream multiplexing, Naive H2/TLS, common TCP/WS/HTTPUpgrade/H2/gRPC transports, XHTTP/splithttp stream-one route outbounds, old-QUIC route outbounds with `none`/`aes-128-gcm`/`chacha20-poly1305` packet security, VMess legacy alterId route outbounds, and VLESS REALITY config into the Rust core schema.
 
-Operators opt into that path with `kernel.type: keli-core-rs`; the default remains `xray` for production compatibility. The embedded native release links `keli-core-rs` into the `v2node` binary. Non-embedded development builds can still set `kernel.core_command` to an external `keli-core-rs` binary path.
+`kernel.type` defaults to `keli-core-rs`; operators may keep it explicit in config for readability. The embedded native release links `keli-core-rs` into the `kelinode` binary. Non-embedded development builds can still set `kernel.core_command` to an external `keli-core-rs` binary path.
 
 The native renderer parity gate is documented in `docs/NATIVE_CORE_PARITY.md`. Unsupported panel options must be rejected for `keli-core-rs` instead of being silently dropped.

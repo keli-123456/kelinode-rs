@@ -1,33 +1,31 @@
 # Native Core Gray Release Runbook
 
-This runbook is for small production gray releases of the `kelinode-rs -> keli-core-rs` path.
-It does not mark the native core as the default production path. The stable rollback path remains
-the existing Go/Xray deployment until the real-client matrix and soak results are complete.
+This runbook is for widening the `kelinode-rs -> keli-core-rs` production path.
+The native core is the default for new Rust-node installs. Keep a rollback path available until
+the real-client matrix and soak results are complete on each site.
 
 ## Scope
 
-Use the native core only when all of these are true:
+Widen native traffic only when all of these are true:
 
 - The node is selected for gray release.
 - The protocol is covered by the current native renderer and core data path.
 - The panel config does not contain native-rejected fields.
 - The node has active monitoring for machine status, traffic report failures, and user delta fallback.
-- Operators can switch the node back to the stable core path without changing user subscriptions.
+- Operators have a rollback plan that does not require changing user subscriptions.
 
 Do not gray release unsupported panel features by silently dropping them. `kelinode-rs` must reject
-unsupported native core options so the stable Xray path can remain the fallback.
+unsupported native core options with a clear error.
 
 ## Enablement
 
-Start with an opt-in node or machine profile:
+New installs already default to native core. Keep the config explicit on production nodes:
 
 ```yaml
 kernel:
   type: keli-core-rs
   config_dir: "/etc/kelinode"
 ```
-
-Keep `kernel.type: xray` for nodes that are not part of the gray release.
 
 Before starting the runtime, run the preflight gate:
 
@@ -81,8 +79,8 @@ Native `geoip:` and `geosite:` rules read text files from `geoip/<rule>.txt` and
 groups by default, including `geosite:apple` and `geoip:cn`; use `--skip-geo-rules` or the
 `KELI_GEOSITE_RULES` / `KELI_GEOIP_RULES` environment variables to customize that bootstrap. The
 native core follows v2fly-style `include:` lines and strips attributes such as `@cn` from geosite
-text files. Built-in private rules and a small common-domain fallback work without files. Xray
-`.dat` files are not parsed by the native Rust core.
+text files. Built-in private rules and a small common-domain fallback work without files. Binary
+`.dat` geodata files are not parsed by the native Rust core.
 
 Native DNS uses `kernel.dns_servers` when present and falls back to `1.1.1.1` / `8.8.8.8` when it
 is empty. DNS private-address blocking is opt-in so existing internal deployments keep working by
@@ -184,23 +182,18 @@ Traffic report failure must not lose data. Before increasing traffic, verify:
 - minimum report thresholds are honored
 
 If panel traffic reporting fails, keep the native core running only if pending traffic continues to
-persist and retry. Otherwise stop the gray release and switch the node back to the stable core path.
+persist and retry. Otherwise stop widening and roll the node back to the last known-good release.
 
 ## Rollback
 
-Rollback should be a config-level decision:
-
-```yaml
-kernel:
-  type: xray
-```
+Rollback should be a release-level decision: pin the previous known-good `kelinode` release or
+temporarily reinstall the old Go node package if a site-specific blocker requires it.
 
 Expected rollback behavior:
 
-- `kelinode-rs` writes the stable core config.
-- The native core process is stopped or replaced by the stable core process.
+- The native service is stopped cleanly before the rollback package starts.
 - Existing pending traffic remains recoverable.
-- User sync state remains available for the next native gray attempt.
+- User sync state remains available for the next native widening attempt.
 
 Rollback triggers:
 
@@ -209,7 +202,7 @@ Rollback triggers:
 - traffic report failures with pending spool write failures
 - native core process restart loops
 - protocol-specific client failures above the agreed gray threshold
-- p95/p99 latency or error rate regression versus the stable path
+- p95/p99 latency or error rate regression versus the last known-good native release
 
 ## Interop And Soak Gate
 
