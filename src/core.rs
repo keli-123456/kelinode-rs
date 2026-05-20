@@ -1761,11 +1761,15 @@ fn validate_keli_core_rs_protocol_scoped_fields(inbound: &InboundPlan) -> Result
         )));
     }
 
-    let has_tuic_options =
-        !inbound.congestion_control.trim().is_empty() || inbound.zero_rtt_handshake;
-    if protocol != "tuic" && has_tuic_options {
+    if !inbound.congestion_control.trim().is_empty() && !matches!(protocol, "tuic" | "hysteria") {
         return Err(CoreError::new(format!(
-            "keli-core-rs {protocol} does not support tuic options on inbound {}",
+            "keli-core-rs {protocol} does not support congestion_control on inbound {}",
+            inbound.tag
+        )));
+    }
+    if protocol != "tuic" && inbound.zero_rtt_handshake {
+        return Err(CoreError::new(format!(
+            "keli-core-rs {protocol} does not support tuic zero-rtt options on inbound {}",
             inbound.tag
         )));
     }
@@ -1995,7 +1999,7 @@ fn validate_keli_core_rs_tuic_inbound(inbound: &InboundPlan) -> Result<(), CoreE
         )));
     }
     let congestion = inbound.congestion_control.trim();
-    if !congestion.is_empty() && !is_keli_core_rs_tuic_congestion_supported(congestion) {
+    if !congestion.is_empty() && !is_keli_core_rs_quic_congestion_supported(congestion) {
         return Err(CoreError::new(format!(
             "keli-core-rs tuic congestion_control {} is not supported on inbound {}",
             inbound.congestion_control, inbound.tag
@@ -2016,7 +2020,7 @@ fn validate_keli_core_rs_tuic_inbound(inbound: &InboundPlan) -> Result<(), CoreE
     Ok(())
 }
 
-fn is_keli_core_rs_tuic_congestion_supported(value: &str) -> bool {
+fn is_keli_core_rs_quic_congestion_supported(value: &str) -> bool {
     matches!(
         value
             .trim()
@@ -2063,6 +2067,13 @@ fn validate_keli_core_rs_hysteria2_inbound(inbound: &InboundPlan) -> Result<(), 
         return Err(CoreError::new(format!(
             "keli-core-rs hysteria2 currently does not support transport settings on inbound {}",
             inbound.tag
+        )));
+    }
+    let congestion = inbound.congestion_control.trim();
+    if !congestion.is_empty() && !is_keli_core_rs_quic_congestion_supported(congestion) {
+        return Err(CoreError::new(format!(
+            "keli-core-rs hysteria2 congestion_control {} is not supported on inbound {}",
+            inbound.congestion_control, inbound.tag
         )));
     }
     let obfs = inbound.obfs.trim();
@@ -2433,7 +2444,9 @@ fn render_keli_core_rs_transport(inbound: &InboundPlan) -> Value {
         }
     }
 
-    if inbound.protocol == "tuic" && !inbound.congestion_control.trim().is_empty() {
+    if matches!(inbound.protocol.as_str(), "tuic" | "hysteria")
+        && !inbound.congestion_control.trim().is_empty()
+    {
         transport.insert(
             "congestion_control".to_string(),
             Value::String(inbound.congestion_control.trim().to_string()),
@@ -5503,8 +5516,7 @@ mod tests {
 
         assert!(err.message.contains("bandwidth/obfs"));
 
-        let mut node = test_node("hysteria2", 77, "");
-        node.security = Security::Tls;
+        let mut node = test_node("vmess", 77, "");
         node.common.congestion_control = "bbr".to_string();
         let plan = CorePlan::from_nodes(
             CoreKind::KeliCoreRs,
@@ -5515,7 +5527,7 @@ mod tests {
 
         let err = render_core_config(&plan).unwrap_err();
 
-        assert!(err.message.contains("tuic options"));
+        assert!(err.message.contains("congestion_control"));
     }
 
     #[test]
@@ -5952,6 +5964,28 @@ mod tests {
         assert_eq!(
             config["inbounds"][0]["transport"]["obfs_password"],
             "obfs-secret"
+        );
+    }
+
+    #[test]
+    fn renders_keli_core_rs_hysteria2_congestion_control() {
+        let mut node = test_node("hysteria2", 72, "");
+        node.security = Security::Tls;
+        node.common.cert_info.as_mut().unwrap().cert_file = "/srv/v2node/hy2.cer".to_string();
+        node.common.cert_info.as_mut().unwrap().key_file = "/srv/v2node/hy2.key".to_string();
+        node.common.congestion_control = "bbr".to_string();
+        let plan = CorePlan::from_nodes(
+            CoreKind::KeliCoreRs,
+            PathBuf::from("/srv/v2node/keli-core-rs.json"),
+            &[node],
+        )
+        .unwrap();
+
+        let config = render_core_config(&plan).unwrap();
+
+        assert_eq!(
+            config["inbounds"][0]["transport"]["congestion_control"],
+            "bbr"
         );
     }
 
