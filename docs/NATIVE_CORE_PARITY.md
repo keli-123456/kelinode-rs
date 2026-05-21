@@ -17,7 +17,7 @@ When the native core is already running, `kelinode-rs` writes the rendered confi
 
 - Render only options that `keli-core-rs` validates and has a runtime path for.
 - Reject panel options that the native core cannot execute.
-- Render Naive H2/TLS and Mieru TCP directly into `keli-core-rs`; do not spawn separate protocol runtimes.
+- Render Naive H2/H3 TLS and Mieru TCP directly into `keli-core-rs`; do not spawn separate protocol runtimes.
 - Fail loudly instead of silently dropping fields from the panel payload.
 
 ## Protocol Renderer Matrix
@@ -33,7 +33,7 @@ When the native core is already running, `kelinode-rs` writes the rendered confi
 | AnyTLS | Partial | TCP users, UDP-over-TCP, padding scheme | Real-client matrix |
 | Hysteria2 | Partial | TLS, bandwidth options, salamander obfs | Transport settings, non-salamander obfs |
 | TUIC | Partial | TLS, UUID users, cubic/bbr/new_reno congestion | zero-RTT, non-UUID users |
-| Naive | Partial | H2/TLS listener with Basic auth, optional padding, TCP CONNECT relay, traffic accounting, ApplyUserDelta, and delete-user connection close | H3/QUIC transport, broader official-client soak matrix |
+| Naive | Partial | H2/TLS and H3/QUIC listeners with Basic auth, optional padding, TCP CONNECT relay, traffic accounting, ApplyUserDelta, and delete-user connection close | Broader official-client H3 weak-network/reconnect soak matrix |
 | Mieru | Partial | Native TCP inbound; Mieru port ranges expand to one native inbound per port; stream multiplexing is accepted because `keli-core-rs` demuxes sessions on the TCP underlay; UDP ASSOCIATE packets are relayed over the TCP tunnel | UDP underlay transport, traffic-pattern tuning, broader real-client matrix |
 
 ## Route Renderer Matrix

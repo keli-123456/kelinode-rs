@@ -1599,7 +1599,7 @@ fn validate_keli_core_rs_inbound(inbound: &InboundPlan) -> Result<(), CoreError>
         "tuic" => validate_keli_core_rs_tuic_inbound(inbound),
         "hysteria" => validate_keli_core_rs_hysteria2_inbound(inbound),
         value => Err(CoreError::new(format!(
-            "keli-core-rs native renderer only supports socks/http/shadowsocks/vmess/vless/trojan/anytls/mieru tcp, naive h2/tls, vmess/vless/trojan ws/httpupgrade/grpc, tuic tcp/udp relay, and hysteria2 tcp/udp relay today; inbound {} uses {}",
+            "keli-core-rs native renderer only supports socks/http/shadowsocks/vmess/vless/trojan/anytls/mieru tcp, naive h2/h3 tls, vmess/vless/trojan ws/httpupgrade/grpc, tuic tcp/udp relay, and hysteria2 tcp/udp relay today; inbound {} uses {}",
             inbound.tag, value
         ))),
     }
@@ -1693,9 +1693,9 @@ fn validate_keli_core_rs_plain_tcp_inbound(inbound: &InboundPlan) -> Result<(), 
 
 fn validate_keli_core_rs_naive_inbound(inbound: &InboundPlan) -> Result<(), CoreError> {
     let network = first_non_empty(inbound.network.trim(), "tcp").to_ascii_lowercase();
-    if network != "tcp" {
+    if !matches!(network.as_str(), "tcp" | "quic") {
         return Err(CoreError::new(format!(
-            "keli-core-rs naive currently supports only tcp transport; inbound {} uses {}",
+            "keli-core-rs naive currently supports only tcp or quic transport; inbound {} uses {}",
             inbound.tag, network
         )));
     }
@@ -1847,9 +1847,16 @@ fn validate_keli_core_rs_reality_inbound(inbound: &InboundPlan) -> Result<(), Co
 fn validate_keli_core_rs_tls_inbound(inbound: &InboundPlan) -> Result<(), CoreError> {
     let protocol = inbound.protocol.as_str();
     let network = keli_core_rs_transport_network(inbound);
-    if !matches!(network.as_str(), "tcp" | "ws" | "httpupgrade" | "grpc") {
+    let supports_transport = matches!(network.as_str(), "tcp" | "ws" | "httpupgrade" | "grpc")
+        || (protocol == "naive" && network == "quic");
+    if !supports_transport {
+        let expected = if protocol == "naive" {
+            "tcp/quic"
+        } else {
+            "tcp/ws/httpupgrade/grpc"
+        };
         return Err(CoreError::new(format!(
-            "keli-core-rs {protocol} tls currently supports only tcp/ws/httpupgrade/grpc transport; inbound {} uses {}",
+            "keli-core-rs {protocol} tls currently supports only {expected} transport; inbound {} uses {}",
             inbound.tag, network
         )));
     }
@@ -4665,6 +4672,52 @@ mod tests {
         let err = render_core_config(&plan).unwrap_err();
 
         assert!(err.message.contains("naive currently requires tls"));
+    }
+
+    #[test]
+    fn renders_keli_core_rs_naive_quic_inbound() {
+        let mut node = test_node("naive", 74, "");
+        node.security = Security::Tls;
+        node.common.tls = 1;
+        node.common.network = "quic".to_string();
+        node.common.tls_settings.alpn = vec!["h3".to_string()];
+        node.common.cert_info = Some(CertInfo {
+            cert_mode: "file".to_string(),
+            cert_file: "/srv/v2node/naive-h3.cer".to_string(),
+            key_file: "/srv/v2node/naive-h3.key".to_string(),
+            cert_domain: "naive-h3.example.test".to_string(),
+            dns_env: Default::default(),
+            provider: String::new(),
+            reject_unknown_sni: false,
+        });
+        let node_tag = node.tag.clone();
+        let mut users = std::collections::BTreeMap::new();
+        users.insert(
+            node_tag,
+            vec![UserInfo {
+                id: 74,
+                uuid: "naive-h3-password".to_string(),
+                speed_limit: 0,
+                device_limit: 0,
+            }],
+        );
+        let plan = CorePlan::from_nodes_with_users(
+            CoreKind::KeliCoreRs,
+            PathBuf::from("/srv/v2node/keli-core-rs.json"),
+            &[node],
+            &users,
+        )
+        .unwrap();
+
+        let config = render_core_config(&plan).unwrap();
+
+        assert_eq!(config["inbounds"][0]["protocol"], "naive");
+        assert_eq!(config["inbounds"][0]["transport"]["network"], "quic");
+        assert_eq!(config["inbounds"][0]["tls"]["alpn"], json!(["h3"]));
+        assert_eq!(
+            config["inbounds"][0]["tls"]["server_name"],
+            "naive-h3.example.test"
+        );
     }
 
     #[test]
