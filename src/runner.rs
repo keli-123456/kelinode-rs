@@ -1349,7 +1349,11 @@ fn runtime_plan_needs_cached_users(
     let Some(core_plan) = plan.core_plan.as_ref() else {
         return plan.node_infos.iter().any(|node| node.tag == node_tag);
     };
-    match core_plan.inbounds.iter().find(|inbound| inbound.tag == node_tag) {
+    match core_plan
+        .inbounds
+        .iter()
+        .find(|inbound| inbound.tag == node_tag)
+    {
         Some(inbound) => inbound.users.is_empty(),
         None => plan.node_infos.iter().any(|node| node.tag == node_tag),
     }
@@ -1939,9 +1943,13 @@ mod tests {
                 device_limit: 0,
             }],
         );
-        let mut plan =
-            build_runtime_bootstrap_plan_with_users(resolved, vec![node], Vec::new(), &initial_users)
-                .unwrap();
+        let mut plan = build_runtime_bootstrap_plan_with_users(
+            resolved,
+            vec![node],
+            Vec::new(),
+            &initial_users,
+        )
+        .unwrap();
         plan.core_plan.as_mut().unwrap().inbounds[0].port_range = "20000-20001".to_string();
         let mut users_by_tag = BTreeMap::new();
         users_by_tag.insert(tag, Vec::new());

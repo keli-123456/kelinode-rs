@@ -3129,12 +3129,9 @@ mod tests {
                 device_limit: 0,
             }],
         );
-        let bundle = split_core_plans_for_nodes(
-            PathBuf::from("/srv/v2node/config.json"),
-            &nodes,
-            &users,
-        )
-        .unwrap();
+        let bundle =
+            split_core_plans_for_nodes(PathBuf::from("/srv/v2node/config.json"), &nodes, &users)
+                .unwrap();
 
         let core = bundle.core.unwrap();
         assert_eq!(core.kind, CoreKind::KeliCoreRs);
