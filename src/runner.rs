@@ -8,6 +8,7 @@ use crate::control::{
     report_runtime_apply_result_to_panels, run_runtime_tick, runtime_loop_signal,
     RuntimeControlOptions, RuntimeLoopSignal, RuntimeTickOptions,
 };
+use crate::core::{parse_keli_core_rs_port_range, CorePlan};
 use crate::core_control::KELI_CORE_APPLY_CONTROL_TIMEOUT;
 use crate::health::ResourceSnapshot;
 use crate::logging;
@@ -243,12 +244,6 @@ impl RuntimeUserDeltaMetrics {
         self.kelinode_user_delta_full_snapshot_fallback_total = self
             .kelinode_user_delta_full_snapshot_fallback_total
             .saturating_add(1);
-    }
-
-    fn record_skipped_port_range(&mut self, count: usize) {
-        self.kelinode_user_delta_skipped_port_range_total = self
-            .kelinode_user_delta_skipped_port_range_total
-            .saturating_add(count as u64);
     }
 
     fn record_full_rebuild(&mut self) {
@@ -554,26 +549,6 @@ fn try_apply_keli_core_rs_user_deltas(
     let Some(core_plan) = plan.core_plan.as_ref() else {
         return RuntimeUserDeltaApplyOutcome::Rebuild;
     };
-    let skipped_port_range = users_by_node_tag
-        .keys()
-        .filter(|node_tag| {
-            core_plan.inbounds.iter().any(|inbound| {
-                inbound.tag == **node_tag
-                    && inbound.protocol == "mieru"
-                    && !inbound.port_range.trim().is_empty()
-            })
-        })
-        .count();
-    if skipped_port_range > 0 {
-        metrics.record_skipped_port_range(skipped_port_range);
-        logging::warn(
-            "core",
-            format!(
-                "user delta skipped because port-range inbound exists count={skipped_port_range}"
-            ),
-        );
-        return RuntimeUserDeltaApplyOutcome::Rebuild;
-    }
     if users_by_node_tag.keys().any(|node_tag| {
         sync_state
             .get(node_tag)
@@ -595,69 +570,122 @@ fn try_apply_keli_core_rs_user_deltas(
         let Some(change) = entry.last_change.as_ref() else {
             return RuntimeUserDeltaApplyOutcome::Rebuild;
         };
-        let delta = keli_core_user_delta_payload(node_tag, change);
-        match client.apply_user_delta(node_tag.clone(), delta) {
-            Ok(_) => metrics.record_success(),
+        let target_tags = match keli_core_user_delta_target_tags(core_plan, node_tag) {
+            Ok(target_tags) => target_tags,
             Err(error) => {
-                metrics.record_failed();
-                if plan.resolved.machine.continue_on_error
-                    && keli_core_user_delta_missing_inbound(&error.message)
-                {
-                    logging::warn(
-                        "core",
-                        format!(
-                            "user delta deferred for missing inbound node_tag={node_tag} error={}",
-                            error.message
-                        ),
-                    );
-                    return RuntimeUserDeltaApplyOutcome::Deferred;
-                }
-                if !keli_core_user_delta_requires_full_snapshot(&error.message) {
-                    logging::warn(
-                        "core",
-                        format!(
-                            "user delta apply failed node_tag={node_tag} error={}",
-                            error.message
-                        ),
-                    );
-                    return RuntimeUserDeltaApplyOutcome::Rebuild;
-                }
-                metrics.record_full_snapshot_fallback();
                 logging::warn(
                     "core",
                     format!(
-                        "user delta requires full snapshot node_tag={node_tag} error={}",
-                        error.message
+                        "user delta target resolution failed node_tag={node_tag} error={error}"
                     ),
                 );
-                let full_delta = keli_core_user_full_snapshot_payload(node_tag, entry);
-                match client.apply_user_delta(node_tag.clone(), full_delta) {
-                    Ok(_) => metrics.record_success(),
-                    Err(error) => {
-                        metrics.record_failed();
-                        if plan.resolved.machine.continue_on_error
-                            && keli_core_user_delta_missing_inbound(&error.message)
-                        {
-                            logging::warn(
-                                "core",
-                                format!(
-                                    "full snapshot user delta deferred for missing inbound node_tag={node_tag} error={}",
-                                    error.message
-                                ),
-                            );
-                            return RuntimeUserDeltaApplyOutcome::Deferred;
-                        }
-                        logging::error(
+                return RuntimeUserDeltaApplyOutcome::Rebuild;
+            }
+        };
+        if target_tags.is_empty() {
+            if plan.resolved.machine.continue_on_error {
+                logging::warn(
+                    "core",
+                    format!("user delta deferred for missing inbound node_tag={node_tag}"),
+                );
+                return RuntimeUserDeltaApplyOutcome::Deferred;
+            }
+            return RuntimeUserDeltaApplyOutcome::Rebuild;
+        }
+        let delta = keli_core_user_delta_payload(node_tag, change);
+        for target_tag in target_tags {
+            match client.apply_user_delta(target_tag.clone(), delta.clone()) {
+                Ok(_) => metrics.record_success(),
+                Err(error) => {
+                    metrics.record_failed();
+                    if plan.resolved.machine.continue_on_error
+                        && keli_core_user_delta_missing_inbound(&error.message)
+                    {
+                        logging::warn(
                             "core",
-                            format!("full snapshot user delta failed node_tag={node_tag}"),
+                            format!(
+                                "user delta deferred for missing inbound node_tag={node_tag} target_tag={target_tag} error={}",
+                                error.message
+                            ),
+                        );
+                        return RuntimeUserDeltaApplyOutcome::Deferred;
+                    }
+                    if !keli_core_user_delta_requires_full_snapshot(&error.message) {
+                        logging::warn(
+                            "core",
+                            format!(
+                                "user delta apply failed node_tag={node_tag} target_tag={target_tag} error={}",
+                                error.message
+                            ),
                         );
                         return RuntimeUserDeltaApplyOutcome::Rebuild;
+                    }
+                    metrics.record_full_snapshot_fallback();
+                    logging::warn(
+                        "core",
+                        format!(
+                            "user delta requires full snapshot node_tag={node_tag} target_tag={target_tag} error={}",
+                            error.message
+                        ),
+                    );
+                    let full_delta = keli_core_user_full_snapshot_payload(node_tag, entry);
+                    match client.apply_user_delta(target_tag.clone(), full_delta) {
+                        Ok(_) => metrics.record_success(),
+                        Err(error) => {
+                            metrics.record_failed();
+                            if plan.resolved.machine.continue_on_error
+                                && keli_core_user_delta_missing_inbound(&error.message)
+                            {
+                                logging::warn(
+                                    "core",
+                                    format!(
+                                        "full snapshot user delta deferred for missing inbound node_tag={node_tag} target_tag={target_tag} error={}",
+                                        error.message
+                                    ),
+                                );
+                                return RuntimeUserDeltaApplyOutcome::Deferred;
+                            }
+                            logging::error(
+                                "core",
+                                format!(
+                                    "full snapshot user delta failed node_tag={node_tag} target_tag={target_tag}"
+                                ),
+                            );
+                            return RuntimeUserDeltaApplyOutcome::Rebuild;
+                        }
                     }
                 }
             }
         }
     }
     RuntimeUserDeltaApplyOutcome::Applied
+}
+
+fn keli_core_user_delta_target_tags(
+    core_plan: &CorePlan,
+    node_tag: &str,
+) -> Result<Vec<String>, String> {
+    let mut targets = Vec::new();
+    let mut expanded_targets = Vec::new();
+    let expanded_prefix = format!("{node_tag}|port:");
+    for inbound in &core_plan.inbounds {
+        if inbound.tag == node_tag {
+            if inbound.protocol == "mieru" && !inbound.port_range.trim().is_empty() {
+                for port in parse_keli_core_rs_port_range(&inbound.port_range)? {
+                    targets.push(format!("{node_tag}|port:{port}"));
+                }
+            } else {
+                targets.push(node_tag.to_string());
+            }
+        } else if inbound.tag.starts_with(&expanded_prefix) {
+            expanded_targets.push(inbound.tag.clone());
+        }
+    }
+    if targets.is_empty() {
+        Ok(expanded_targets)
+    } else {
+        Ok(targets)
+    }
 }
 
 fn try_establish_keli_core_rs_revision_baseline(
@@ -683,18 +711,39 @@ fn try_establish_keli_core_rs_revision_baseline(
         let Some(entry) = sync_state.get(node_tag) else {
             continue;
         };
-        let delta = keli_core_user_full_snapshot_payload(node_tag, entry);
-        match client.apply_user_delta(node_tag.clone(), delta) {
-            Ok(_) => applied += 1,
+        let target_tags = match keli_core_user_delta_target_tags(core_plan, node_tag) {
+            Ok(target_tags) => target_tags,
             Err(error) => {
                 logging::warn(
                     "core",
                     format!(
-                        "revision baseline full snapshot failed node_tag={node_tag} error={}",
-                        error.message
+                        "revision baseline target resolution failed node_tag={node_tag} error={error}"
                     ),
                 );
                 return false;
+            }
+        };
+        if target_tags.is_empty() {
+            logging::warn(
+                "core",
+                format!("revision baseline skipped missing inbound node_tag={node_tag}"),
+            );
+            continue;
+        }
+        let delta = keli_core_user_full_snapshot_payload(node_tag, entry);
+        for target_tag in target_tags {
+            match client.apply_user_delta(target_tag.clone(), delta.clone()) {
+                Ok(_) => applied += 1,
+                Err(error) => {
+                    logging::warn(
+                        "core",
+                        format!(
+                            "revision baseline full snapshot failed node_tag={node_tag} target_tag={target_tag} error={}",
+                            error.message
+                        ),
+                    );
+                    return false;
+                }
             }
         }
     }
@@ -1532,18 +1581,19 @@ mod tests {
         refresh_subscription_proxy_health, run_runtime_loop, run_runtime_loop_async,
         run_runtime_loop_async_with_events, runtime_loop_event_for_task,
         runtime_plan_needs_cached_users, runtime_user_delta_change, should_run,
-        try_apply_keli_core_rs_user_deltas, user_delta_body_is_revision_only,
-        user_delta_not_supported, AsyncRuntimeLoopCallbacks, PanelRuntimeLoop,
-        RuntimeLoopCallbacks, RuntimeLoopEvent, RuntimeLoopEventKind, RuntimeLoopExit,
-        RuntimeLoopExitReason, RuntimeLoopFuture, RuntimeLoopOptions, RuntimeUserDeltaApplyOutcome,
-        RuntimeUserDeltaChange, RuntimeUserDeltaMetrics, RuntimeUserSyncEntry,
+        try_apply_keli_core_rs_user_deltas, try_establish_keli_core_rs_revision_baseline,
+        user_delta_body_is_revision_only, user_delta_not_supported, AsyncRuntimeLoopCallbacks,
+        PanelRuntimeLoop, RuntimeLoopCallbacks, RuntimeLoopEvent, RuntimeLoopEventKind,
+        RuntimeLoopExit, RuntimeLoopExitReason, RuntimeLoopFuture, RuntimeLoopOptions,
+        RuntimeUserDeltaApplyOutcome, RuntimeUserDeltaChange, RuntimeUserDeltaMetrics,
+        RuntimeUserSyncEntry,
     };
     use crate::config::{NodeConfig, ResolvedConfig, ResolvedMachineConfig};
     use crate::control::RuntimeControlOptions;
     use crate::control::{RuntimeLoopSignal, RuntimePanelAction, RuntimeTickOptions};
     use crate::health::ResourceSnapshot;
     use crate::machine::MachineUpgradeCommand;
-    use crate::panel::types::{CommonNode, NodeInfo, UserInfo};
+    use crate::panel::types::{CommonNode, NodeInfo, PortValue, UserInfo};
     use crate::port_forward::{PortForwardCommand, PortForwardExecutor};
     use crate::process::{
         keli_core_rs_control_addr, keli_core_rs_control_token, MemoryProcessSupervisor,
@@ -1910,8 +1960,8 @@ mod tests {
     }
 
     #[test]
-    fn keli_core_user_delta_metrics_report_mieru_port_range_skip() {
-        let dir = temp_test_dir("user-delta-mieru-port-range-skip");
+    fn keli_core_user_delta_fans_out_mieru_port_range_targets() {
+        let dir = temp_test_dir("user-delta-mieru-port-range-fanout");
         let mut resolved = ResolvedConfig {
             kernel: Default::default(),
             realtime: Default::default(),
@@ -1931,8 +1981,15 @@ mod tests {
         };
         resolved.kernel.r#type = "keli-core-rs".to_string();
         resolved.kernel.config_dir = dir.join("v2node").display().to_string();
-        let node = test_node_with_host("https://panel.example.test", "mieru", 12);
+        let mut node = test_node_with_host("https://panel.example.test", "mieru", 12);
+        node.common.ports = PortValue("2100-2101".to_string());
         let tag = node.tag.clone();
+        let new_user = UserInfo {
+            id: 13,
+            uuid: "mieru-new-secret".to_string(),
+            speed_limit: 10,
+            device_limit: 1,
+        };
         let mut initial_users = BTreeMap::new();
         initial_users.insert(
             tag.clone(),
@@ -1943,34 +2000,110 @@ mod tests {
                 device_limit: 0,
             }],
         );
-        let mut plan = build_runtime_bootstrap_plan_with_users(
+        let plan = build_runtime_bootstrap_plan_with_users(
             resolved,
             vec![node],
             Vec::new(),
             &initial_users,
         )
         .unwrap();
-        plan.core_plan.as_mut().unwrap().inbounds[0].port_range = "20000-20001".to_string();
         let mut users_by_tag = BTreeMap::new();
-        users_by_tag.insert(tag, Vec::new());
+        users_by_tag.insert(tag.clone(), vec![new_user.clone()]);
+        let mut sync_state = BTreeMap::new();
+        sync_state.insert(
+            tag.clone(),
+            RuntimeUserSyncEntry {
+                state: UserSyncState {
+                    revision: 2,
+                    users: vec![new_user.clone()],
+                    updated_at: None,
+                },
+                delta_supported: true,
+                path: String::new(),
+                last_change: Some(RuntimeUserDeltaChange {
+                    full: false,
+                    base_revision: 1,
+                    revision: 2,
+                    diff: UserListDiff {
+                        added: vec![new_user.clone()],
+                        updated: Vec::new(),
+                        deleted: Vec::new(),
+                    },
+                }),
+            },
+        );
+        let config_path = plan.core_plan.as_ref().unwrap().config_path.clone();
+        let control_addr = keli_core_rs_control_addr(&config_path);
+        let listener = TcpListener::bind(&control_addr).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let expected_tags = [format!("{tag}|port:2100"), format!("{tag}|port:2101")];
+        let expected_tags_for_thread = expected_tags.clone();
+        let new_uuid_for_thread = new_user.uuid.clone();
+        let control_thread = thread::spawn(move || {
+            let mut received = Vec::new();
+            for index in 0..2 {
+                let deadline = Instant::now() + Duration::from_secs(2);
+                let (mut stream, _) = loop {
+                    match listener.accept() {
+                        Ok(accepted) => break accepted,
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            if Instant::now() >= deadline {
+                                panic!("mieru fanout control command {index} was not received");
+                            }
+                            thread::sleep(Duration::from_millis(10));
+                        }
+                        Err(error) => panic!("accept keli-core-rs control command: {error}"),
+                    }
+                };
+                let mut command = String::new();
+                BufReader::new(stream.try_clone().unwrap())
+                    .read_line(&mut command)
+                    .unwrap();
+                let command = serde_json::from_str::<serde_json::Value>(command.trim()).unwrap();
+                assert_eq!(command["type"], "apply_user_delta");
+                assert_eq!(command["node_tag"], expected_tags_for_thread[index]);
+                assert_eq!(command["delta"]["base_revision"], "1");
+                assert_eq!(command["delta"]["revision"], "2");
+                assert_eq!(command["delta"]["added"][0]["uuid"], new_uuid_for_thread);
+                received.push(command["node_tag"].as_str().unwrap().to_string());
+                writeln!(
+                    stream,
+                    "{}",
+                    json!({
+                        "type": "user_delta_applied",
+                        "node_tag": expected_tags_for_thread[index],
+                        "result": {
+                            "added": 1,
+                            "updated": 0,
+                            "deleted": 0,
+                            "missing_updated": 0,
+                            "missing_deleted": 0,
+                            "active_users": 1,
+                            "full_applied": false
+                        },
+                        "status": "running",
+                        "listeners": []
+                    })
+                )
+                .unwrap();
+            }
+            received
+        });
         let mut metrics = RuntimeUserDeltaMetrics::default();
 
         assert_eq!(
-            try_apply_keli_core_rs_user_deltas(
-                &plan,
-                &BTreeMap::new(),
-                &users_by_tag,
-                &mut metrics
-            ),
-            RuntimeUserDeltaApplyOutcome::Rebuild
+            try_apply_keli_core_rs_user_deltas(&plan, &sync_state, &users_by_tag, &mut metrics),
+            RuntimeUserDeltaApplyOutcome::Applied
         );
+        assert_eq!(control_thread.join().unwrap(), expected_tags.to_vec());
 
-        assert_eq!(metrics.kelinode_user_delta_skipped_port_range_total, 1);
+        assert_eq!(metrics.kelinode_user_delta_skipped_port_range_total, 0);
         assert_eq!(metrics.kelinode_user_delta_full_rebuild_total, 0);
+        assert_eq!(metrics.kelinode_user_delta_native_apply_success_total, 2);
         let status = metrics.status_value();
         assert_eq!(
             status["kelinode_user_delta_skipped_port_range_total"],
-            json!(1)
+            json!(0)
         );
         let _ = fs::remove_dir_all(dir);
     }
@@ -2027,6 +2160,124 @@ mod tests {
         );
 
         assert_eq!(metrics.kelinode_user_delta_skipped_port_range_total, 0);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn revision_baseline_fans_out_mieru_port_range_targets() {
+        let dir = temp_test_dir("revision-baseline-mieru-port-range-fanout");
+        let mut resolved = ResolvedConfig {
+            kernel: Default::default(),
+            realtime: Default::default(),
+            machine: ResolvedMachineConfig {
+                enabled: true,
+                continue_on_error: true,
+                profiles: Vec::new(),
+            },
+            agent: Default::default(),
+            nodes: vec![NodeConfig {
+                url: "https://panel.example.test".to_string(),
+                token: "token".to_string(),
+                node_id: 14,
+                machine_id: 14,
+                ..NodeConfig::default()
+            }],
+        };
+        resolved.kernel.r#type = "keli-core-rs".to_string();
+        resolved.kernel.config_dir = dir.join("v2node").display().to_string();
+        let mut node = test_node_with_host("https://panel.example.test", "mieru", 14);
+        node.common.ports = PortValue("2200-2201".to_string());
+        let tag = node.tag.clone();
+        let user = UserInfo {
+            id: 14,
+            uuid: "mieru-baseline-secret".to_string(),
+            speed_limit: 0,
+            device_limit: 0,
+        };
+        let mut users_by_tag = BTreeMap::new();
+        users_by_tag.insert(tag.clone(), vec![user.clone()]);
+        let plan = build_runtime_bootstrap_plan_with_users(
+            resolved,
+            vec![node],
+            Vec::new(),
+            &users_by_tag,
+        )
+        .unwrap();
+        let mut sync_state = BTreeMap::new();
+        sync_state.insert(
+            tag.clone(),
+            RuntimeUserSyncEntry {
+                state: UserSyncState {
+                    revision: 9,
+                    users: vec![user.clone()],
+                    updated_at: None,
+                },
+                delta_supported: true,
+                path: String::new(),
+                last_change: None,
+            },
+        );
+        let config_path = plan.core_plan.as_ref().unwrap().config_path.clone();
+        let control_addr = keli_core_rs_control_addr(&config_path);
+        let listener = TcpListener::bind(&control_addr).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let expected_tags = [format!("{tag}|port:2200"), format!("{tag}|port:2201")];
+        let expected_tags_for_thread = expected_tags.clone();
+        let user_uuid_for_thread = user.uuid.clone();
+        let control_thread = thread::spawn(move || {
+            let mut received = Vec::new();
+            for index in 0..2 {
+                let deadline = Instant::now() + Duration::from_secs(2);
+                let (mut stream, _) = loop {
+                    match listener.accept() {
+                        Ok(accepted) => break accepted,
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            if Instant::now() >= deadline {
+                                panic!("mieru baseline control command {index} was not received");
+                            }
+                            thread::sleep(Duration::from_millis(10));
+                        }
+                        Err(error) => panic!("accept keli-core-rs control command: {error}"),
+                    }
+                };
+                let mut command = String::new();
+                BufReader::new(stream.try_clone().unwrap())
+                    .read_line(&mut command)
+                    .unwrap();
+                let command = serde_json::from_str::<serde_json::Value>(command.trim()).unwrap();
+                assert_eq!(command["type"], "apply_user_delta");
+                assert_eq!(command["node_tag"], expected_tags_for_thread[index]);
+                assert_eq!(command["delta"]["revision"], "9");
+                assert_eq!(command["delta"]["full"][0]["uuid"], user_uuid_for_thread);
+                received.push(command["node_tag"].as_str().unwrap().to_string());
+                writeln!(
+                    stream,
+                    "{}",
+                    json!({
+                        "type": "user_delta_applied",
+                        "node_tag": expected_tags_for_thread[index],
+                        "result": {
+                            "added": 0,
+                            "updated": 0,
+                            "deleted": 0,
+                            "missing_updated": 0,
+                            "missing_deleted": 0,
+                            "active_users": 1,
+                            "full_applied": true
+                        },
+                        "status": "running",
+                        "listeners": []
+                    })
+                )
+                .unwrap();
+            }
+            received
+        });
+
+        let established = try_establish_keli_core_rs_revision_baseline(&plan, &sync_state, &[tag]);
+        assert!(established);
+        assert_eq!(control_thread.join().unwrap(), expected_tags.to_vec());
+
         let _ = fs::remove_dir_all(dir);
     }
 

@@ -2209,7 +2209,7 @@ fn expand_keli_core_rs_inbound(inbound: &InboundPlan) -> Result<Vec<InboundPlan>
         .collect())
 }
 
-fn parse_keli_core_rs_port_range(raw: &str) -> Result<Vec<u16>, String> {
+pub(crate) fn parse_keli_core_rs_port_range(raw: &str) -> Result<Vec<u16>, String> {
     let mut ports = Vec::new();
     let mut seen = BTreeSet::new();
     for token in raw.split(',') {
