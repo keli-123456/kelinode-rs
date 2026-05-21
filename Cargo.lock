@@ -967,7 +967,7 @@ dependencies = [
 
 [[package]]
 name = "keli-core-rs"
-version = "0.1.57"
+version = "0.1.58"
 dependencies = [
  "aes",
  "aes-gcm",
@@ -1004,7 +1004,7 @@ dependencies = [
 
 [[package]]
 name = "kelinode-rs"
-version = "0.1.139"
+version = "0.1.140"
 dependencies = [
  "anyhow",
  "futures-util",
