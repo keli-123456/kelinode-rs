@@ -669,6 +669,8 @@ User=root
 Group=root
 Type=simple
 LimitNOFILE=999999
+Environment=MALLOC_ARENA_MAX=2
+Environment=MALLOC_TRIM_THRESHOLD_=262144
 WorkingDirectory=${INSTALL_DIR}
 ExecStart=${INSTALL_DIR}/${BINARY_NAME} server --config ${CONFIG_FILE}
 Restart=always
