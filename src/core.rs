@@ -2878,7 +2878,7 @@ pub fn build_inbound_plan_with_users(
         listen: resolve_node_listen_ip(&node.common.listen_ip),
         port: node.common.server_port,
         port_range: resolve_node_port_range(node),
-        security: security_name(node.security),
+        security: inbound_security_name(node),
         network: core_network_name(node)?,
         multiplexing: node.common.multiplexing.trim().to_string(),
         network_settings: node.common.network_settings.clone(),
@@ -3030,6 +3030,34 @@ fn security_name(security: Security) -> String {
         Security::Reality => "reality".to_string(),
         Security::Other(value) => format!("other-{value}"),
     }
+}
+
+fn inbound_security_name(node: &NodeInfo) -> String {
+    if node.security == Security::Tls && panel_tls_cert_mode_disables_stream_tls(node) {
+        return "none".to_string();
+    }
+    security_name(node.security)
+}
+
+fn panel_tls_cert_mode_disables_stream_tls(node: &NodeInfo) -> bool {
+    if node.common.tls == 0 {
+        return false;
+    }
+    if !matches!(
+        node.protocol,
+        Protocol::Vmess | Protocol::Vless | Protocol::Trojan
+    ) {
+        return false;
+    }
+    let cert_mode = node
+        .common
+        .cert_info
+        .as_ref()
+        .map(|cert| cert.cert_mode.as_str())
+        .unwrap_or_else(|| node.common.tls_settings.cert_mode.as_str())
+        .trim()
+        .to_ascii_lowercase();
+    matches!(cert_mode.as_str(), "" | "none")
 }
 
 fn resolve_vless_decryption(node: &NodeInfo) -> Result<String, CoreError> {
@@ -5892,6 +5920,37 @@ mod tests {
         let inbound = build_inbound_plan(&node).unwrap();
 
         assert_eq!(inbound.alpn, vec!["h3".to_string(), "h2".to_string()]);
+    }
+
+    #[test]
+    fn tls_cert_mode_none_or_empty_renders_plain_ws_like_go_kelinode() {
+        for cert_mode in ["none", ""] {
+            let mut node = test_node("trojan", 54, "");
+            node.security = Security::Tls;
+            node.common.tls = 1;
+            node.common.network = "ws".to_string();
+            node.common.network_settings = json!({"path": "/answer"});
+            {
+                let cert = node.common.cert_info.as_mut().unwrap();
+                cert.cert_mode = cert_mode.to_string();
+                cert.cert_file = "/tmp/trojan.cer".to_string();
+                cert.key_file = "/tmp/trojan.key".to_string();
+                cert.cert_domain = "null.example.test".to_string();
+            }
+
+            let plan = CorePlan::from_nodes(
+                CoreKind::KeliCoreRs,
+                PathBuf::from("/srv/v2node/keli-core-rs.json"),
+                &[node],
+            )
+            .unwrap();
+            let config = render_core_config(&plan).unwrap();
+
+            assert_eq!(plan.inbounds[0].security, "none");
+            assert!(config["inbounds"][0]["tls"].is_null());
+            assert_eq!(config["inbounds"][0]["transport"]["network"], "ws");
+            assert_eq!(config["inbounds"][0]["transport"]["path"], "/answer");
+        }
     }
 
     #[test]
