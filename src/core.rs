@@ -2527,6 +2527,7 @@ fn render_keli_core_rs_config_bytes(plan: &CorePlan) -> Result<Vec<u8>, CoreErro
         true,
     )?;
     write_json_field(&mut content, "log_level", &"info", false)?;
+    write_json_field(&mut content, "policy", &render_keli_core_rs_policy(), false)?;
     write_json_field(&mut content, "dns", &render_keli_core_rs_dns(plan)?, false)?;
     content.extend_from_slice(br#","inbounds":["#);
     let mut first_inbound = true;
@@ -5901,6 +5902,8 @@ mod tests {
         assert!(!second.changed);
         assert_eq!(first.inbound_count, 1);
         assert!(saved.contains("\"inbounds\""));
+        assert!(saved.contains("\"policy\""));
+        assert!(saved.contains("\"connect_timeout_secs\":15"));
         assert!(!path.with_extension("json.tmp").exists());
 
         let _ = fs::remove_dir_all(dir);
