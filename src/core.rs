@@ -339,6 +339,7 @@ fn render_keli_core_rs_config(plan: &CorePlan) -> Result<Value, CoreError> {
     Ok(json!({
         "instance_id": keli_core_rs_instance_id(plan),
         "log_level": "info",
+        "policy": render_keli_core_rs_policy(),
         "dns": render_keli_core_rs_dns(plan)?,
         "inbounds": render_keli_core_rs_inbounds(&plan.inbounds)?,
         "outbounds": outbounds,
@@ -350,6 +351,18 @@ fn render_keli_core_rs_config(plan: &CorePlan) -> Result<Value, CoreError> {
     }))
 }
 
+fn render_keli_core_rs_policy() -> Value {
+    json!({
+        "handshake_secs": 4,
+        "connection_idle_secs": 120,
+        "uplink_only_secs": 2,
+        "downlink_only_secs": 4,
+        "buffer_size_kib": 128,
+        "sniffing_cache_millis": 200,
+        "connect_timeout_secs": 15
+    })
+}
+
 fn collect_keli_core_rs_route_outbounds(
     inbound: &InboundPlan,
     outbounds: &mut Vec<Value>,
@@ -359,6 +372,9 @@ fn collect_keli_core_rs_route_outbounds(
             continue;
         }
         if !matches!(route.action.as_str(), "route" | "route_ip" | "default_out") {
+            continue;
+        }
+        if keli_core_rs_route_outbound_is_blackhole(route) {
             continue;
         }
         if let Some((tag, outbound)) = keli_core_rs_route_outbound(inbound, route)? {
@@ -388,6 +404,13 @@ fn render_keli_core_rs_routes_for_inbound(inbound: &InboundPlan) -> Result<Vec<V
                 "action": "block"
             })),
             "route" => {
+                if keli_core_rs_route_outbound_is_blackhole(route) {
+                    routes.push(json!({
+                        "targets": keli_core_rs_route_targets(inbound, route)?,
+                        "action": "block"
+                    }));
+                    continue;
+                }
                 if let Some((tag, outbound)) = keli_core_rs_route_outbound(inbound, route)? {
                     routes.push(json!({
                         "targets": keli_core_rs_route_targets(inbound, route)?,
@@ -399,6 +422,13 @@ fn render_keli_core_rs_routes_for_inbound(inbound: &InboundPlan) -> Result<Vec<V
                 }
             }
             "route_ip" => {
+                if keli_core_rs_route_outbound_is_blackhole(route) {
+                    routes.push(json!({
+                        "targets": prefixed_keli_core_rs_ip_route_targets(inbound, route)?,
+                        "action": "block"
+                    }));
+                    continue;
+                }
                 if let Some((tag, outbound)) = keli_core_rs_route_outbound(inbound, route)? {
                     routes.push(json!({
                         "targets": prefixed_keli_core_rs_ip_route_targets(inbound, route)?,
@@ -410,6 +440,13 @@ fn render_keli_core_rs_routes_for_inbound(inbound: &InboundPlan) -> Result<Vec<V
                 }
             }
             "default_out" => {
+                if keli_core_rs_route_outbound_is_blackhole(route) {
+                    routes.push(json!({
+                        "targets": ["*"],
+                        "action": "block"
+                    }));
+                    continue;
+                }
                 if let Some((tag, outbound)) = keli_core_rs_route_outbound(inbound, route)? {
                     routes.push(json!({
                         "targets": ["*"],
@@ -516,6 +553,17 @@ fn parse_route_outbound(route: &RoutePlan) -> Option<(String, Value)> {
         return None;
     }
     Some((tag.to_string(), outbound))
+}
+
+fn keli_core_rs_route_outbound_is_blackhole(route: &RoutePlan) -> bool {
+    parse_route_outbound(route)
+        .and_then(|(_, outbound)| {
+            outbound
+                .get("protocol")
+                .and_then(Value::as_str)
+                .map(|protocol| protocol.trim().eq_ignore_ascii_case("blackhole"))
+        })
+        .unwrap_or(false)
 }
 
 fn keli_core_rs_route_outbound(
@@ -675,7 +723,7 @@ fn keli_core_rs_route_outbound_stream(
     }
     if let Some(object) = stream_settings.as_object() {
         for (key, value) in object {
-            if matches!(key.as_str(), "network" | "security")
+            if matches!(key.as_str(), "network" | "security" | "sockopt" | "mux")
                 || (security == "tls" && key == "tlsSettings")
                 || (network == "ws" && key == "wsSettings")
                 || (network == "httpupgrade" && key == "httpupgradeSettings")
@@ -694,6 +742,9 @@ fn keli_core_rs_route_outbound_stream(
             )));
         }
     }
+    validate_ignored_object_if_present(inbound, tag, "sockopt", stream_settings.get("sockopt"))?;
+    validate_ignored_object_if_present(inbound, tag, "mux", stream_settings.get("mux"))?;
+    validate_ignored_object_if_present(inbound, tag, "mux", outbound.get("mux"))?;
     let tls_settings = stream_settings.get("tlsSettings").unwrap_or(&Value::Null);
     let tls = if security == "tls" {
         Some(json!({
@@ -858,6 +909,24 @@ fn is_empty_json(value: &Value) -> bool {
         Value::Object(value) => value.is_empty(),
         _ => false,
     }
+}
+
+fn validate_ignored_object_if_present(
+    inbound: &InboundPlan,
+    tag: &str,
+    key: &str,
+    value: Option<&Value>,
+) -> Result<(), CoreError> {
+    let Some(value) = value.filter(|value| !is_empty_json(value)) else {
+        return Ok(());
+    };
+    if value.is_object() {
+        return Ok(());
+    }
+    Err(CoreError::new(format!(
+        "keli-core-rs route outbound {tag} on inbound {} {key} must be an object",
+        inbound.tag
+    )))
 }
 
 fn keli_core_rs_route_outbound_endpoint(
@@ -3802,6 +3871,79 @@ mod tests {
     }
 
     #[test]
+    fn renders_keli_core_rs_xray_policy_defaults() {
+        let node = test_node("vless", 45, "");
+        let plan = CorePlan::from_nodes(
+            CoreKind::KeliCoreRs,
+            PathBuf::from("/srv/v2node/keli-core-rs.json"),
+            &[node],
+        )
+        .unwrap();
+
+        let config = render_core_config(&plan).unwrap();
+
+        assert_eq!(config["policy"]["handshake_secs"], 4);
+        assert_eq!(config["policy"]["connection_idle_secs"], 120);
+        assert_eq!(config["policy"]["uplink_only_secs"], 2);
+        assert_eq!(config["policy"]["downlink_only_secs"], 4);
+        assert_eq!(config["policy"]["buffer_size_kib"], 128);
+        assert_eq!(config["policy"]["sniffing_cache_millis"], 200);
+        assert_eq!(config["policy"]["connect_timeout_secs"], 15);
+    }
+
+    #[test]
+    fn renders_keli_core_rs_route_outbound_with_xray_noop_keys() {
+        let mut node = test_node("http", 107, "");
+        node.common.routes = vec![Route {
+            id: 1,
+            match_rules: vec!["domain:example.com".to_string()],
+            action: "route".to_string(),
+            action_value: Some(
+                r#"{"tag":"vless-ws","protocol":"vless","settings":{"vnext":[{"address":"proxy.example.com","port":443,"users":[{"id":"11111111-1111-1111-1111-111111111111","encryption":"none"}]}]},"streamSettings":{"network":"ws","security":"tls","sockopt":{"tcpFastOpen":true},"tlsSettings":{"serverName":"sni.example.com"},"wsSettings":{"path":"/vless","headers":{"Host":"cdn.example.com"}}},"mux":{"enabled":false}}"#
+                    .to_string(),
+            ),
+        }];
+        let plan = CorePlan::from_nodes(
+            CoreKind::KeliCoreRs,
+            PathBuf::from("/srv/v2node/keli-core-rs.json"),
+            &[node],
+        )
+        .unwrap();
+
+        let config = render_core_config(&plan).unwrap();
+
+        assert_eq!(config["outbounds"][1]["tag"], "vless-ws");
+        assert_eq!(config["outbounds"][1]["transport"]["network"], "ws");
+        assert_eq!(config["outbounds"][1]["transport"]["path"], "/vless");
+    }
+
+    #[test]
+    fn renders_keli_core_rs_blackhole_route_outbound_as_block_rule() {
+        let mut node = test_node("http", 108, "");
+        node.common.routes = vec![Route {
+            id: 1,
+            match_rules: vec!["domain:ads.example".to_string()],
+            action: "route".to_string(),
+            action_value: Some(r#"{"tag":"blocked","protocol":"blackhole"}"#.to_string()),
+        }];
+        let plan = CorePlan::from_nodes(
+            CoreKind::KeliCoreRs,
+            PathBuf::from("/srv/v2node/keli-core-rs.json"),
+            &[node],
+        )
+        .unwrap();
+
+        let config = render_core_config(&plan).unwrap();
+
+        assert_eq!(config["outbounds"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            config["inbounds"][0]["routes"][0]["targets"][0],
+            "domain:ads.example"
+        );
+        assert_eq!(config["inbounds"][0]["routes"][0]["action"], "block");
+    }
+
+    #[test]
     fn renders_keli_core_rs_proxy_route_outbounds() {
         let mut node = test_node("http", 83, "");
         node.common.routes = vec![Route {
@@ -4577,6 +4719,30 @@ mod tests {
         let err = render_core_config(&plan).unwrap_err();
 
         assert!(err.message.contains("protocol naive"));
+    }
+
+    #[test]
+    fn keli_core_rs_rejects_invalid_ignored_route_outbound_shape() {
+        let mut node = test_node("http", 109, "");
+        node.common.routes = vec![Route {
+            id: 1,
+            match_rules: vec!["domain:example.com".to_string()],
+            action: "route".to_string(),
+            action_value: Some(
+                r#"{"tag":"vless-ws","protocol":"vless","settings":{"vnext":[{"address":"proxy.example.com","port":443,"users":[{"id":"11111111-1111-1111-1111-111111111111","encryption":"none"}]}]},"streamSettings":{"network":"ws","security":"tls","mux":true,"tlsSettings":{"serverName":"sni.example.com"},"wsSettings":{"path":"/vless"}}}"#
+                    .to_string(),
+            ),
+        }];
+        let plan = CorePlan::from_nodes(
+            CoreKind::KeliCoreRs,
+            PathBuf::from("/srv/v2node/keli-core-rs.json"),
+            &[node],
+        )
+        .unwrap();
+
+        let err = render_core_config(&plan).unwrap_err();
+
+        assert!(err.message.contains("mux must be an object"));
     }
 
     #[test]
