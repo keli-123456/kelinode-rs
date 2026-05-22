@@ -2102,6 +2102,7 @@ fn validate_keli_core_rs_http_transport_settings(
                 }
             }
             "headers" => validate_keli_core_rs_http_transport_headers(inbound, network, value)?,
+            "ipaddress" | "ipAddress" | "ip_address" => {}
             _ => {
                 return Err(CoreError::new(format!(
                     "keli-core-rs {network} setting {key} on inbound {} is not supported yet",
@@ -5135,6 +5136,35 @@ mod tests {
         assert_eq!(config["inbounds"][2]["transport"]["path"], "/trojan");
         assert_eq!(
             config["inbounds"][2]["transport"]["host"],
+            "trojan.example.test"
+        );
+    }
+
+    #[test]
+    fn renders_keli_core_rs_trojan_websocket_with_legacy_panel_ipaddress_setting() {
+        let mut trojan = test_node("trojan", 66, "");
+        trojan.common.network = "ws".to_string();
+        trojan.common.network_settings = json!({
+            "path": "/trojan",
+            "headers": {
+                "Host": "trojan.example.test"
+            },
+            "ipaddress": "127.0.0.1"
+        });
+        let plan = CorePlan::from_nodes(
+            CoreKind::KeliCoreRs,
+            PathBuf::from("/srv/v2node/keli-core-rs.json"),
+            &[trojan],
+        )
+        .unwrap();
+
+        let config = render_core_config(&plan).unwrap();
+
+        assert_eq!(config["inbounds"][0]["protocol"], "trojan");
+        assert_eq!(config["inbounds"][0]["transport"]["network"], "ws");
+        assert_eq!(config["inbounds"][0]["transport"]["path"], "/trojan");
+        assert_eq!(
+            config["inbounds"][0]["transport"]["host"],
             "trojan.example.test"
         );
     }

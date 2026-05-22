@@ -419,7 +419,8 @@ where
                         }
                         startup_full_snapshot_tags = user_change_tags.clone();
                         self.user_delta_metrics.record_full_rebuild();
-                        let users_for_rebuild = user_sync_users_for_tags(
+                        let users_for_rebuild = user_sync_users_for_runtime_rebuild(
+                            &self.plan,
                             &self.user_sync,
                             &user_change_tags,
                             &options.users_by_node_tag,
@@ -1518,6 +1519,17 @@ fn user_sync_users_for_tags(
         .collect()
 }
 
+fn user_sync_users_for_runtime_rebuild(
+    plan: &RuntimeBootstrapPlan,
+    sync_state: &BTreeMap<String, RuntimeUserSyncEntry>,
+    tags: &[String],
+    fallback: &BTreeMap<String, Vec<UserInfo>>,
+) -> BTreeMap<String, Vec<UserInfo>> {
+    let mut users = latest_users_by_node_tag_for_core_plan(plan, sync_state);
+    users.extend(user_sync_users_for_tags(sync_state, tags, fallback));
+    users
+}
+
 fn load_runtime_user_sync_entry(config: &NodeConfig) -> RuntimeUserSyncEntry {
     let path = user_sync_state_path(&config.config_dir, &config.url, config.node_id);
     let state = load_user_sync_state(&path).unwrap_or_default();
@@ -1582,11 +1594,11 @@ mod tests {
         run_runtime_loop_async_with_events, runtime_loop_event_for_task,
         runtime_plan_needs_cached_users, runtime_user_delta_change, should_run,
         try_apply_keli_core_rs_user_deltas, try_establish_keli_core_rs_revision_baseline,
-        user_delta_body_is_revision_only, user_delta_not_supported, AsyncRuntimeLoopCallbacks,
-        PanelRuntimeLoop, RuntimeLoopCallbacks, RuntimeLoopEvent, RuntimeLoopEventKind,
-        RuntimeLoopExit, RuntimeLoopExitReason, RuntimeLoopFuture, RuntimeLoopOptions,
-        RuntimeUserDeltaApplyOutcome, RuntimeUserDeltaChange, RuntimeUserDeltaMetrics,
-        RuntimeUserSyncEntry,
+        user_delta_body_is_revision_only, user_delta_not_supported,
+        user_sync_users_for_runtime_rebuild, AsyncRuntimeLoopCallbacks, PanelRuntimeLoop,
+        RuntimeLoopCallbacks, RuntimeLoopEvent, RuntimeLoopEventKind, RuntimeLoopExit,
+        RuntimeLoopExitReason, RuntimeLoopFuture, RuntimeLoopOptions, RuntimeUserDeltaApplyOutcome,
+        RuntimeUserDeltaChange, RuntimeUserDeltaMetrics, RuntimeUserSyncEntry,
     };
     use crate::config::{NodeConfig, ResolvedConfig, ResolvedMachineConfig};
     use crate::control::RuntimeControlOptions;
@@ -2278,6 +2290,103 @@ mod tests {
         assert!(established);
         assert_eq!(control_thread.join().unwrap(), expected_tags.to_vec());
 
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn runtime_rebuild_user_selection_preserves_user_required_inbounds() {
+        let dir = temp_test_dir("runtime-rebuild-keeps-user-required-inbounds");
+        let mut resolved = ResolvedConfig {
+            kernel: Default::default(),
+            realtime: Default::default(),
+            machine: ResolvedMachineConfig {
+                enabled: true,
+                continue_on_error: true,
+                profiles: Vec::new(),
+            },
+            agent: Default::default(),
+            nodes: vec![
+                NodeConfig {
+                    url: "https://panel.example.test".to_string(),
+                    token: "token".to_string(),
+                    node_id: 30,
+                    machine_id: 5,
+                    ..NodeConfig::default()
+                },
+                NodeConfig {
+                    url: "https://panel.example.test".to_string(),
+                    token: "token".to_string(),
+                    node_id: 57,
+                    machine_id: 5,
+                    ..NodeConfig::default()
+                },
+            ],
+        };
+        resolved.kernel.r#type = "keli-core-rs".to_string();
+        resolved.kernel.config_dir = dir.join("v2node").display().to_string();
+        let vless = test_node_with_host("https://panel.example.test", "vless", 30);
+        let anytls = test_node_with_host("https://panel.example.test", "anytls", 57);
+        let vless_tag = vless.tag.clone();
+        let anytls_tag = anytls.tag.clone();
+        let vless_user = UserInfo {
+            id: 30,
+            uuid: "11111111-1111-1111-1111-111111111111".to_string(),
+            speed_limit: 0,
+            device_limit: 0,
+        };
+        let anytls_user = UserInfo {
+            id: 57,
+            uuid: "22222222-2222-2222-2222-222222222222".to_string(),
+            speed_limit: 0,
+            device_limit: 0,
+        };
+        let mut initial_users = BTreeMap::new();
+        initial_users.insert(vless_tag.clone(), vec![vless_user.clone()]);
+        initial_users.insert(anytls_tag.clone(), vec![anytls_user.clone()]);
+        let plan = build_runtime_bootstrap_plan_with_users(
+            resolved,
+            vec![vless, anytls],
+            Vec::new(),
+            &initial_users,
+        )
+        .unwrap();
+        let mut sync_state = BTreeMap::new();
+        sync_state.insert(
+            vless_tag.clone(),
+            RuntimeUserSyncEntry {
+                state: UserSyncState {
+                    revision: 2,
+                    users: vec![vless_user],
+                    updated_at: None,
+                },
+                delta_supported: true,
+                path: String::new(),
+                last_change: None,
+            },
+        );
+        sync_state.insert(
+            anytls_tag.clone(),
+            RuntimeUserSyncEntry {
+                state: UserSyncState {
+                    revision: 2,
+                    users: vec![anytls_user],
+                    updated_at: None,
+                },
+                delta_supported: true,
+                path: String::new(),
+                last_change: None,
+            },
+        );
+
+        let selected = user_sync_users_for_runtime_rebuild(
+            &plan,
+            &sync_state,
+            &[vless_tag.clone()],
+            &BTreeMap::new(),
+        );
+
+        assert!(selected.contains_key(&vless_tag));
+        assert!(selected.contains_key(&anytls_tag));
         let _ = fs::remove_dir_all(dir);
     }
 
