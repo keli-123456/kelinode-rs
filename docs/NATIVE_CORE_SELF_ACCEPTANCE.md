@@ -46,9 +46,17 @@ maturity pass, and local loopback evidence is not treated as `Stable`.
 - `kelinode-rs`: `cargo test split_core_plans_for_nodes_with_kind --lib` passed.
 - `kelinode-rs`: `cargo test native_gray_preflight_reports_rejected_capability_blocker --bin kelinode` passed.
 - `keli-core-rs`: `cargo fmt --check` passed.
+- `keli-core-rs`: `cargo test trojan` passed with 41 Trojan-focused tests.
+- `keli-core-rs`: `cargo test naive` passed with 25 Naive-focused tests.
 - `keli-core-rs`: `cargo test mieru` passed with 20 Mieru-focused tests.
+- `keli-core-rs`: `cargo test hysteria` passed with 37 Hysteria2-focused tests.
+- `keli-core-rs`: `cargo test tuic` passed with 24 TUIC-focused tests.
+- `keli-core-rs`: `cargo test shadowsocks` passed with 16 Shadowsocks-focused tests.
+- `keli-core-rs`: `cargo test vless` passed with 62 VLESS-focused tests.
+- `keli-core-rs`: `cargo test vmess` passed with 23 VMess-focused tests.
 - `keli-core-rs`: `cargo test websocket --lib` passed with 41 WebSocket/Trojan/VLESS/VMess focused tests.
-- `keli-core-rs`: earlier full `cargo test` baseline passed before the latest remote evidence updates; final full rerun remains required before merge.
+- `keli-core-rs`: `cargo test` passed: 524 library tests plus `control_socket_smoke`.
+- `keli-core-rs`: one earlier same-session `cargo test` run observed a transient failure in `service::tests::proxies_vless_grpc_tls_and_records_traffic`; the single-test rerun and the following full rerun both passed, so it is recorded as a possible pre-existing concurrency flake rather than hidden.
 
 ## Remote Verification Log
 
