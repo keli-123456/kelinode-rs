@@ -3,84 +3,74 @@
 Date: 2026-05-24
 Branch: `codex/all-protocol-maturity-pass`
 
-## Checklist
+This document is evidence-based. `reviewed` is not treated as `passed`, a matrix entry is not a
+maturity pass, and local loopback evidence is not treated as `Stable`.
 
-- [x] capability model established
-- [x] renderer/planning capability gate connected
-- [x] gray-preflight capability gate connected
-- [x] Trojan WS/TLS WS no longer enter default production native rendering; they are `CanaryOnly` but still default `Reject` without an explicit canary switch
-- [x] Trojan TCP baseline tests reviewed
-- [x] Trojan TLS baseline tests reviewed
-- [x] Trojan WS tests reviewed
-- [x] Trojan TLS WS tests reviewed
-- [x] Trojan traffic accounting tests reviewed
-- [x] Trojan user delta tests reviewed
-- [x] Trojan speed/device limit coverage reviewed through shared limiter/session tests
-- [x] VLESS maturity matrix entry
-- [x] VMess maturity matrix entry
-- [x] Shadowsocks maturity matrix entry
-- [x] Hysteria2 maturity matrix entry
-- [x] TUIC maturity matrix entry
-- [x] Naive maturity matrix entry
-- [x] Mieru maturity matrix entry
-- [x] AnyTLS maturity matrix entry
-- [x] SOCKS/HTTP maturity matrix entry
-- [x] Route/DNS/Outbound maturity matrix entry
-- [x] docs and code matrix aligned for P0/P1/P2 baseline status
-- [x] `cargo fmt --check` for `kelinode-rs`
-- [x] final `cargo test` for `kelinode-rs`
-- [x] final `cargo fmt --check` for `keli-core-rs`
-- [x] final `cargo test` for `keli-core-rs`
-- [ ] `cargo clippy --all-targets -- -D warnings` blocked by missing local `cargo-clippy.exe`
-- [x] local loopback interop tests covered by `keli-core-rs` runtime/listener tests
-- [ ] 2.56.116.39 remote interop tests partially complete; Naive H2/TLS, Mieru TCP, and Trojan WS/TLS WS passed, Naive H3/QUIC remains blocked at official-client QUIC TLS certificate verification
-- [x] external real-client/production soak missing items recorded
+## Capability Gates
 
-## Verification Log
+| Item | Evidence | Status |
+| --- | --- | --- |
+| Capability model | `src/native_capability.rs` models protocol, direction, transport, security, UDP mode, status, decision, baseline, and evidence level. | Passed |
+| Renderer/planning gate | `split_core_plans_for_nodes_with_kind` fails hard on rejected native capabilities instead of silently skipping active nodes. | Passed |
+| Gray preflight gate | `native_gray_preflight_report` reports rejected capability blockers with protocol/direction/transport/security/status/baseline/evidence context. | Passed |
+| Trojan WS/TLS WS default production gate | Status is `CanaryOnly`, but default decision remains `Reject` until an explicit canary switch and longer soak exist. | Passed |
 
-### Local
+## Protocol Evidence
 
+| Protocol | ModelDefined | RendererGateConnected | LocalUnitPassed | LocalRuntimePassed | RemoteInteropPassed | OfficialClientInteropPassed | ThirdPartyClientInteropPassed | SoakTested | ProductionDecision |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| SOCKS | yes | yes | yes | yes | yes | n/a | yes: sing-box `socks-tcp` | no | UsableNeedsSoak / RenderNativeWithWarning |
+| HTTP proxy | yes | yes | yes | yes | yes | n/a | yes: sing-box `http-proxy-tcp` | no | UsableNeedsSoak / RenderNativeWithWarning |
+| Shadowsocks | yes | yes | yes | yes | yes | n/a | yes: sing-box `shadowsocks-tcp`, `shadowsocks-udp` | no | UsableNeedsSoak / RenderNativeWithWarning |
+| VLESS | yes | yes | yes | yes | yes | n/a | yes: sing-box TCP/TLS/Vision/REALITY/WS/HTTPUpgrade/gRPC | no | UsableNeedsSoak or CanaryOnly / RenderNativeWithWarning |
+| VMess | yes | yes | yes | yes | yes | n/a | yes: sing-box TCP/TLS/WS/HTTPUpgrade/gRPC | no | UsableNeedsSoak or CanaryOnly / RenderNativeWithWarning |
+| Trojan TCP/TLS | yes | yes | yes | yes | yes | n/a | yes: sing-box TCP plain/TLS | no | UsableNeedsSoak or CanaryOnly / RenderNativeWithWarning |
+| Trojan WS/TLS WS | yes | yes | yes | yes | yes | n/a | yes: sing-box WS plain/TLS | no | CanaryOnly / Reject by default until explicit canary gate |
+| Trojan gRPC/HTTPUpgrade | yes | yes | yes | yes | yes | n/a | yes: sing-box gRPC and HTTPUpgrade plain/TLS | no | CanaryOnly / Reject by default until explicit canary gate |
+| AnyTLS | yes | yes | yes | yes | yes | n/a | yes: sing-box `anytls-tls` | no | CanaryOnly / RenderNativeWithWarning |
+| Hysteria2 | yes | yes | yes | yes | yes | n/a | yes: sing-box `hy2-tls`, `hy2-salamander` | no | UsableNeedsSoak / RenderNativeWithWarning |
+| TUIC | yes | yes | yes | yes | yes | n/a | yes: sing-box `tuic-tls` | no | UsableNeedsSoak / RenderNativeWithWarning |
+| Naive H2/TLS | yes | yes | yes | yes | yes | yes: official NaiveProxy H2/TLS | no | no | CanaryOnly / RenderNativeWithWarning |
+| Naive H3/QUIC | yes | yes | yes | yes | no | no: official client blocked at QUIC TLS certificate verification | no | no | CanaryOnly / RenderNativeWithWarning, not Stable |
+| Mieru TCP underlay | yes | yes | yes | yes | yes | yes: official Mieru TCP underlay | no | no | CanaryOnly / RenderNativeWithWarning |
+| Mieru UDP underlay | yes | yes | yes reject path | n/a | no | no | no | no | Unsupported / Reject |
+| Direct outbound | yes | yes | yes | yes | yes: exercised by remote relay cases | n/a | n/a | no | UsableNeedsSoak / RenderNative |
+| Block route | yes | yes | yes | yes | local only | n/a | n/a | no | UsableNeedsSoak / RenderNativeWithWarning |
+| DNS | yes | yes | yes | yes | local only | n/a | n/a | no | UsableNeedsSoak / RenderNativeWithWarning |
+| Custom outbound routing | yes | yes | yes | yes | local only | n/a | n/a | no | UsableNeedsSoak / RenderNativeWithWarning |
+
+## Local Verification Log
+
+- `kelinode-rs`: `cargo fmt --check` passed.
 - `kelinode-rs`: `cargo test native_capability --lib` passed.
-- `kelinode-rs`: `cargo test native_gray_preflight --bin kelinode` passed.
-- `kelinode-rs`: `cargo test trojan_websocket --lib` passed.
-- `kelinode-rs`: `cargo test renders_keli_core_rs --lib` passed after gate integration.
-- `kelinode-rs`: final `cargo fmt --check` passed.
-- `kelinode-rs`: final `cargo test` passed with `390` library tests, `14` binary tests, and doctests.
-- `keli-core-rs`: `cargo test trojan` passed with `41 passed; 0 failed`.
-- `keli-core-rs`: final `cargo fmt --check` passed.
-- `keli-core-rs`: final `cargo test` passed with `524` library tests, `1` control socket integration test, binary tests, and doctests.
-- `keli-core-rs`: `cargo test reality --lib` passed with `30 passed; 0 failed` after applying rustfmt.
+- `kelinode-rs`: `cargo test split_core_plans_for_nodes_with_kind --lib` passed.
+- `kelinode-rs`: `cargo test native_gray_preflight_reports_rejected_capability_blocker --bin kelinode` passed.
+- `keli-core-rs`: `cargo fmt --check` passed.
+- `keli-core-rs`: `cargo test mieru` passed with 20 Mieru-focused tests.
+- `keli-core-rs`: `cargo test websocket --lib` passed with 41 WebSocket/Trojan/VLESS/VMess focused tests.
+- `keli-core-rs`: earlier full `cargo test` baseline passed before the latest remote evidence updates; final full rerun remains required before merge.
 
-### Blocked Local Tooling
-
-- `cargo clippy --all-targets -- -D warnings` could not run in either repo because `cargo-clippy.exe` is not installed for `stable-x86_64-pc-windows-msvc`.
-- `bash -n scripts/interop/*.sh` could not run because Windows `bash.exe` is a WSL stub and no WSL distribution is installed.
-
-### Remote
+## Remote Verification Log
 
 Remote host target: `2.56.116.39`.
 
-Current result: Partial evidence collected.
+- SSH readiness passed with `KELI_TEST_SSH_KEY`.
+- `scripts/interop/naive_official_remote.sh --case naive-h2-tls --rounds 3 --interval-ms 100` passed official NaiveProxy `v148.0.7778.96-5` H2/TLS for 3 rounds.
+- `scripts/interop/naive_official_remote.sh --case naive-h3-quic --rounds 3 --interval-ms 100` failed before HTTP/3 CONNECT. Failure layer: official NaiveProxy QUIC TLS/certificate verification; the helper had already supplied temporary CA, leaf SPKI allowlist, full chain, and `--no-post-quantum`.
+- `scripts/interop/mieru_official_remote.sh --rounds 3 --interval-ms 100 --base-port 19380` passed official Mieru `v3.32.0`: auth success/failure, TCP relay, SOCKS UDP ASSOCIATE over TCP underlay, multiplexed TCP probes, per-user traffic accounting, and delete-user rejection.
+- `scripts/interop/trojan_ws_remote.sh --rounds 3 --interval-ms 100 --base-port 19420` passed sing-box `v1.12.22` `trojan-ws-plain` and `trojan-ws-tls`.
+- `scripts/interop/native_matrix_remote.sh --rounds 1 --interval-ms 0 --base-port 19500` passed 34 sing-box-compatible cases: SOCKS, HTTP proxy, Shadowsocks TCP/UDP, VLESS TCP/TLS/Vision/REALITY/WS/HTTPUpgrade/gRPC, VMess TCP/TLS/WS/HTTPUpgrade/gRPC, Trojan TCP/TLS/WS/HTTPUpgrade/gRPC, AnyTLS TLS, Hysteria2 TLS/salamander, and TUIC. Naive was skipped in this matrix by design and covered by the official NaiveProxy helper; Mieru is covered by the official Mieru helper.
 
-- SSH readiness to `2.56.116.39` passed after `KELI_TEST_SSH_KEY` was provided.
-- `scripts/interop/naive_official_remote.sh --case naive-h2-tls --rounds 3 --interval-ms 100` downloaded official NaiveProxy `v148.0.7778.96-5`, built `keli-core-rs` remotely, and passed `naive-h2-tls` for 3 probe rounds.
-- `scripts/interop/naive_official_remote.sh --case naive-h3-quic --rounds 3 --interval-ms 100` failed after the helper supplied a temporary local CA through `SSL_CERT_FILE`, passed the leaf SPKI allowlist, sent a full certificate chain to the server, and disabled Chromium post-quantum negotiation with official `--no-post-quantum`. Official NaiveProxy still reported QUIC TLS handshake `certificate unknown`, then `ERR_QUIC_PROTOCOL_ERROR`; core stderr recorded `naive h3 connection error` with certificate validation failure and backoff. Failure layer: official client QUIC TLS/certificate verification before HTTP/3 CONNECT or relay handling.
-- `scripts/interop/mieru_official_remote.sh --rounds 3 --interval-ms 100 --base-port 19380` downloaded official Mieru `v3.32.0`, built `keli-core-rs` remotely, and passed Mieru TCP underlay official-client interop on `2.56.116.39`: auth success, bad-password auth failure, TCP CONNECT relay, SOCKS UDP ASSOCIATE over TCP underlay, concurrent multiplexed TCP probes, per-user traffic accounting, and delete-user rejection for a new official-client relay.
-- `scripts/interop/trojan_ws_remote.sh --rounds 3 --interval-ms 100 --base-port 19420` downloaded sing-box `v1.12.22`, built `keli-core-rs` remotely, and passed both `trojan-ws-plain` and `trojan-ws-tls` for 3 probe rounds through sing-box SOCKS5. The capability status is now `CanaryOnly`, but default production decision remains `Reject` until an explicit canary switch and longer soak exist.
-- `scripts/interop/native_matrix_remote.sh --rounds 1 --interval-ms 0 --base-port 19500` downloaded sing-box `v1.12.22`, built `keli-core-rs` remotely, and passed 34 sing-box-compatible cases on `2.56.116.39`: SOCKS, HTTP proxy, Shadowsocks TCP/UDP, VLESS TCP/TLS/Vision/REALITY/WS/HTTPUpgrade/gRPC, VMess TCP/TLS/WS/HTTPUpgrade/gRPC, Trojan TCP/TLS/WS/HTTPUpgrade/gRPC, AnyTLS TLS, Hysteria2 TLS/salamander, and TUIC. Naive H2/H3 were skipped in this sing-box matrix because Naive uses the official NaiveProxy script; Mieru uses the official Mieru script.
+## Blockers And Gaps
 
-## Remaining External Evidence
+- Naive H3/QUIC: official NaiveProxy still fails QUIC TLS certificate verification before HTTP/3 CONNECT. Do not mark Stable.
+- Trojan WS/TLS WS/gRPC/HTTPUpgrade: short third-party interop passed, but default production still rejects until explicit canary opt-in and soak are added.
+- Mieru TCP: official interop passed, but SoakTested is missing. Do not mark Stable.
+- Mieru UDP underlay: not implemented. Keep Unsupported / Reject.
+- DNS, block route, and custom outbound routing: local runtime tests exist, but production-shaped remote route/DNS soak is still missing.
+- `cargo clippy --all-targets -- -D warnings`: blocked locally because `cargo-clippy.exe` is not installed for `stable-x86_64-pc-windows-msvc`.
 
-- SoakTested for Naive H2/TLS on Linux.
-- OfficialClientInterop + SoakTested for Naive H3/QUIC on Linux after resolving the official NaiveProxy QUIC TLS certificate verification blocker.
-- SoakTested for Mieru TCP underlay after the short official-client pass.
-- Explicit canary switch plus longer Trojan WS/TLS WS soak before removing the default reject gate.
-- Remote QUIC soak for Hysteria2 and TUIC.
-- Real route/DNS/custom outbound soak using production-shaped rule sets.
-
-## Remote Commands
-
-After providing the SSH key through `KELI_TEST_SSH_KEY`, run:
+## Next Commands
 
 ```bash
 bash scripts/interop/naive_official_remote.sh --case naive-h2-tls --rounds 120 --interval-ms 1000
@@ -89,5 +79,3 @@ bash scripts/interop/mieru_official_remote.sh --rounds 120 --interval-ms 1000
 bash scripts/interop/trojan_ws_remote.sh --rounds 120 --interval-ms 1000 --base-port 19420
 bash scripts/interop/native_matrix_remote.sh --rounds 30 --interval-ms 1000 --base-port 19500
 ```
-
-Use `--dry-run` first when checking host reachability and remote paths.
