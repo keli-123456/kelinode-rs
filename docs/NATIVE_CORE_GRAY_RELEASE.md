@@ -33,6 +33,11 @@ Before starting the runtime, run the preflight gate:
 kelinode gray-preflight /etc/kelinode/config.yml
 ```
 
+The preflight output includes capability matrix warnings and blockers. A blocker means the native
+renderer would reject or fallback that exact protocol/transport/security/UDP combination. A warning
+means the config can render, but the combination still needs canary/soak evidence before widening.
+Do not widen traffic while any warning is unexplained or any blocker is present.
+
 Treat any `error:` line as a blocker. Warnings are not automatic blockers, but they must be
 understood before widening traffic. In particular, explicit listen addresses such as `127.0.0.1`
 or a single public IPv4/IPv6 address bypass the native core wildcard dual-stack listener behavior.
