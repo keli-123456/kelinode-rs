@@ -1641,7 +1641,6 @@ fn is_keli_core_rs_port_route_rule(rule: &str) -> bool {
 
 fn validate_keli_core_rs_inbound(inbound: &InboundPlan) -> Result<(), CoreError> {
     validate_keli_core_rs_protocol_scoped_fields(inbound)?;
-    validate_keli_core_rs_inbound_capability(inbound)?;
     match inbound.protocol.as_str() {
         "socks" | "http" => validate_keli_core_rs_plain_tcp_inbound(inbound),
         "shadowsocks" => {
@@ -1676,7 +1675,8 @@ fn validate_keli_core_rs_inbound(inbound: &InboundPlan) -> Result<(), CoreError>
             "keli-core-rs native renderer only supports socks/http/shadowsocks/vmess/vless/trojan/anytls/mieru tcp, naive h2/h3 tls, vmess/vless/trojan ws/httpupgrade/grpc, tuic tcp/udp relay, and hysteria2 tcp/udp relay today; inbound {} uses {}",
             inbound.tag, value
         ))),
-    }
+    }?;
+    validate_keli_core_rs_inbound_capability(inbound)
 }
 
 pub fn keli_core_rs_inbound_capability(
@@ -6060,7 +6060,7 @@ mod tests {
     }
 
     #[test]
-    fn tls_cert_mode_none_or_empty_renders_plain_ws_like_go_kelinode() {
+    fn tls_cert_mode_none_or_empty_keeps_trojan_ws_capability_blocked() {
         for cert_mode in ["none", ""] {
             let mut node = test_node("trojan", 54, "");
             node.security = Security::Tls;
@@ -6081,12 +6081,13 @@ mod tests {
                 &[node],
             )
             .unwrap();
-            let config = render_core_config(&plan).unwrap();
+            let err = render_core_config(&plan).unwrap_err();
 
             assert_eq!(plan.inbounds[0].security, "none");
-            assert!(config["inbounds"][0]["tls"].is_null());
-            assert_eq!(config["inbounds"][0]["transport"]["network"], "ws");
-            assert_eq!(config["inbounds"][0]["transport"]["path"], "/answer");
+            assert!(err.message.contains("protocol=trojan"));
+            assert!(err.message.contains("transport=ws"));
+            assert!(err.message.contains("security=none"));
+            assert!(err.message.contains("status=broken"));
         }
     }
 
