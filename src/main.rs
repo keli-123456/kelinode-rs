@@ -287,8 +287,14 @@ fn print_hy2_rules_status(status: &HysteriaPortForwardStatus) -> Result<(), Stri
 
 async fn run_native_gray_preflight(path: &str) -> Result<NativeGrayPreflightReport, String> {
     let config = AppConfig::load_from_path(path)?;
-    let plan = bootstrap_from_config(&config).await?;
-    Ok(native_gray_preflight_report(&plan))
+    match bootstrap_from_config(&config).await {
+        Ok(plan) => Ok(native_gray_preflight_report(&plan)),
+        Err(error) => {
+            let mut report = NativeGrayPreflightReport::default();
+            report.errors.push(format!("runtime plan failed: {error}"));
+            Ok(report)
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -1091,8 +1097,10 @@ mod tests {
                 "Host": "trojan.example.test"
             }
         });
-        let mut plan = test_plan(vec![node], Vec::new());
+        let mut plan = test_plan(vec![test_node_with_intervals(7, 30, 45)], Vec::new());
         plan.resolved.kernel.r#type = "keli-core-rs".to_string();
+        plan.node_infos = vec![node];
+        plan.core_plan = None;
 
         let report = native_gray_preflight_report(&plan);
 

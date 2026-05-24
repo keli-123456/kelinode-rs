@@ -227,25 +227,23 @@ pub fn split_core_plans_for_nodes_with_kind(
     nodes: &[NodeInfo],
     users_by_node_tag: &BTreeMap<String, Vec<UserInfo>>,
 ) -> Result<CorePlanBundle, CoreError> {
-    let core_nodes = nodes
-        .iter()
-        .filter(|node| {
-            match node_supported_by_keli_core_rs(&config_path, node, users_by_node_tag) {
-                Ok(()) => true,
-                Err(error) => {
-                    logging::warn(
-                        "core",
-                        format!(
-                            "skipping unsupported native inbound tag={} error={}",
-                            node.tag, error.message
-                        ),
-                    );
-                    false
-                }
-            }
-        })
-        .cloned()
-        .collect::<Vec<_>>();
+    let mut core_nodes = Vec::new();
+    for node in nodes {
+        if keli_core_rs_protocol_requires_users(node.protocol)
+            && !node_has_keli_core_rs_users(&node.tag, users_by_node_tag)
+        {
+            logging::warn(
+                "core",
+                format!(
+                    "waiting for panel users before rendering native inbound tag={}",
+                    node.tag
+                ),
+            );
+            continue;
+        }
+        node_supported_by_keli_core_rs(&config_path, node, users_by_node_tag)?;
+        core_nodes.push(node.clone());
+    }
     let core = if core_nodes.is_empty() {
         None
     } else {
@@ -3420,24 +3418,79 @@ mod tests {
     }
 
     #[test]
-    fn keli_core_rs_skips_unsupported_native_inbounds_without_dropping_supported_nodes() {
+    fn split_core_plans_for_nodes_with_kind_rejects_unsupported_native_inbounds() {
         let supported = test_node("vless", 41, "");
         let mut unsupported = test_node("anytls", 42, "");
         unsupported.common.network = "ws".to_string();
+        let unsupported_tag = unsupported.tag.clone();
+        let mut users = std::collections::BTreeMap::new();
+        users.insert(
+            unsupported_tag,
+            vec![UserInfo {
+                id: 42,
+                uuid: "anytls-secret".to_string(),
+                speed_limit: 0,
+                device_limit: 0,
+            }],
+        );
 
         let nodes = vec![supported, unsupported];
-        let bundle = split_core_plans_for_nodes_with_kind(
+        let err = split_core_plans_for_nodes_with_kind(
+            CoreKind::KeliCoreRs,
+            PathBuf::from("/srv/v2node/config.json"),
+            &nodes,
+            &users,
+        )
+        .unwrap_err();
+
+        assert!(err.message.contains("anytls"));
+        assert!(err.message.contains("supports only tcp transport"));
+    }
+
+    #[test]
+    fn split_core_plans_for_nodes_with_kind_trojan_ws_rejects_instead_of_skipping() {
+        let mut trojan_ws = test_node("trojan", 42, "");
+        trojan_ws.common.network = "ws".to_string();
+        trojan_ws.common.network_settings = json!({"path": "/trojan"});
+
+        let err = split_core_plans_for_nodes_with_kind(
+            CoreKind::KeliCoreRs,
+            PathBuf::from("/srv/v2node/config.json"),
+            &[trojan_ws],
+            &std::collections::BTreeMap::new(),
+        )
+        .unwrap_err();
+
+        assert!(err.message.contains("protocol=trojan"));
+        assert!(err.message.contains("direction=inbound"));
+        assert!(err.message.contains("transport=ws"));
+        assert!(err.message.contains("security=none"));
+        assert!(err.message.contains("status=broken"));
+        assert!(err.message.contains("decision=reject"));
+        assert!(err.message.contains("baseline_source=GoLegacyBaseline"));
+        assert!(err.message.contains("evidence_level=UnitOnly"));
+    }
+
+    #[test]
+    fn split_core_plans_for_nodes_with_kind_mixed_good_and_rejected_node_fails_all() {
+        let supported = test_node("vless", 41, "");
+        let mut trojan_ws = test_node("trojan", 42, "");
+        trojan_ws.common.network = "ws".to_string();
+        trojan_ws.common.network_settings = json!({"path": "/trojan"});
+        let nodes = vec![supported, trojan_ws];
+
+        let err = split_core_plans_for_nodes_with_kind(
             CoreKind::KeliCoreRs,
             PathBuf::from("/srv/v2node/config.json"),
             &nodes,
             &std::collections::BTreeMap::new(),
         )
-        .unwrap();
+        .unwrap_err();
 
-        let core = bundle.core.unwrap();
-        assert_eq!(core.kind, CoreKind::KeliCoreRs);
-        assert_eq!(core.inbounds.len(), 1);
-        assert_eq!(core.inbounds[0].protocol, "vless");
+        assert!(err.message.contains("protocol=trojan"));
+        assert!(err.message.contains("transport=ws"));
+        assert!(err.message.contains("status=broken"));
+        assert!(err.message.contains("decision=reject"));
     }
 
     #[test]
