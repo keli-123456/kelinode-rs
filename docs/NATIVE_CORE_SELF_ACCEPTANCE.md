@@ -33,7 +33,7 @@ Branch: `codex/all-protocol-maturity-pass`
 - [x] final `cargo test` for `keli-core-rs`
 - [ ] `cargo clippy --all-targets -- -D warnings` blocked by missing local `cargo-clippy.exe`
 - [x] local loopback interop tests covered by `keli-core-rs` runtime/listener tests
-- [ ] 2.56.116.39 remote interop tests partially complete; Naive H2/TLS passed, Naive H3/QUIC remains blocked at official-client QUIC TLS certificate verification
+- [ ] 2.56.116.39 remote interop tests partially complete; Naive H2/TLS and Mieru TCP passed, Naive H3/QUIC remains blocked at official-client QUIC TLS certificate verification
 - [x] external real-client/production soak missing items recorded
 
 ## Verification Log
@@ -65,13 +65,13 @@ Current result: Partial evidence collected.
 - SSH readiness to `2.56.116.39` passed after `KELI_TEST_SSH_KEY` was provided.
 - `scripts/interop/naive_official_remote.sh --case naive-h2-tls --rounds 3 --interval-ms 100` downloaded official NaiveProxy `v148.0.7778.96-5`, built `keli-core-rs` remotely, and passed `naive-h2-tls` for 3 probe rounds.
 - `scripts/interop/naive_official_remote.sh --case naive-h3-quic --rounds 3 --interval-ms 100` failed after the helper supplied a temporary local CA through `SSL_CERT_FILE`, passed the leaf SPKI allowlist, sent a full certificate chain to the server, and disabled Chromium post-quantum negotiation with official `--no-post-quantum`. Official NaiveProxy still reported QUIC TLS handshake `certificate unknown`, then `ERR_QUIC_PROTOCOL_ERROR`; core stderr recorded `naive h3 connection error` with certificate validation failure and backoff. Failure layer: official client QUIC TLS/certificate verification before HTTP/3 CONNECT or relay handling.
-- `scripts/interop/mieru_official_remote.sh --dry-run --mieru /tmp/nonexistent-mieru` passed preflight, but no official Mieru client binary path was available, so Mieru remains externally blocked.
+- `scripts/interop/mieru_official_remote.sh --rounds 3 --interval-ms 100 --base-port 19380` downloaded official Mieru `v3.32.0`, built `keli-core-rs` remotely, and passed Mieru TCP underlay official-client interop on `2.56.116.39`: auth success, bad-password auth failure, TCP CONNECT relay, SOCKS UDP ASSOCIATE over TCP underlay, concurrent multiplexed TCP probes, per-user traffic accounting, and delete-user rejection for a new official-client relay.
 
 ## Remaining External Evidence
 
 - SoakTested for Naive H2/TLS on Linux.
 - OfficialClientInterop + SoakTested for Naive H3/QUIC on Linux after resolving the official NaiveProxy QUIC TLS certificate verification blocker.
-- OfficialClientInterop + SoakTested for Mieru TCP underlay.
+- SoakTested for Mieru TCP underlay after the short official-client pass.
 - ThirdPartyClientInterop/soak for Trojan WS and TLS WS before removing the reject gate.
 - Remote QUIC soak for Hysteria2 and TUIC.
 - Real route/DNS/custom outbound soak using production-shaped rule sets.
@@ -83,7 +83,7 @@ After providing the SSH key through `KELI_TEST_SSH_KEY`, run:
 ```bash
 bash scripts/interop/naive_official_remote.sh --case naive-h2-tls --rounds 120 --interval-ms 1000
 bash scripts/interop/naive_official_remote.sh --case naive-h3-quic --rounds 3 --interval-ms 100
-bash scripts/interop/mieru_official_remote.sh --mieru /path/to/official/mieru
+bash scripts/interop/mieru_official_remote.sh --rounds 120 --interval-ms 1000
 ```
 
 Use `--dry-run` first when checking host reachability and remote paths.

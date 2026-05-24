@@ -7,17 +7,24 @@ source "${SCRIPT_DIR}/remote_common.sh"
 
 MIERU_CLIENT="${MIERU_CLIENT:-}"
 MIERU_CASE="${MIERU_CASE:-mieru-tcp-underlay}"
+MIERU_VERSION="${MIERU_VERSION:-v3.32.0}"
+ROUNDS="${KELI_MIERU_SOAK_ROUNDS:-3}"
+INTERVAL_MS="${KELI_MIERU_SOAK_INTERVAL_MS:-100}"
+BASE_PORT="${KELI_MIERU_BASE_PORT:-19380}"
 
 usage() {
   cat <<EOF
 Usage: $0 [options]
 
-Prepares remote Mieru official-client interop. The script fails loudly until an
-official Mieru client binary is provided.
+Runs official Mieru client interop against the native keli-core-rs Mieru TCP underlay.
 
 Options:
-  --mieru PATH      remote path to official mieru client binary
-  --case NAME       evidence case label (default: ${MIERU_CASE})
+  --mieru PATH          remote path to official mieru client binary
+  --version VERSION    official Mieru release version (default: ${MIERU_VERSION})
+  --case NAME          evidence case label (default: ${MIERU_CASE})
+  --rounds N           successful TCP probe rounds (default: ${ROUNDS})
+  --interval-ms N      delay between rounds (default: ${INTERVAL_MS})
+  --base-port PORT     first local high port to use (default: ${BASE_PORT})
 EOF
   common_usage
 }
@@ -36,8 +43,24 @@ while [[ $# -gt 0 ]]; do
       MIERU_CLIENT="$2"
       shift 2
       ;;
+    --version)
+      MIERU_VERSION="$2"
+      shift 2
+      ;;
     --case)
       MIERU_CASE="$2"
+      shift 2
+      ;;
+    --rounds)
+      ROUNDS="$2"
+      shift 2
+      ;;
+    --interval-ms)
+      INTERVAL_MS="$2"
+      shift 2
+      ;;
+    --base-port)
+      BASE_PORT="$2"
       shift 2
       ;;
     *)
@@ -60,18 +83,14 @@ trap 'rm -f "${ARCHIVE}"' EXIT
 echo "INFO remote=$(remote_target) case=${MIERU_CASE}"
 prepare_remote_core_tree "${ARCHIVE}" "${CASE_DIR}"
 
-if [[ -z "${MIERU_CLIENT}" ]]; then
-  echo "FAIL Mieru official client path is required; set MIERU_CLIENT or pass --mieru" >&2
-  echo "INFO remote tree prepared at ${CASE_DIR} for local loopback tests"
-  exit 3
+REMOTE_CMD="cd '${CASE_DIR}' && bash scripts/mieru_official_soak_linux.sh --version '${MIERU_VERSION}' --case '${MIERU_CASE}' --rounds '${ROUNDS}' --interval-ms '${INTERVAL_MS}' --base-port '${BASE_PORT}'"
+if [[ -n "${MIERU_CLIENT}" ]]; then
+  REMOTE_CMD="${REMOTE_CMD} --mieru '${MIERU_CLIENT}'"
 fi
-
-REMOTE_CMD="cd '${CASE_DIR}' && cargo test mieru && '${MIERU_CLIENT}' --version"
 
 if run_remote "${REMOTE_CMD}"; then
-  echo "PASS mieru official remote preflight"
+  echo "PASS mieru official remote interop"
 else
-  echo "FAIL mieru official remote preflight" >&2
+  echo "FAIL mieru official remote interop" >&2
   exit 1
 fi
-
