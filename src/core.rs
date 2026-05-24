@@ -34,6 +34,7 @@ pub struct CorePlan {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct CorePlanDnsOptions {
     pub servers: Vec<String>,
+    pub query_strategy: String,
     pub block_private_ips: bool,
     pub private_ip_allowlist: Vec<String>,
 }
@@ -181,10 +182,31 @@ impl CorePlan {
     pub fn apply_kernel_dns_options(&mut self, kernel: &KernelConfig) {
         self.dns = CorePlanDnsOptions {
             servers: kernel.dns_servers.clone(),
+            query_strategy: keli_core_rs_query_strategy(&kernel.ip_strategy).to_string(),
             block_private_ips: kernel.dns_block_private_ips,
             private_ip_allowlist: kernel.dns_private_ip_allowlist.clone(),
         };
     }
+}
+
+fn keli_core_rs_query_strategy(value: &str) -> &'static str {
+    match normalized_strategy_key(value).as_str() {
+        "asis" => "AsIs",
+        "useip" => "UseIP",
+        "useipv6" | "ipv6" => "UseIPv6",
+        "useipv4v6" | "ipv4v6" => "UseIPv4v6",
+        "useipv6v4" | "ipv6v4" => "UseIPv6v4",
+        _ => "UseIPv4",
+    }
+}
+
+fn normalized_strategy_key(value: &str) -> String {
+    value
+        .trim()
+        .chars()
+        .filter(|ch| *ch != '_' && *ch != '-')
+        .flat_map(char::to_lowercase)
+        .collect()
 }
 
 fn strip_native_user_emails(inbounds: &mut [InboundPlan]) {
@@ -522,7 +544,10 @@ fn render_keli_core_rs_dns(plan: &CorePlan) -> Result<Value, CoreError> {
 
     let mut dns = Map::new();
     dns.insert("servers".to_string(), json!(servers));
-    dns.insert("query_strategy".to_string(), json!("UseIPv4"));
+    dns.insert(
+        "query_strategy".to_string(),
+        json!(keli_core_rs_query_strategy(&plan.dns.query_strategy)),
+    );
     if plan.dns.block_private_ips {
         dns.insert("block_private_ips".to_string(), json!(true));
     }
@@ -3335,6 +3360,7 @@ mod tests {
         validate_keli_core_rs_inbound_capability_with_canary_allow_list, websocket_host_setting,
         websocket_path_setting, write_core_config, CoreKind, CorePlan, InboundPlan,
     };
+    use crate::config::KernelConfig;
     use crate::core_control::KeliCoreTrafficRecord;
     use crate::native_capability::{
         CapabilityDirection, CapabilitySecurity, CapabilityStatus, CapabilityTransport,
@@ -4350,6 +4376,25 @@ mod tests {
             config["dns"]["servers"][2]["domains"][1],
             "domain:example.com"
         );
+    }
+
+    #[test]
+    fn applies_kernel_ip_strategy_to_keli_core_rs_dns() {
+        let node = test_node("vless", 45, "");
+        let mut plan = CorePlan::from_nodes(
+            CoreKind::KeliCoreRs,
+            PathBuf::from("/srv/v2node/keli-core-rs.json"),
+            &[node],
+        )
+        .unwrap();
+        plan.apply_kernel_dns_options(&KernelConfig {
+            ip_strategy: "UseIPv6v4".to_string(),
+            ..KernelConfig::default()
+        });
+
+        let config = render_core_config(&plan).unwrap();
+
+        assert_eq!(config["dns"]["query_strategy"], "UseIPv6v4");
     }
 
     #[test]
