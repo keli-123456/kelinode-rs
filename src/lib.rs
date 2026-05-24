@@ -7,6 +7,7 @@ pub mod core_control;
 pub mod health;
 pub mod logging;
 pub mod machine;
+pub mod native_capability;
 pub mod node;
 pub mod panel;
 pub mod port_forward;
