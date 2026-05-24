@@ -10,6 +10,10 @@ use serde_json::{json, Map, Value};
 
 use crate::config::KernelConfig;
 use crate::logging;
+use crate::native_capability::{
+    lookup_capability_entry, unsupported_capability_entry, CapabilityDirection, CapabilityKey,
+    CapabilitySecurity, CapabilityTransport, NativeProtocol, RenderDecision, UdpMode,
+};
 use crate::panel::types::{CertInfo, NodeInfo, Protocol, Security, TlsSettings, UserInfo};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1637,6 +1641,7 @@ fn is_keli_core_rs_port_route_rule(rule: &str) -> bool {
 
 fn validate_keli_core_rs_inbound(inbound: &InboundPlan) -> Result<(), CoreError> {
     validate_keli_core_rs_protocol_scoped_fields(inbound)?;
+    validate_keli_core_rs_inbound_capability(inbound)?;
     match inbound.protocol.as_str() {
         "socks" | "http" => validate_keli_core_rs_plain_tcp_inbound(inbound),
         "shadowsocks" => {
@@ -1671,6 +1676,115 @@ fn validate_keli_core_rs_inbound(inbound: &InboundPlan) -> Result<(), CoreError>
             "keli-core-rs native renderer only supports socks/http/shadowsocks/vmess/vless/trojan/anytls/mieru tcp, naive h2/h3 tls, vmess/vless/trojan ws/httpupgrade/grpc, tuic tcp/udp relay, and hysteria2 tcp/udp relay today; inbound {} uses {}",
             inbound.tag, value
         ))),
+    }
+}
+
+fn validate_keli_core_rs_inbound_capability(inbound: &InboundPlan) -> Result<(), CoreError> {
+    let key = capability_key_for_inbound(inbound)?;
+    let entry = lookup_capability_entry(&key).unwrap_or_else(|| {
+        unsupported_capability_entry(
+            key,
+            format!(
+                "keli-core-rs native renderer has no verified capability entry for inbound {}",
+                inbound.tag
+            ),
+        )
+    });
+
+    match &entry.decision {
+        RenderDecision::RenderNative | RenderDecision::RenderNativeWithWarning => Ok(()),
+        RenderDecision::FallbackGo | RenderDecision::Reject { .. } => {
+            Err(CoreError::new(entry.gate_message()))
+        }
+    }
+}
+
+fn capability_key_for_inbound(inbound: &InboundPlan) -> Result<CapabilityKey, CoreError> {
+    Ok(CapabilityKey {
+        protocol: capability_protocol_for_inbound(inbound)?,
+        direction: CapabilityDirection::Inbound,
+        transport: capability_transport_for_inbound(inbound)?,
+        security: capability_security_for_inbound(inbound)?,
+        udp_mode: capability_udp_mode_for_inbound(inbound),
+        flow: first_non_empty(inbound.flow.trim(), "none"),
+        user_model: capability_user_model_for_inbound(inbound).to_string(),
+        route_outbound: "per_inbound_routes".to_string(),
+    })
+}
+
+fn capability_protocol_for_inbound(inbound: &InboundPlan) -> Result<NativeProtocol, CoreError> {
+    match inbound.protocol.as_str() {
+        "socks" => Ok(NativeProtocol::Socks),
+        "http" => Ok(NativeProtocol::Http),
+        "shadowsocks" => Ok(NativeProtocol::Shadowsocks),
+        "vless" => Ok(NativeProtocol::Vless),
+        "vmess" => Ok(NativeProtocol::Vmess),
+        "trojan" => Ok(NativeProtocol::Trojan),
+        "anytls" => Ok(NativeProtocol::AnyTls),
+        "hysteria" | "hysteria2" => Ok(NativeProtocol::Hysteria2),
+        "tuic" => Ok(NativeProtocol::Tuic),
+        "naive" => Ok(NativeProtocol::Naive),
+        "mieru" => Ok(NativeProtocol::Mieru),
+        value => Err(CoreError::new(format!(
+            "keli-core-rs native capability gate cannot classify protocol {value} on inbound {}",
+            inbound.tag
+        ))),
+    }
+}
+
+fn capability_transport_for_inbound(
+    inbound: &InboundPlan,
+) -> Result<CapabilityTransport, CoreError> {
+    let network = keli_core_rs_transport_network(inbound);
+    if inbound.protocol == "naive" && network == "tcp" {
+        return Ok(CapabilityTransport::H2);
+    }
+    match network.as_str() {
+        "tcp" | "tcp,udp" => Ok(CapabilityTransport::Tcp),
+        "udp" => Ok(CapabilityTransport::Udp),
+        "ws" => Ok(CapabilityTransport::Ws),
+        "httpupgrade" => Ok(CapabilityTransport::HttpUpgrade),
+        "h2" | "http" => Ok(CapabilityTransport::H2),
+        "grpc" => Ok(CapabilityTransport::Grpc),
+        "quic" | "hysteria" | "hysteria2" | "tuic" => Ok(CapabilityTransport::Quic),
+        value => Err(CoreError::new(format!(
+            "keli-core-rs native capability gate cannot classify transport {value} on inbound {}",
+            inbound.tag
+        ))),
+    }
+}
+
+fn capability_security_for_inbound(inbound: &InboundPlan) -> Result<CapabilitySecurity, CoreError> {
+    match inbound.security.as_str() {
+        "none" => Ok(CapabilitySecurity::None),
+        "tls" => Ok(CapabilitySecurity::Tls),
+        "reality" => Ok(CapabilitySecurity::Reality),
+        value => Err(CoreError::new(format!(
+            "keli-core-rs native capability gate cannot classify security {value} on inbound {}",
+            inbound.tag
+        ))),
+    }
+}
+
+fn capability_udp_mode_for_inbound(inbound: &InboundPlan) -> UdpMode {
+    match inbound.protocol.as_str() {
+        "socks" => UdpMode::UdpAssociate,
+        "http" | "naive" => UdpMode::None,
+        "shadowsocks" | "hysteria" | "hysteria2" | "tuic" => UdpMode::NativeUdp,
+        "vless" | "vmess" | "trojan" | "anytls" | "mieru" => UdpMode::UdpOverStream,
+        _ => UdpMode::None,
+    }
+}
+
+fn capability_user_model_for_inbound(inbound: &InboundPlan) -> &'static str {
+    match inbound.protocol.as_str() {
+        "socks" | "http" | "trojan" | "anytls" | "hysteria" | "hysteria2" => "password",
+        "vless" | "vmess" => "uuid",
+        "tuic" => "uuid_password",
+        "naive" => "basic_auth",
+        "mieru" => "username_password",
+        "shadowsocks" => "password",
+        _ => "none",
     }
 }
 
@@ -5116,7 +5230,7 @@ mod tests {
     }
 
     #[test]
-    fn renders_keli_core_rs_vmess_vless_and_trojan_websocket_transport_settings() {
+    fn renders_keli_core_rs_vmess_and_vless_websocket_transport_settings() {
         let mut vless = test_node("vless", 60, "");
         vless.common.network = "ws".to_string();
         vless.common.network_settings = json!({
@@ -5133,16 +5247,10 @@ mod tests {
                 "Host": "vmess.example.test"
             }
         });
-        let mut trojan = test_node("trojan", 61, "");
-        trojan.common.network = "websocket".to_string();
-        trojan.common.network_settings = json!({
-            "path": "/trojan",
-            "Host": "trojan.example.test"
-        });
         let plan = CorePlan::from_nodes(
             CoreKind::KeliCoreRs,
             PathBuf::from("/srv/v2node/keli-core-rs.json"),
-            &[vless, vmess, trojan],
+            &[vless, vmess],
         )
         .unwrap();
 
@@ -5160,16 +5268,10 @@ mod tests {
             config["inbounds"][1]["transport"]["host"],
             "vmess.example.test"
         );
-        assert_eq!(config["inbounds"][2]["transport"]["network"], "ws");
-        assert_eq!(config["inbounds"][2]["transport"]["path"], "/trojan");
-        assert_eq!(
-            config["inbounds"][2]["transport"]["host"],
-            "trojan.example.test"
-        );
     }
 
     #[test]
-    fn renders_keli_core_rs_trojan_websocket_with_legacy_panel_ipaddress_setting() {
+    fn capability_gate_rejects_trojan_websocket_with_legacy_panel_ipaddress_setting() {
         let mut trojan = test_node("trojan", 66, "");
         trojan.common.network = "ws".to_string();
         trojan.common.network_settings = json!({
@@ -5186,15 +5288,44 @@ mod tests {
         )
         .unwrap();
 
-        let config = render_core_config(&plan).unwrap();
+        let err = render_core_config(&plan).unwrap_err();
 
-        assert_eq!(config["inbounds"][0]["protocol"], "trojan");
-        assert_eq!(config["inbounds"][0]["transport"]["network"], "ws");
-        assert_eq!(config["inbounds"][0]["transport"]["path"], "/trojan");
-        assert_eq!(
-            config["inbounds"][0]["transport"]["host"],
-            "trojan.example.test"
-        );
+        assert!(err.message.contains("protocol=trojan"));
+        assert!(err.message.contains("transport=ws"));
+        assert!(err.message.contains("status=broken"));
+        assert!(err
+            .message
+            .contains("trojan websocket native relay is not production safe"));
+    }
+
+    #[test]
+    fn capability_gate_rejects_trojan_websocket_native_rendering() {
+        let mut trojan = test_node("trojan", 67, "");
+        trojan.common.network = "ws".to_string();
+        trojan.common.network_settings = json!({
+            "path": "/trojan",
+            "headers": {
+                "Host": "trojan.example.test"
+            }
+        });
+        let plan = CorePlan::from_nodes(
+            CoreKind::KeliCoreRs,
+            PathBuf::from("/srv/v2node/keli-core-rs.json"),
+            &[trojan],
+        )
+        .unwrap();
+
+        let err = render_core_config(&plan).unwrap_err();
+
+        assert!(err.message.contains("protocol=trojan"));
+        assert!(err.message.contains("direction=inbound"));
+        assert!(err.message.contains("transport=ws"));
+        assert!(err.message.contains("status=broken"));
+        assert!(err.message.contains("baseline_source=GoLegacyBaseline"));
+        assert!(err.message.contains("evidence_level=UnitOnly"));
+        assert!(err
+            .message
+            .contains("trojan websocket native relay is not production safe"));
     }
 
     #[test]
