@@ -1107,9 +1107,10 @@ mod tests {
         assert!(report.errors.iter().any(|error| {
             error.contains("protocol=trojan")
                 && error.contains("transport=ws")
-                && error.contains("status=broken")
+                && error.contains("status=canary_only")
                 && error.contains("decision=reject")
                 && error.contains("baseline_source=GoLegacyBaseline")
+                && error.contains("evidence_level=ThirdPartyClientInterop")
         }));
     }
 

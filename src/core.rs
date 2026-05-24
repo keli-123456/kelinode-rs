@@ -3465,10 +3465,12 @@ mod tests {
         assert!(err.message.contains("direction=inbound"));
         assert!(err.message.contains("transport=ws"));
         assert!(err.message.contains("security=none"));
-        assert!(err.message.contains("status=broken"));
+        assert!(err.message.contains("status=canary_only"));
         assert!(err.message.contains("decision=reject"));
         assert!(err.message.contains("baseline_source=GoLegacyBaseline"));
-        assert!(err.message.contains("evidence_level=UnitOnly"));
+        assert!(err
+            .message
+            .contains("evidence_level=ThirdPartyClientInterop"));
     }
 
     #[test]
@@ -3489,7 +3491,7 @@ mod tests {
 
         assert!(err.message.contains("protocol=trojan"));
         assert!(err.message.contains("transport=ws"));
-        assert!(err.message.contains("status=broken"));
+        assert!(err.message.contains("status=canary_only"));
         assert!(err.message.contains("decision=reject"));
     }
 

@@ -8,7 +8,7 @@ Branch: `codex/all-protocol-maturity-pass`
 - [x] capability model established
 - [x] renderer/planning capability gate connected
 - [x] gray-preflight capability gate connected
-- [x] Trojan WS/TLS WS no longer enter default production native rendering
+- [x] Trojan WS/TLS WS no longer enter default production native rendering; they are `CanaryOnly` but still default `Reject` without an explicit canary switch
 - [x] Trojan TCP baseline tests reviewed
 - [x] Trojan TLS baseline tests reviewed
 - [x] Trojan WS tests reviewed
@@ -33,7 +33,7 @@ Branch: `codex/all-protocol-maturity-pass`
 - [x] final `cargo test` for `keli-core-rs`
 - [ ] `cargo clippy --all-targets -- -D warnings` blocked by missing local `cargo-clippy.exe`
 - [x] local loopback interop tests covered by `keli-core-rs` runtime/listener tests
-- [ ] 2.56.116.39 remote interop tests partially complete; Naive H2/TLS and Mieru TCP passed, Naive H3/QUIC remains blocked at official-client QUIC TLS certificate verification
+- [ ] 2.56.116.39 remote interop tests partially complete; Naive H2/TLS, Mieru TCP, and Trojan WS/TLS WS passed, Naive H3/QUIC remains blocked at official-client QUIC TLS certificate verification
 - [x] external real-client/production soak missing items recorded
 
 ## Verification Log
@@ -66,13 +66,14 @@ Current result: Partial evidence collected.
 - `scripts/interop/naive_official_remote.sh --case naive-h2-tls --rounds 3 --interval-ms 100` downloaded official NaiveProxy `v148.0.7778.96-5`, built `keli-core-rs` remotely, and passed `naive-h2-tls` for 3 probe rounds.
 - `scripts/interop/naive_official_remote.sh --case naive-h3-quic --rounds 3 --interval-ms 100` failed after the helper supplied a temporary local CA through `SSL_CERT_FILE`, passed the leaf SPKI allowlist, sent a full certificate chain to the server, and disabled Chromium post-quantum negotiation with official `--no-post-quantum`. Official NaiveProxy still reported QUIC TLS handshake `certificate unknown`, then `ERR_QUIC_PROTOCOL_ERROR`; core stderr recorded `naive h3 connection error` with certificate validation failure and backoff. Failure layer: official client QUIC TLS/certificate verification before HTTP/3 CONNECT or relay handling.
 - `scripts/interop/mieru_official_remote.sh --rounds 3 --interval-ms 100 --base-port 19380` downloaded official Mieru `v3.32.0`, built `keli-core-rs` remotely, and passed Mieru TCP underlay official-client interop on `2.56.116.39`: auth success, bad-password auth failure, TCP CONNECT relay, SOCKS UDP ASSOCIATE over TCP underlay, concurrent multiplexed TCP probes, per-user traffic accounting, and delete-user rejection for a new official-client relay.
+- `scripts/interop/trojan_ws_remote.sh --rounds 3 --interval-ms 100 --base-port 19420` downloaded sing-box `v1.12.22`, built `keli-core-rs` remotely, and passed both `trojan-ws-plain` and `trojan-ws-tls` for 3 probe rounds through sing-box SOCKS5. The capability status is now `CanaryOnly`, but default production decision remains `Reject` until an explicit canary switch and longer soak exist.
 
 ## Remaining External Evidence
 
 - SoakTested for Naive H2/TLS on Linux.
 - OfficialClientInterop + SoakTested for Naive H3/QUIC on Linux after resolving the official NaiveProxy QUIC TLS certificate verification blocker.
 - SoakTested for Mieru TCP underlay after the short official-client pass.
-- ThirdPartyClientInterop/soak for Trojan WS and TLS WS before removing the reject gate.
+- Explicit canary switch plus longer Trojan WS/TLS WS soak before removing the default reject gate.
 - Remote QUIC soak for Hysteria2 and TUIC.
 - Real route/DNS/custom outbound soak using production-shaped rule sets.
 
@@ -84,6 +85,7 @@ After providing the SSH key through `KELI_TEST_SSH_KEY`, run:
 bash scripts/interop/naive_official_remote.sh --case naive-h2-tls --rounds 120 --interval-ms 1000
 bash scripts/interop/naive_official_remote.sh --case naive-h3-quic --rounds 3 --interval-ms 100
 bash scripts/interop/mieru_official_remote.sh --rounds 120 --interval-ms 1000
+bash scripts/interop/trojan_ws_remote.sh --rounds 120 --interval-ms 1000 --base-port 19420
 ```
 
 Use `--dry-run` first when checking host reachability and remote paths.

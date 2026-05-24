@@ -648,22 +648,26 @@ pub fn native_capability_matrix() -> Vec<CapabilityEntry> {
             NoSecurity,
             UdpOverStream,
             "password",
-            Broken,
+            CanaryOnly,
             Reject {
-                reason: "trojan websocket native relay is not production safe".to_string(),
+                reason: "trojan websocket native relay requires explicit canary gate and soak"
+                    .to_string(),
             },
             GoLegacyBaseline,
-            UnitOnly,
+            ThirdPartyClientInterop,
             "kelinode/keli-core Xray Trojan WebSocket behavior",
-            "needs websocket upgrade, frame split, close, and real-client interop",
-            "Trojan WS has known maturity gaps and must not default native",
+            "missing SoakTested and CDN-shaped Host/path/header evidence",
+            "Trojan WS passed short sing-box interop but must not default native without an explicit canary gate",
             &[
                 "trojan ws upgrade",
                 "trojan ws split frames",
                 "trojan ws close",
             ],
-            &["unit render evidence only"],
-            "fix websocket relay and add interop before native rendering",
+            &[
+                "local websocket runtime regression suite",
+                "2026-05-24 sing-box v1.12.22 remote 3-round trojan-ws-plain probe passed on 2.56.116.39",
+            ],
+            "add explicit canary switch and longer CDN-shaped soak before rendering",
         ),
         entry(
             Trojan,
@@ -672,22 +676,26 @@ pub fn native_capability_matrix() -> Vec<CapabilityEntry> {
             Tls,
             UdpOverStream,
             "password",
-            Broken,
+            CanaryOnly,
             Reject {
-                reason: "trojan tls websocket native relay is not production safe".to_string(),
+                reason: "trojan tls websocket native relay requires explicit canary gate and soak"
+                    .to_string(),
             },
             GoLegacyBaseline,
-            UnitOnly,
+            ThirdPartyClientInterop,
             "kelinode/keli-core Xray Trojan TLS WebSocket behavior",
-            "needs TLS/SNI before WS upgrade and real-client interop",
-            "Trojan TLS WS has known maturity gaps and must not default native",
+            "missing SoakTested and broader TLS/SNI/ALPN client matrix",
+            "Trojan TLS WS passed short sing-box interop but must not default native without an explicit canary gate",
             &[
                 "trojan tls ws upgrade",
                 "trojan ws frame split",
                 "trojan ping pong",
             ],
-            &["unit render evidence only"],
-            "fix TLS websocket relay and add interop before native rendering",
+            &[
+                "local TLS websocket runtime regression suite",
+                "2026-05-24 sing-box v1.12.22 remote 3-round trojan-ws-tls probe passed on 2.56.116.39",
+            ],
+            "add explicit canary switch and longer TLS/CDN-shaped soak before rendering",
         ),
         entry(
             Trojan,
@@ -1175,7 +1183,7 @@ mod tests {
     }
 
     #[test]
-    fn initial_matrix_blocks_trojan_websocket_default_native() {
+    fn initial_matrix_canary_gates_trojan_websocket_default_native() {
         let matrix = native_capability_matrix();
         for (transport, security) in [
             (CapabilityTransport::Ws, CapabilitySecurity::None),
@@ -1191,13 +1199,13 @@ mod tests {
                 })
                 .expect("trojan websocket entry");
 
-            assert!(matches!(
-                entry.status,
-                CapabilityStatus::Broken | CapabilityStatus::Experimental
-            ));
+            assert!(matches!(entry.status, CapabilityStatus::CanaryOnly));
             assert!(matches!(entry.decision, RenderDecision::Reject { .. }));
             assert!(entry.gate_message().contains("trojan"));
             assert!(entry.gate_message().contains("transport=ws"));
+            assert!(entry
+                .gate_message()
+                .contains("evidence_level=ThirdPartyClientInterop"));
         }
     }
 
