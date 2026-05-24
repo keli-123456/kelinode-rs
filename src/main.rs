@@ -28,11 +28,20 @@ const DEFAULT_CONFIG_FILE: &str = "/etc/kelinode/config.yml";
 const DEFAULT_SERVICE_NAME: &str = "kelinode";
 
 fn main() {
+    apply_embedded_core_process_defaults();
     if let Err(err) = run() {
         logging::error("agent", err);
         std::process::exit(1);
     }
 }
+
+#[cfg(feature = "embedded-core")]
+fn apply_embedded_core_process_defaults() {
+    keli_core_rs::apply_process_memory_defaults();
+}
+
+#[cfg(not(feature = "embedded-core"))]
+fn apply_embedded_core_process_defaults() {}
 
 fn run() -> Result<(), String> {
     let mut args = std::env::args().skip(1);
@@ -748,9 +757,10 @@ fn print_log_help() {
 #[cfg(test)]
 mod tests {
     use super::{
-        config_path_from_args, machine_panel_clients, native_gray_preflight_report, parse_log_args,
-        parse_rules_args, runtime_loop_options, runtime_tick_interval,
-        start_subscription_proxy_manager, LogOptions, RulesAction, DEFAULT_CONFIG_FILE,
+        apply_embedded_core_process_defaults, config_path_from_args, machine_panel_clients,
+        native_gray_preflight_report, parse_log_args, parse_rules_args, runtime_loop_options,
+        runtime_tick_interval, start_subscription_proxy_manager, LogOptions, RulesAction,
+        DEFAULT_CONFIG_FILE,
     };
     use kelinode_rs::config::{
         AgentConfig, MachineProfileConfig, NodeConfig, ResolvedConfig, ResolvedMachineConfig,
@@ -761,6 +771,11 @@ mod tests {
     use kelinode_rs::runtime::{build_runtime_bootstrap_plan, RuntimeBootstrapPlan};
     use serde_json::json;
     use std::time::Duration;
+
+    #[test]
+    fn embedded_core_process_defaults_are_safe_to_apply() {
+        apply_embedded_core_process_defaults();
+    }
 
     #[test]
     fn config_path_parser_accepts_legacy_config_flags() {
