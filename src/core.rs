@@ -3301,14 +3301,19 @@ mod tests {
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    use serde_json::json;
+    use serde::Deserialize;
+    use serde_json::{json, Value};
 
     use super::{
-        build_inbound_plan, capability_key_for_inbound, core_file_layout, core_kind_from_name,
-        keli_core_rs_inbound_capability, render_core_config, resolve_node_listen_ip,
+        build_inbound_plan, build_inbound_plan_with_users, capability_key_for_inbound,
+        capability_user_model_for_inbound, core_file_layout, core_kind_from_name,
+        grpc_service_name_setting, keli_core_rs_inbound_capability, keli_core_rs_protocol_name,
+        keli_core_rs_transport_network, render_core_config, resolve_node_listen_ip,
         should_fallback_node_listen_ip, split_core_plans_for_nodes,
-        split_core_plans_for_nodes_with_kind, write_core_config, CoreKind, CorePlan,
+        split_core_plans_for_nodes_with_kind, websocket_host_setting, websocket_path_setting,
+        write_core_config, CoreKind, CorePlan, InboundPlan,
     };
+    use crate::core_control::KeliCoreTrafficRecord;
     use crate::native_capability::{
         CapabilityDirection, CapabilitySecurity, CapabilityStatus, CapabilityTransport,
         NativeProtocol, RenderDecision, UdpMode,
@@ -3316,6 +3321,73 @@ mod tests {
     use crate::panel::types::{
         CertInfo, CommonNode, NodeInfo, PortValue, Route, Security, UserInfo,
     };
+    use crate::report::keli_core_traffic_snapshots;
+    use crate::user::apply_user_delta;
+
+    const GO_MODEL_PARITY_FIXTURES: &str =
+        include_str!("../tests/fixtures/go_model_parity/go_legacy_fixtures.json");
+
+    #[derive(Debug, Deserialize)]
+    struct GoModelParityFixtures {
+        cases: Vec<GoModelParityCase>,
+        user_delta: GoUserDeltaFixture,
+        traffic_tail: GoTrafficTailFixture,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct GoModelParityCase {
+        name: String,
+        go_source_reference: Vec<String>,
+        panel_node: Value,
+        #[serde(default)]
+        users: Vec<UserInfo>,
+        expected: GoModelParityExpected,
+    }
+
+    #[derive(Debug, Default, Deserialize)]
+    struct GoModelParityExpected {
+        protocol: Option<String>,
+        transport_network: Option<String>,
+        transport_path: Option<String>,
+        transport_host: Option<String>,
+        service_name: Option<String>,
+        security: Option<String>,
+        flow: Option<String>,
+        tls_server_name: Option<String>,
+        reality_dest: Option<String>,
+        cipher: Option<String>,
+        reject_reason_contains: Option<String>,
+        route_targets: Option<Vec<String>>,
+        route_action: Option<String>,
+        outbound_protocol: Option<String>,
+        dns_server: Option<String>,
+        user_model: Option<String>,
+        decision: Option<String>,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct GoUserDeltaFixture {
+        go_source_reference: Vec<String>,
+        old: Vec<UserInfo>,
+        deleted: Vec<UserInfo>,
+        upsert: Vec<UserInfo>,
+        expected_next_uuids: Vec<String>,
+        expected_deleted_uuids: Vec<String>,
+        expected_added_uuids: Vec<String>,
+        expected_updated_uuids: Vec<String>,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct GoTrafficTailFixture {
+        go_source_reference: Vec<String>,
+        node_tag: String,
+        user_uuid: String,
+        user_id: u32,
+        upload: u64,
+        download: u64,
+        expected_report_uid: u32,
+        expected_go_user_tag: String,
+    }
 
     #[test]
     fn parses_kernel_core_kind_names() {
@@ -3421,6 +3493,283 @@ mod tests {
         assert_eq!(core.inbounds[0].protocol, "vless");
         assert_eq!(core.inbounds[1].protocol, "mieru");
         assert_eq!(core.inbounds[2].protocol, "naive");
+    }
+
+    #[test]
+    fn go_model_parity_trojan_ws_fixture() {
+        let case = go_model_case("trojan_ws");
+        assert_go_fixture_has_source(&case);
+        let (plan, inbound) = go_model_plan_and_inbound(&case, 103);
+
+        assert_eq!(inbound.protocol, "trojan");
+        assert_eq!(inbound.network, "ws");
+        assert_eq!(
+            inbound.users[0].email,
+            "[https://panel.example.test]-trojan:103|trojan-ws-password"
+        );
+        assert_go_expected_inbound(&case.expected, &inbound);
+        let entry = keli_core_rs_inbound_capability(&inbound).unwrap();
+        assert_eq!(entry.key.protocol, NativeProtocol::Trojan);
+        assert_eq!(entry.key.transport, CapabilityTransport::Ws);
+        assert_eq!(entry.status, CapabilityStatus::CanaryOnly);
+        assert!(matches!(entry.decision, RenderDecision::Reject { .. }));
+
+        let err = render_core_config(&plan).unwrap_err();
+        assert_go_expected_reject(&case.expected, &err.message);
+        assert!(err.message.contains("baseline_source=GoLegacyBaseline"));
+        assert!(err
+            .message
+            .contains("evidence_level=ThirdPartyClientInterop"));
+    }
+
+    #[test]
+    fn go_model_parity_trojan_tls_ws_fixture() {
+        let case = go_model_case("trojan_tls_ws");
+        assert_go_fixture_has_source(&case);
+        let (plan, inbound) = go_model_plan_and_inbound(&case, 104);
+
+        assert_eq!(inbound.protocol, "trojan");
+        assert_eq!(inbound.network, "ws");
+        assert_eq!(inbound.security, "tls");
+        assert!(inbound.reject_unknown_sni);
+        assert_go_expected_inbound(&case.expected, &inbound);
+        let entry = keli_core_rs_inbound_capability(&inbound).unwrap();
+        assert_eq!(entry.key.protocol, NativeProtocol::Trojan);
+        assert_eq!(entry.key.transport, CapabilityTransport::Ws);
+        assert_eq!(entry.key.security, CapabilitySecurity::Tls);
+        assert!(matches!(entry.decision, RenderDecision::Reject { .. }));
+
+        let err = render_core_config(&plan).unwrap_err();
+        assert_go_expected_reject(&case.expected, &err.message);
+        assert!(err.message.contains("transport=ws"));
+        assert!(err.message.contains("security=tls"));
+    }
+
+    #[test]
+    fn go_model_parity_vless_reality_fixture() {
+        let case = go_model_case("vless_reality_vision");
+        assert_go_fixture_has_source(&case);
+        let (plan, inbound) = go_model_plan_and_inbound(&case, 106);
+
+        assert_eq!(inbound.protocol, "vless");
+        assert_eq!(inbound.security, "reality");
+        assert_go_expected_inbound(&case.expected, &inbound);
+        let config = render_core_config(&plan).unwrap();
+
+        assert_go_expected_rendered_inbound(&case.expected, &config["inbounds"][0]);
+        assert_eq!(
+            config["inbounds"][0]["tls"]["reality"]["private_key"],
+            "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc"
+        );
+        assert_eq!(
+            config["inbounds"][0]["users"][0]["uuid"],
+            "22222222-2222-2222-2222-222222222222"
+        );
+    }
+
+    #[test]
+    fn go_model_parity_vmess_ws_tls_fixture() {
+        let case = go_model_case("vmess_ws_tls");
+        assert_go_fixture_has_source(&case);
+        let (plan, inbound) = go_model_plan_and_inbound(&case, 107);
+
+        assert_eq!(inbound.protocol, "vmess");
+        assert_eq!(inbound.security, "tls");
+        assert_eq!(
+            inbound.users[0].email,
+            "[https://panel.example.test]-vmess:107|33333333-3333-3333-3333-333333333333"
+        );
+        assert_go_expected_inbound(&case.expected, &inbound);
+        let config = render_core_config(&plan).unwrap();
+
+        assert_go_expected_rendered_inbound(&case.expected, &config["inbounds"][0]);
+        assert_eq!(config["inbounds"][0]["users"][0]["speed_limit"], 1024);
+        assert_eq!(config["inbounds"][0]["users"][0]["device_limit"], 2);
+        assert!(config["inbounds"][0]["users"][0]["email"].is_null());
+    }
+
+    #[test]
+    fn go_model_parity_shadowsocks_tcp_udp_fixture() {
+        let case = go_model_case("shadowsocks_aead_tcp_udp");
+        assert_go_fixture_has_source(&case);
+        let (plan, inbound) = go_model_plan_and_inbound(&case, 108);
+
+        assert_eq!(inbound.protocol, "shadowsocks");
+        assert_go_expected_inbound(&case.expected, &inbound);
+        let config = render_core_config(&plan).unwrap();
+
+        assert_go_expected_rendered_inbound(&case.expected, &config["inbounds"][0]);
+        assert_eq!(config["inbounds"][0]["cipher"], "aes-128-gcm");
+        assert_eq!(
+            config["inbounds"][0]["users"][0]["uuid"],
+            "ss-aead-password"
+        );
+    }
+
+    #[test]
+    fn go_model_parity_route_outbound_fixture() {
+        for name in ["route_block", "custom_outbound", "dns_route"] {
+            let case = go_model_case(name);
+            assert_go_fixture_has_source(&case);
+            let (plan, inbound) = go_model_plan_and_inbound(&case, 113);
+            assert_eq!(inbound.protocol, "http");
+            assert_eq!(inbound.routes.len(), 1);
+            let expected_targets = case.expected.route_targets.as_ref().unwrap();
+
+            let config = render_core_config(&plan).unwrap();
+            match name {
+                "route_block" => {
+                    assert_eq!(
+                        config["inbounds"][0]["routes"][0]["targets"][0],
+                        expected_targets[0].as_str()
+                    );
+                    assert_eq!(
+                        config["inbounds"][0]["routes"][0]["action"],
+                        case.expected.route_action.as_deref().unwrap()
+                    );
+                }
+                "custom_outbound" => {
+                    assert_eq!(
+                        config["inbounds"][0]["routes"][0]["targets"][0],
+                        expected_targets[0].as_str()
+                    );
+                    assert_eq!(
+                        config["inbounds"][0]["routes"][0]["action"]["outbound"],
+                        "ss-out"
+                    );
+                    assert_eq!(config["outbounds"][1]["tag"], "ss-out");
+                    assert_eq!(
+                        config["outbounds"][1]["protocol"],
+                        case.expected.outbound_protocol.as_deref().unwrap()
+                    );
+                }
+                "dns_route" => {
+                    let expected_dns = case.expected.dns_server.as_deref().unwrap();
+                    let servers = config["dns"]["servers"].as_array().unwrap();
+                    assert!(servers.iter().any(|server| {
+                        server["address"] == expected_dns
+                            && server["domains"][0] == expected_targets[0].as_str()
+                    }));
+                }
+                _ => unreachable!(),
+            }
+        }
+    }
+
+    #[test]
+    fn go_model_parity_user_delta_fixture() {
+        let fixtures = go_model_fixtures();
+        let fixture = fixtures.user_delta;
+        assert!(!fixture.go_source_reference.is_empty());
+
+        let result = apply_user_delta(&fixture.old, &fixture.deleted, &fixture.upsert);
+
+        assert_eq!(
+            user_uuids(&result.next),
+            fixture.expected_next_uuids.as_slice()
+        );
+        assert_eq!(
+            user_uuids(&result.deleted_applied),
+            fixture.expected_deleted_uuids.as_slice()
+        );
+        assert_eq!(
+            user_uuids(&result.added),
+            fixture.expected_added_uuids.as_slice()
+        );
+        assert_eq!(
+            user_uuids(&result.updated),
+            fixture.expected_updated_uuids.as_slice()
+        );
+    }
+
+    #[test]
+    fn go_model_parity_traffic_key_fixture() {
+        let fixtures = go_model_fixtures();
+        let fixture = fixtures.traffic_tail;
+        assert!(!fixture.go_source_reference.is_empty());
+
+        assert_eq!(
+            super::user_tag(&fixture.node_tag, &fixture.user_uuid),
+            fixture.expected_go_user_tag
+        );
+
+        let plan = CorePlan {
+            kind: CoreKind::KeliCoreRs,
+            config_path: PathBuf::from("/srv/v2node/keli-core-rs.json"),
+            listen_tags: vec![fixture.node_tag.clone()],
+            inbounds: vec![test_inbound_with_user(&fixture.node_tag, 7, "live-uuid")],
+            dns: Default::default(),
+        };
+        let snapshots = keli_core_traffic_snapshots(
+            &plan,
+            &[KeliCoreTrafficRecord {
+                node_tag: fixture.node_tag.clone(),
+                user_uuid: fixture.user_uuid.clone(),
+                user_id: Some(fixture.user_id as u64),
+                upload: fixture.upload,
+                download: fixture.download,
+                online_ips: vec!["198.51.100.9".to_string()],
+            }],
+        );
+
+        assert_eq!(
+            snapshots[&fixture.node_tag].traffic[0].uid,
+            fixture.expected_report_uid
+        );
+        assert_eq!(
+            snapshots[&fixture.node_tag].traffic[0].upload,
+            i64::try_from(fixture.upload).unwrap()
+        );
+        assert_eq!(
+            snapshots[&fixture.node_tag].traffic[0].download,
+            i64::try_from(fixture.download).unwrap()
+        );
+    }
+
+    #[test]
+    fn unsupported_go_panel_field_fails_loudly() {
+        let case = go_model_case("unsupported_tcp_header_field");
+        assert_go_fixture_has_source(&case);
+        let (plan, inbound) = go_model_plan_and_inbound(&case, 116);
+
+        assert_eq!(inbound.protocol, "vless");
+        assert_eq!(inbound.network, "tcp");
+        assert_eq!(inbound.network_settings["header"]["type"], "http");
+        let err = render_core_config(&plan).unwrap_err();
+
+        assert_go_expected_reject(&case.expected, &err.message);
+        assert!(err.message.contains("vless"));
+        assert!(err.message.contains("transport settings"));
+    }
+
+    #[test]
+    fn go_model_parity_all_renderable_go_legacy_fixtures() {
+        let renderable = [
+            "trojan_tcp",
+            "trojan_tls",
+            "vless_tcp_tls_vision",
+            "vless_reality_vision",
+            "vmess_ws_tls",
+            "shadowsocks_aead_tcp_udp",
+            "hysteria2_tcp_udp",
+            "tuic_tcp_udp",
+            "socks",
+            "http_proxy",
+            "route_block",
+            "custom_outbound",
+            "dns_route",
+        ];
+
+        for (offset, name) in renderable.iter().enumerate() {
+            let case = go_model_case(name);
+            assert_go_fixture_has_source(&case);
+            let (plan, inbound) = go_model_plan_and_inbound(&case, 200 + offset as u32);
+            assert_go_expected_inbound(&case.expected, &inbound);
+
+            let config = render_core_config(&plan)
+                .unwrap_or_else(|err| panic!("fixture {name} should render: {}", err.message));
+            assert_go_expected_rendered_inbound(&case.expected, &config["inbounds"][0]);
+        }
     }
 
     #[test]
@@ -6282,6 +6631,157 @@ mod tests {
         assert_eq!(fs::read_to_string(&key_path).unwrap(), key_content);
 
         let _ = fs::remove_dir_all(dir);
+    }
+
+    fn go_model_fixtures() -> GoModelParityFixtures {
+        serde_json::from_str(GO_MODEL_PARITY_FIXTURES).unwrap()
+    }
+
+    fn go_model_case(name: &str) -> GoModelParityCase {
+        go_model_fixtures()
+            .cases
+            .into_iter()
+            .find(|case| case.name == name)
+            .unwrap_or_else(|| panic!("missing Go model parity fixture {name}"))
+    }
+
+    fn go_model_node(case: &GoModelParityCase, node_id: u32) -> NodeInfo {
+        let common: CommonNode = serde_json::from_value(case.panel_node.clone()).unwrap();
+        NodeInfo::from_common("https://panel.example.test", node_id, common).unwrap()
+    }
+
+    fn go_model_plan_and_inbound(
+        case: &GoModelParityCase,
+        node_id: u32,
+    ) -> (CorePlan, InboundPlan) {
+        let node = go_model_node(case, node_id);
+        let inbound = build_inbound_plan_with_users(&node, &case.users).unwrap();
+        let mut users = std::collections::BTreeMap::new();
+        if !case.users.is_empty() {
+            users.insert(node.tag.clone(), case.users.clone());
+        }
+        let plan = CorePlan::from_nodes_with_users(
+            CoreKind::KeliCoreRs,
+            PathBuf::from("/srv/v2node/keli-core-rs.json"),
+            &[node],
+            &users,
+        )
+        .unwrap();
+        (plan, inbound)
+    }
+
+    fn assert_go_fixture_has_source(case: &GoModelParityCase) {
+        assert!(
+            !case.go_source_reference.is_empty(),
+            "{} must cite the Go source reference it freezes",
+            case.name
+        );
+    }
+
+    fn assert_go_expected_inbound(expected: &GoModelParityExpected, inbound: &InboundPlan) {
+        if let Some(protocol) = expected.protocol.as_deref() {
+            assert_eq!(keli_core_rs_protocol_name(inbound), protocol);
+        }
+        if let Some(network) = expected.transport_network.as_deref() {
+            assert_eq!(keli_core_rs_transport_network(inbound), network);
+        }
+        if let Some(security) = expected.security.as_deref() {
+            assert_eq!(inbound.security, security);
+        }
+        if let Some(flow) = expected.flow.as_deref() {
+            assert_eq!(inbound.flow, flow);
+        }
+        if let Some(server_name) = expected.tls_server_name.as_deref() {
+            assert_eq!(inbound.server_name, server_name);
+        }
+        if let Some(dest) = expected.reality_dest.as_deref() {
+            assert_eq!(inbound.reality_dest, dest);
+        }
+        if let Some(cipher) = expected.cipher.as_deref() {
+            assert_eq!(inbound.cipher, cipher);
+        }
+        if let Some(path) = expected.transport_path.as_deref() {
+            assert_eq!(
+                websocket_path_setting(&inbound.network_settings).as_deref(),
+                Some(path)
+            );
+        }
+        if let Some(host) = expected.transport_host.as_deref() {
+            assert_eq!(
+                websocket_host_setting(&inbound.network_settings).as_deref(),
+                Some(host)
+            );
+        }
+        if let Some(service_name) = expected.service_name.as_deref() {
+            assert_eq!(
+                grpc_service_name_setting(&inbound.network_settings).as_deref(),
+                Some(service_name)
+            );
+        }
+        if let Some(user_model) = expected.user_model.as_deref() {
+            assert_eq!(capability_user_model_for_inbound(inbound), user_model);
+        }
+    }
+
+    fn assert_go_expected_rendered_inbound(expected: &GoModelParityExpected, inbound: &Value) {
+        if let Some(protocol) = expected.protocol.as_deref() {
+            assert_eq!(inbound["protocol"], protocol);
+        }
+        if let Some(network) = expected.transport_network.as_deref() {
+            assert_eq!(inbound["transport"]["network"], network);
+        }
+        if let Some(path) = expected.transport_path.as_deref() {
+            assert_eq!(inbound["transport"]["path"], path);
+        }
+        if let Some(host) = expected.transport_host.as_deref() {
+            assert_eq!(inbound["transport"]["host"], host);
+        }
+        if let Some(service_name) = expected.service_name.as_deref() {
+            assert_eq!(inbound["transport"]["service_name"], service_name);
+        }
+        if let Some(flow) = expected.flow.as_deref() {
+            assert_eq!(inbound["flow"], flow);
+        }
+        if let Some(server_name) = expected.tls_server_name.as_deref() {
+            assert_eq!(inbound["tls"]["server_name"], server_name);
+        }
+        if let Some(dest) = expected.reality_dest.as_deref() {
+            assert_eq!(inbound["tls"]["reality"]["dest"], dest);
+        }
+        if let Some(cipher) = expected.cipher.as_deref() {
+            assert_eq!(inbound["cipher"], cipher);
+        }
+    }
+
+    fn assert_go_expected_reject(expected: &GoModelParityExpected, message: &str) {
+        assert_eq!(expected.decision.as_deref(), Some("reject"));
+        let Some(fragment) = expected.reject_reason_contains.as_deref() else {
+            panic!("reject fixture must carry reject_reason_contains");
+        };
+        assert!(
+            message.contains(fragment),
+            "expected reject message to contain {fragment:?}, got {message:?}"
+        );
+    }
+
+    fn user_uuids(users: &[UserInfo]) -> Vec<String> {
+        users.iter().map(|user| user.uuid.clone()).collect()
+    }
+
+    fn test_inbound_with_user(tag: &str, id: u32, uuid: &str) -> InboundPlan {
+        let node = test_node("http", id, "127.0.0.1");
+        let mut inbound = build_inbound_plan_with_users(
+            &node,
+            &[UserInfo {
+                id,
+                uuid: uuid.to_string(),
+                speed_limit: 0,
+                device_limit: 0,
+            }],
+        )
+        .unwrap();
+        inbound.tag = tag.to_string();
+        inbound
     }
 
     fn test_node(protocol: &str, node_id: u32, listen_ip: &str) -> NodeInfo {

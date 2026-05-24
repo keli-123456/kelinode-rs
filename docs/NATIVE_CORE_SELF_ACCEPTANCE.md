@@ -22,6 +22,7 @@ maturity pass, and local loopback evidence is not treated as `Stable`.
 | Renderer/planning gate | `split_core_plans_for_nodes_with_kind` fails hard on rejected native capabilities instead of silently skipping active nodes. | Passed |
 | Gray preflight gate | `native_gray_preflight_report` reports rejected capability blockers with protocol/direction/transport/security/status/baseline/evidence context. | Passed |
 | Trojan WS/TLS WS default production gate | Status is `CanaryOnly`, but default decision remains `Reject` until an explicit canary switch and longer soak exist. | Passed |
+| Go model parity audit | `docs/GO_MODEL_PARITY.md` plus `tests/fixtures/go_model_parity/go_legacy_fixtures.json` freeze Go panel, user, route, DNS, stream transport, TLS/REALITY, user-delta, and traffic-key semantics. | Passed |
 
 ## Protocol Evidence
 
@@ -52,6 +53,7 @@ maturity pass, and local loopback evidence is not treated as `Stable`.
 - `kelinode-rs`: `cargo fmt --check` passed.
 - `kelinode-rs`: `cargo test native_capability --lib` passed.
 - `kelinode-rs`: `cargo test split_core_plans_for_nodes_with_kind --lib` passed.
+- `kelinode-rs`: `cargo test go_model_parity --lib` passed with 9 fixture-backed Go parity tests.
 - `kelinode-rs`: `cargo test native_gray_preflight --bin kelinode` passed with 5 gray-preflight tests.
 - `kelinode-rs`: `cargo test renders_keli_core_rs --lib` passed with 53 native renderer tests.
 - `kelinode-rs`: `cargo test` passed: 392 library tests plus 14 binary tests.

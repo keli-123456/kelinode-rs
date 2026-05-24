@@ -1,0 +1,669 @@
+{
+  "description": "Go legacy model parity fixtures derived from kelinode core renderer semantics and keli-core/Xray config model. Secrets are synthetic test values.",
+  "cases": [
+    {
+      "name": "trojan_tcp",
+      "go_source_reference": [
+        "kelinode/core/inbound.go: buildTrojan defaults empty network to tcp",
+        "kelinode/core/user.go: buildTrojanUser uses uuid as password and email tag|uuid"
+      ],
+      "panel_node": {
+        "protocol": "trojan",
+        "listen_ip": "0.0.0.0",
+        "server_port": 19101,
+        "network": "tcp",
+        "tls": 0
+      },
+      "users": [
+        {
+          "id": 101,
+          "uuid": "trojan-password",
+          "speed_limit": 2048,
+          "device_limit": 3
+        }
+      ],
+      "expected": {
+        "protocol": "trojan",
+        "transport_network": "tcp",
+        "security": "none",
+        "user_model": "password",
+        "decision": "render"
+      }
+    },
+    {
+      "name": "trojan_tls",
+      "go_source_reference": [
+        "kelinode/core/inbound.go: TLS cert_info maps to StreamConfig TLSSettings",
+        "keli-core/infra/conf/trojan.go: Trojan server account is password based"
+      ],
+      "panel_node": {
+        "protocol": "trojan",
+        "listen_ip": "127.0.0.1",
+        "server_port": 19102,
+        "network": "tcp",
+        "tls": 1,
+        "tls_settings": {
+          "server_name": "trojan.example.test",
+          "cert_mode": "file",
+          "cert_file": "/srv/v2node/trojan.cer",
+          "key_file": "/srv/v2node/trojan.key",
+          "alpn": [
+            "http/1.1"
+          ]
+        }
+      },
+      "users": [
+        {
+          "id": 102,
+          "uuid": "trojan-tls-password",
+          "speed_limit": 0,
+          "device_limit": 0
+        }
+      ],
+      "expected": {
+        "protocol": "trojan",
+        "transport_network": "tcp",
+        "security": "tls",
+        "tls_server_name": "trojan.example.test",
+        "user_model": "password",
+        "decision": "render"
+      }
+    },
+    {
+      "name": "trojan_ws",
+      "go_source_reference": [
+        "kelinode/core/inbound.go: buildTrojan unmarshals ws network_settings into WSSettings",
+        "keli-core/transport/internet/websocket: mature Xray WebSocket stream semantics"
+      ],
+      "panel_node": {
+        "protocol": "trojan",
+        "listen_ip": "127.0.0.1",
+        "server_port": 19103,
+        "network": "ws",
+        "tls": 0,
+        "network_settings": {
+          "path": "/trojan",
+          "headers": {
+            "Host": "cdn.example.test"
+          }
+        }
+      },
+      "users": [
+        {
+          "id": 103,
+          "uuid": "trojan-ws-password",
+          "speed_limit": 0,
+          "device_limit": 0
+        }
+      ],
+      "expected": {
+        "protocol": "trojan",
+        "transport_network": "ws",
+        "transport_path": "/trojan",
+        "transport_host": "cdn.example.test",
+        "security": "none",
+        "user_model": "password",
+        "decision": "reject",
+        "reject_reason_contains": "trojan websocket native relay requires explicit canary gate and soak"
+      }
+    },
+    {
+      "name": "trojan_tls_ws",
+      "go_source_reference": [
+        "kelinode/core/inbound.go: TLS is applied before ws stream settings for Trojan",
+        "kelinode/core/inbound.go: ws path and Host are preserved in network_settings"
+      ],
+      "panel_node": {
+        "protocol": "trojan",
+        "listen_ip": "127.0.0.1",
+        "server_port": 19104,
+        "network": "ws",
+        "tls": 1,
+        "tls_settings": {
+          "server_name": "trojan-ws.example.test",
+          "cert_mode": "file",
+          "cert_file": "/srv/v2node/trojan-ws.cer",
+          "key_file": "/srv/v2node/trojan-ws.key",
+          "alpn": [
+            "http/1.1"
+          ],
+          "reject_unknown_sni": "1"
+        },
+        "network_settings": {
+          "path": "/trojan-tls",
+          "headers": {
+            "Host": "edge.example.test"
+          }
+        }
+      },
+      "users": [
+        {
+          "id": 104,
+          "uuid": "trojan-tls-ws-password",
+          "speed_limit": 0,
+          "device_limit": 0
+        }
+      ],
+      "expected": {
+        "protocol": "trojan",
+        "transport_network": "ws",
+        "transport_path": "/trojan-tls",
+        "transport_host": "edge.example.test",
+        "security": "tls",
+        "tls_server_name": "trojan-ws.example.test",
+        "user_model": "password",
+        "decision": "reject",
+        "reject_reason_contains": "trojan tls websocket native relay requires explicit canary gate and soak"
+      }
+    },
+    {
+      "name": "vless_tcp_tls_vision",
+      "go_source_reference": [
+        "kelinode/core/inbound.go: buildVLess passes flow to VLESS users",
+        "kelinode/core/inbound.go: TLS cert_info maps to stream TLSSettings"
+      ],
+      "panel_node": {
+        "protocol": "vless",
+        "listen_ip": "127.0.0.1",
+        "server_port": 19105,
+        "network": "tcp",
+        "tls": 1,
+        "flow": "xtls-rprx-vision",
+        "tls_settings": {
+          "server_name": "vless-vision.example.test",
+          "cert_mode": "file",
+          "cert_file": "/srv/v2node/vless-vision.cer",
+          "key_file": "/srv/v2node/vless-vision.key",
+          "alpn": [
+            "h2",
+            "http/1.1"
+          ]
+        }
+      },
+      "users": [
+        {
+          "id": 105,
+          "uuid": "11111111-1111-1111-1111-111111111111",
+          "speed_limit": 0,
+          "device_limit": 0
+        }
+      ],
+      "expected": {
+        "protocol": "vless",
+        "transport_network": "tcp",
+        "security": "tls",
+        "flow": "xtls-rprx-vision",
+        "tls_server_name": "vless-vision.example.test",
+        "user_model": "uuid",
+        "decision": "render"
+      }
+    },
+    {
+      "name": "vless_reality_vision",
+      "go_source_reference": [
+        "kelinode/core/inbound.go: Reality dest falls back to server_name and appends server_port",
+        "kelinode/core/inbound.go: REALITY settings preserve private_key, short_id, xver, and server_names"
+      ],
+      "panel_node": {
+        "protocol": "vless",
+        "listen_ip": "127.0.0.1",
+        "server_port": 19106,
+        "network": "tcp",
+        "tls": 2,
+        "flow": "xtls-rprx-vision",
+        "tls_settings": {
+          "server_name": "reality.example.test",
+          "dest": "origin.example.test",
+          "server_port": "443",
+          "private_key": "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc",
+          "short_id": "6ba85179e30d4fc2",
+          "xver": "0"
+        }
+      },
+      "users": [
+        {
+          "id": 106,
+          "uuid": "22222222-2222-2222-2222-222222222222",
+          "speed_limit": 0,
+          "device_limit": 0
+        }
+      ],
+      "expected": {
+        "protocol": "vless",
+        "transport_network": "tcp",
+        "security": "reality",
+        "flow": "xtls-rprx-vision",
+        "tls_server_name": "reality.example.test",
+        "reality_dest": "origin.example.test:443",
+        "user_model": "uuid",
+        "decision": "render"
+      }
+    },
+    {
+      "name": "vmess_ws_tls",
+      "go_source_reference": [
+        "kelinode/core/inbound.go: buildVMess unmarshals ws network_settings into WSSettings",
+        "kelinode/core/user.go: buildVmessUser uses uuid id, auto security, and email tag|uuid"
+      ],
+      "panel_node": {
+        "protocol": "vmess",
+        "listen_ip": "127.0.0.1",
+        "server_port": 19107,
+        "network": "ws",
+        "tls": 1,
+        "tls_settings": {
+          "server_name": "vmess.example.test",
+          "cert_mode": "file",
+          "cert_file": "/srv/v2node/vmess.cer",
+          "key_file": "/srv/v2node/vmess.key"
+        },
+        "network_settings": {
+          "path": "/vmess",
+          "headers": {
+            "Host": "vmess-edge.example.test"
+          }
+        }
+      },
+      "users": [
+        {
+          "id": 107,
+          "uuid": "33333333-3333-3333-3333-333333333333",
+          "speed_limit": 1024,
+          "device_limit": 2
+        }
+      ],
+      "expected": {
+        "protocol": "vmess",
+        "transport_network": "ws",
+        "transport_path": "/vmess",
+        "transport_host": "vmess-edge.example.test",
+        "security": "tls",
+        "tls_server_name": "vmess.example.test",
+        "user_model": "uuid",
+        "decision": "render"
+      }
+    },
+    {
+      "name": "shadowsocks_aead_tcp_udp",
+      "go_source_reference": [
+        "kelinode/core/inbound.go: Shadowsocks defaults NetworkList to tcp,udp",
+        "kelinode/core/user.go: buildSSUser uses uuid as AEAD password"
+      ],
+      "panel_node": {
+        "protocol": "shadowsocks",
+        "listen_ip": "127.0.0.1",
+        "server_port": 19108,
+        "cipher": "aes-128-gcm"
+      },
+      "users": [
+        {
+          "id": 108,
+          "uuid": "ss-aead-password",
+          "speed_limit": 3072,
+          "device_limit": 4
+        }
+      ],
+      "expected": {
+        "protocol": "shadowsocks",
+        "transport_network": "tcp,udp",
+        "security": "none",
+        "cipher": "aes-128-gcm",
+        "user_model": "password",
+        "decision": "render"
+      }
+    },
+    {
+      "name": "hysteria2_tcp_udp",
+      "go_source_reference": [
+        "kelinode/core/inbound.go: buildHysteria2 renders Xray hysteria version 2",
+        "kelinode/core/user.go: buildHysteria2User uses uuid as auth"
+      ],
+      "panel_node": {
+        "protocol": "hysteria2",
+        "listen_ip": "127.0.0.1",
+        "server_port": 19109,
+        "tls": 1,
+        "up_mbps": 100,
+        "down_mbps": 200,
+        "obfs": "salamander",
+        "obfs-password": "obfs-secret",
+        "tls_settings": {
+          "server_name": "hy2.example.test",
+          "cert_mode": "file",
+          "cert_file": "/srv/v2node/hy2.cer",
+          "key_file": "/srv/v2node/hy2.key"
+        }
+      },
+      "users": [
+        {
+          "id": 109,
+          "uuid": "hy2-password",
+          "speed_limit": 0,
+          "device_limit": 0
+        }
+      ],
+      "expected": {
+        "protocol": "hysteria2",
+        "transport_network": "hysteria",
+        "security": "tls",
+        "tls_server_name": "hy2.example.test",
+        "user_model": "password",
+        "decision": "render"
+      }
+    },
+    {
+      "name": "tuic_tcp_udp",
+      "go_source_reference": [
+        "kelinode/core/inbound.go: buildTuic renders tuic stream transport",
+        "kelinode/core/user.go: buildTuicUser uses uuid and uuid password"
+      ],
+      "panel_node": {
+        "protocol": "tuic",
+        "listen_ip": "127.0.0.1",
+        "server_port": 19110,
+        "tls": 1,
+        "congestion_control": "bbr",
+        "tls_settings": {
+          "server_name": "tuic.example.test",
+          "cert_mode": "file",
+          "cert_file": "/srv/v2node/tuic.cer",
+          "key_file": "/srv/v2node/tuic.key"
+        }
+      },
+      "users": [
+        {
+          "id": 110,
+          "uuid": "44444444-4444-4444-4444-444444444444",
+          "speed_limit": 0,
+          "device_limit": 0
+        }
+      ],
+      "expected": {
+        "protocol": "tuic",
+        "transport_network": "tuic",
+        "security": "tls",
+        "tls_server_name": "tuic.example.test",
+        "user_model": "uuid_password",
+        "decision": "render"
+      }
+    },
+    {
+      "name": "socks",
+      "go_source_reference": [
+        "kelinode/core/inbound.go: buildSocks enables user-pass auth and UDP",
+        "kelinode/core/user.go: buildSocksUser uses uuid as username and password"
+      ],
+      "panel_node": {
+        "protocol": "socks",
+        "listen_ip": "127.0.0.1",
+        "server_port": 19111
+      },
+      "users": [
+        {
+          "id": 111,
+          "uuid": "socks-user",
+          "speed_limit": 0,
+          "device_limit": 0
+        }
+      ],
+      "expected": {
+        "protocol": "socks",
+        "transport_network": "tcp",
+        "security": "none",
+        "user_model": "password",
+        "decision": "render"
+      }
+    },
+    {
+      "name": "http_proxy",
+      "go_source_reference": [
+        "kelinode/core/inbound.go: buildHTTP uses account auth",
+        "kelinode/core/user.go: buildHTTPUser uses uuid as username and password"
+      ],
+      "panel_node": {
+        "protocol": "http",
+        "listen_ip": "127.0.0.1",
+        "server_port": 19112
+      },
+      "users": [
+        {
+          "id": 112,
+          "uuid": "http-user",
+          "speed_limit": 0,
+          "device_limit": 0
+        }
+      ],
+      "expected": {
+        "protocol": "http",
+        "transport_network": "tcp",
+        "security": "none",
+        "user_model": "password",
+        "decision": "render"
+      }
+    },
+    {
+      "name": "route_block",
+      "go_source_reference": [
+        "kelinode/core/custom.go: block action maps domain rules to block outbound",
+        "kelinode/core/outbound.go: buildBlockOutbound uses blackhole protocol"
+      ],
+      "panel_node": {
+        "protocol": "http",
+        "listen_ip": "127.0.0.1",
+        "server_port": 19113,
+        "routes": [
+          {
+            "id": 1,
+            "match": [
+              "domain:blocked.example"
+            ],
+            "action": "block"
+          }
+        ]
+      },
+      "users": [
+        {
+          "id": 113,
+          "uuid": "route-user",
+          "speed_limit": 0,
+          "device_limit": 0
+        }
+      ],
+      "expected": {
+        "protocol": "http",
+        "transport_network": "tcp",
+        "route_targets": [
+          "domain:blocked.example"
+        ],
+        "route_action": "block",
+        "decision": "render"
+      }
+    },
+    {
+      "name": "custom_outbound",
+      "go_source_reference": [
+        "kelinode/core/custom.go: route action parses action_value as Xray outbound and adds matching rule",
+        "kelinode/core/custom.go: duplicate outbound tags are added only once"
+      ],
+      "panel_node": {
+        "protocol": "http",
+        "listen_ip": "127.0.0.1",
+        "server_port": 19114,
+        "routes": [
+          {
+            "id": 2,
+            "match": [
+              "geosite:openai"
+            ],
+            "action": "route",
+            "action_value": "{\"tag\":\"ss-out\",\"protocol\":\"shadowsocks\",\"settings\":{\"servers\":[{\"address\":\"proxy.example.test\",\"port\":8388,\"method\":\"aes-128-gcm\",\"password\":\"route-password\"}]}}"
+          }
+        ]
+      },
+      "users": [
+        {
+          "id": 114,
+          "uuid": "custom-route-user",
+          "speed_limit": 0,
+          "device_limit": 0
+        }
+      ],
+      "expected": {
+        "protocol": "http",
+        "transport_network": "tcp",
+        "route_targets": [
+          "geosite:openai"
+        ],
+        "route_action": "outbound",
+        "outbound_protocol": "shadowsocks",
+        "decision": "render"
+      }
+    },
+    {
+      "name": "dns_route",
+      "go_source_reference": [
+        "kelinode/core/custom.go: dns action appends a domain-scoped DNS server",
+        "kelinode/core/outbound.go: buildDnsOutbound uses dns_out tag in Go/Xray"
+      ],
+      "panel_node": {
+        "protocol": "http",
+        "listen_ip": "127.0.0.1",
+        "server_port": 19115,
+        "routes": [
+          {
+            "id": 3,
+            "match": [
+              "geosite:private"
+            ],
+            "action": "dns",
+            "action_value": "9.9.9.9"
+          }
+        ]
+      },
+      "users": [
+        {
+          "id": 115,
+          "uuid": "dns-route-user",
+          "speed_limit": 0,
+          "device_limit": 0
+        }
+      ],
+      "expected": {
+        "protocol": "http",
+        "transport_network": "tcp",
+        "route_targets": [
+          "geosite:private"
+        ],
+        "dns_server": "9.9.9.9",
+        "decision": "render"
+      }
+    },
+    {
+      "name": "unsupported_tcp_header_field",
+      "go_source_reference": [
+        "kelinode/core/inbound.go: VLESS tcp network_settings are passed to Xray TCPSettings",
+        "kelinode-rs native renderer: native core currently rejects TCP header settings instead of silently dropping them"
+      ],
+      "panel_node": {
+        "protocol": "vless",
+        "listen_ip": "127.0.0.1",
+        "server_port": 19116,
+        "network": "tcp",
+        "network_settings": {
+          "header": {
+            "type": "http"
+          }
+        }
+      },
+      "users": [
+        {
+          "id": 116,
+          "uuid": "55555555-5555-5555-5555-555555555555",
+          "speed_limit": 0,
+          "device_limit": 0
+        }
+      ],
+      "expected": {
+        "protocol": "vless",
+        "transport_network": "tcp",
+        "security": "none",
+        "decision": "reject",
+        "reject_reason_contains": "does not support transport settings"
+      }
+    }
+  ],
+  "user_delta": {
+    "go_source_reference": [
+      "kelinode/node/user_delta.go: applyUserDelta deletes by uuid, upserts by uuid, and sorts next by uuid"
+    ],
+    "old": [
+      {
+        "id": 1,
+        "uuid": "a",
+        "speed_limit": 0,
+        "device_limit": 1
+      },
+      {
+        "id": 2,
+        "uuid": "b",
+        "speed_limit": 0,
+        "device_limit": 1
+      },
+      {
+        "id": 3,
+        "uuid": "c",
+        "speed_limit": 0,
+        "device_limit": 1
+      }
+    ],
+    "deleted": [
+      {
+        "id": 2,
+        "uuid": "b",
+        "speed_limit": 0,
+        "device_limit": 1
+      }
+    ],
+    "upsert": [
+      {
+        "id": 3,
+        "uuid": "c",
+        "speed_limit": 10,
+        "device_limit": 1
+      },
+      {
+        "id": 4,
+        "uuid": "d",
+        "speed_limit": 0,
+        "device_limit": 2
+      }
+    ],
+    "expected_next_uuids": [
+      "a",
+      "c",
+      "d"
+    ],
+    "expected_deleted_uuids": [
+      "b"
+    ],
+    "expected_added_uuids": [
+      "d"
+    ],
+    "expected_updated_uuids": [
+      "c"
+    ]
+  },
+  "traffic_tail": {
+    "go_source_reference": [
+      "kelinode/core/user.go: GetUserTrafficSlice removes unmapped user counters after drain",
+      "kelinode-rs/report.rs: native core tail traffic keeps user_id on records after user deletion"
+    ],
+    "node_tag": "node-a",
+    "user_uuid": "deleted-uuid",
+    "user_id": 99,
+    "upload": 10,
+    "download": 20,
+    "expected_report_uid": 99,
+    "expected_go_user_tag": "node-a|deleted-uuid"
+  }
+}
