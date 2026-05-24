@@ -33,7 +33,7 @@ Branch: `codex/all-protocol-maturity-pass`
 - [x] final `cargo test` for `keli-core-rs`
 - [ ] `cargo clippy --all-targets -- -D warnings` blocked by missing local `cargo-clippy.exe`
 - [x] local loopback interop tests covered by `keli-core-rs` runtime/listener tests
-- [ ] 2.56.116.39 remote interop tests
+- [ ] 2.56.116.39 remote interop tests partially complete; Naive H2/TLS passed, Naive H3/QUIC failed certificate validation
 - [x] external real-client/production soak missing items recorded
 
 ## Verification Log
@@ -60,15 +60,17 @@ Branch: `codex/all-protocol-maturity-pass`
 
 Remote host target: `2.56.116.39`.
 
-Current result: External Evidence Blocked.
+Current result: Partial evidence collected.
 
-Reason: the current environment does not provide `KELI_TEST_SSH_KEY`, and the default
-`$HOME/.ssh/id_ed25519` path is missing. No alternate key was used because remote credentials must
-come only from the required environment variables.
+- SSH readiness to `2.56.116.39` passed after `KELI_TEST_SSH_KEY` was provided.
+- `scripts/interop/naive_official_remote.sh --rounds 3 --interval-ms 100 --case naive` downloaded official NaiveProxy `v148.0.7778.96-5`, built `keli-core-rs` remotely, and passed `naive-h2-tls` for 3 probe rounds.
+- The same run failed `naive-h3-quic`: official NaiveProxy reported QUIC TLS handshake `certificate unknown`, then `ERR_QUIC_PROTOCOL_ERROR`; core stderr recorded `naive h3 connection error` with certificate validation failure and backoff.
+- `scripts/interop/mieru_official_remote.sh --dry-run --mieru /tmp/nonexistent-mieru` passed preflight, but no official Mieru client binary path was available, so Mieru remains externally blocked.
 
 ## Remaining External Evidence
 
-- OfficialClientInterop + SoakTested for Naive H2/TLS and H3/QUIC on Linux.
+- SoakTested for Naive H2/TLS on Linux.
+- OfficialClientInterop + SoakTested for Naive H3/QUIC on Linux after fixing the certificate trust path.
 - OfficialClientInterop + SoakTested for Mieru TCP underlay.
 - ThirdPartyClientInterop/soak for Trojan WS and TLS WS before removing the reject gate.
 - Remote QUIC soak for Hysteria2 and TUIC.
