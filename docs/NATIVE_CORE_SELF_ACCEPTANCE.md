@@ -44,7 +44,9 @@ maturity pass, and local loopback evidence is not treated as `Stable`.
 - `kelinode-rs`: `cargo fmt --check` passed.
 - `kelinode-rs`: `cargo test native_capability --lib` passed.
 - `kelinode-rs`: `cargo test split_core_plans_for_nodes_with_kind --lib` passed.
-- `kelinode-rs`: `cargo test native_gray_preflight_reports_rejected_capability_blocker --bin kelinode` passed.
+- `kelinode-rs`: `cargo test native_gray_preflight --bin kelinode` passed with 5 gray-preflight tests.
+- `kelinode-rs`: `cargo test renders_keli_core_rs --lib` passed with 53 native renderer tests.
+- `kelinode-rs`: `cargo test` passed: 392 library tests plus 14 binary tests.
 - `keli-core-rs`: `cargo fmt --check` passed.
 - `keli-core-rs`: `cargo test trojan` passed with 41 Trojan-focused tests.
 - `keli-core-rs`: `cargo test naive` passed with 25 Naive-focused tests.
