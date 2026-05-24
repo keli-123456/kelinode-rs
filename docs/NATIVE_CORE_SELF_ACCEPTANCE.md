@@ -67,6 +67,7 @@ Current result: Partial evidence collected.
 - `scripts/interop/naive_official_remote.sh --case naive-h3-quic --rounds 3 --interval-ms 100` failed after the helper supplied a temporary local CA through `SSL_CERT_FILE`, passed the leaf SPKI allowlist, sent a full certificate chain to the server, and disabled Chromium post-quantum negotiation with official `--no-post-quantum`. Official NaiveProxy still reported QUIC TLS handshake `certificate unknown`, then `ERR_QUIC_PROTOCOL_ERROR`; core stderr recorded `naive h3 connection error` with certificate validation failure and backoff. Failure layer: official client QUIC TLS/certificate verification before HTTP/3 CONNECT or relay handling.
 - `scripts/interop/mieru_official_remote.sh --rounds 3 --interval-ms 100 --base-port 19380` downloaded official Mieru `v3.32.0`, built `keli-core-rs` remotely, and passed Mieru TCP underlay official-client interop on `2.56.116.39`: auth success, bad-password auth failure, TCP CONNECT relay, SOCKS UDP ASSOCIATE over TCP underlay, concurrent multiplexed TCP probes, per-user traffic accounting, and delete-user rejection for a new official-client relay.
 - `scripts/interop/trojan_ws_remote.sh --rounds 3 --interval-ms 100 --base-port 19420` downloaded sing-box `v1.12.22`, built `keli-core-rs` remotely, and passed both `trojan-ws-plain` and `trojan-ws-tls` for 3 probe rounds through sing-box SOCKS5. The capability status is now `CanaryOnly`, but default production decision remains `Reject` until an explicit canary switch and longer soak exist.
+- `scripts/interop/native_matrix_remote.sh --rounds 1 --interval-ms 0 --base-port 19500` downloaded sing-box `v1.12.22`, built `keli-core-rs` remotely, and passed 34 sing-box-compatible cases on `2.56.116.39`: SOCKS, HTTP proxy, Shadowsocks TCP/UDP, VLESS TCP/TLS/Vision/REALITY/WS/HTTPUpgrade/gRPC, VMess TCP/TLS/WS/HTTPUpgrade/gRPC, Trojan TCP/TLS/WS/HTTPUpgrade/gRPC, AnyTLS TLS, Hysteria2 TLS/salamander, and TUIC. Naive H2/H3 were skipped in this sing-box matrix because Naive uses the official NaiveProxy script; Mieru uses the official Mieru script.
 
 ## Remaining External Evidence
 
@@ -86,6 +87,7 @@ bash scripts/interop/naive_official_remote.sh --case naive-h2-tls --rounds 120 -
 bash scripts/interop/naive_official_remote.sh --case naive-h3-quic --rounds 3 --interval-ms 100
 bash scripts/interop/mieru_official_remote.sh --rounds 120 --interval-ms 1000
 bash scripts/interop/trojan_ws_remote.sh --rounds 120 --interval-ms 1000 --base-port 19420
+bash scripts/interop/native_matrix_remote.sh --rounds 30 --interval-ms 1000 --base-port 19500
 ```
 
 Use `--dry-run` first when checking host reachability and remote paths.
