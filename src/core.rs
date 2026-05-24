@@ -378,10 +378,10 @@ fn render_keli_core_rs_config(plan: &CorePlan) -> Result<Value, CoreError> {
 
 fn render_keli_core_rs_policy() -> Value {
     json!({
-        "handshake_secs": 4,
-        "connection_idle_secs": 120,
-        "uplink_only_secs": 2,
-        "downlink_only_secs": 4,
+        "handshake_secs": 60,
+        "connection_idle_secs": 300,
+        "uplink_only_secs": 1,
+        "downlink_only_secs": 1,
         "buffer_size_kib": 128,
         "sniffing_cache_millis": 200,
         "connect_timeout_secs": 15
@@ -4509,10 +4509,10 @@ mod tests {
 
         let config = render_core_config(&plan).unwrap();
 
-        assert_eq!(config["policy"]["handshake_secs"], 4);
-        assert_eq!(config["policy"]["connection_idle_secs"], 120);
-        assert_eq!(config["policy"]["uplink_only_secs"], 2);
-        assert_eq!(config["policy"]["downlink_only_secs"], 4);
+        assert_eq!(config["policy"]["handshake_secs"], 60);
+        assert_eq!(config["policy"]["connection_idle_secs"], 300);
+        assert_eq!(config["policy"]["uplink_only_secs"], 1);
+        assert_eq!(config["policy"]["downlink_only_secs"], 1);
         assert_eq!(config["policy"]["buffer_size_kib"], 128);
         assert_eq!(config["policy"]["sniffing_cache_millis"], 200);
         assert_eq!(config["policy"]["connect_timeout_secs"], 15);
