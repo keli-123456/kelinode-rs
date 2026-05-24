@@ -272,9 +272,587 @@ impl fmt::Display for EvidenceLevel {
     }
 }
 
+pub fn native_capability_matrix() -> Vec<CapabilityEntry> {
+    use BaselineSource::*;
+    use CapabilityDirection::*;
+    use CapabilitySecurity::{None as NoSecurity, Reality, Tls};
+    use CapabilityStatus::*;
+    use CapabilityTransport::{
+        Direct as DirectTransport, Grpc, HttpUpgrade, Quic, Tcp, Udp, Ws, H2,
+    };
+    use EvidenceLevel::*;
+    use NativeProtocol::{
+        AnyTls, Direct as DirectProtocol, Dns, Http, Hysteria2, Mieru, Naive, Route, Shadowsocks,
+        Socks, Trojan, Tuic, Vless, Vmess,
+    };
+    use RenderDecision::*;
+    use UdpMode::{NativeUdp, None as NoUdp, UdpAssociate, UdpOverStream};
+
+    vec![
+        entry(
+            Socks,
+            Inbound,
+            Tcp,
+            NoSecurity,
+            UdpAssociate,
+            "password",
+            UsableNeedsSoak,
+            RenderNativeWithWarning,
+            GoLegacyBaseline,
+            LocalLoopback,
+            "kelinode/keli-core Xray SOCKS inbound behavior",
+            "needs longer mixed TCP/UDP gray soak",
+            "SOCKS TCP and UDP ASSOCIATE render native but still need gray load evidence",
+            &["socks auth tcp relay", "socks udp associate relay"],
+            &["renderer coverage", "local listener smoke"],
+            "run real client TCP and UDP soak before stable",
+        ),
+        entry(
+            Http,
+            Inbound,
+            Tcp,
+            NoSecurity,
+            NoUdp,
+            "password",
+            UsableNeedsSoak,
+            RenderNativeWithWarning,
+            GoLegacyBaseline,
+            LocalLoopback,
+            "kelinode/keli-core Xray HTTP proxy inbound behavior",
+            "needs longer CONNECT/plain HTTP gray soak",
+            "HTTP proxy renders native with unit and local listener evidence",
+            &["http connect relay", "plain http forwarding"],
+            &["renderer coverage", "local listener smoke"],
+            "run real client HTTP proxy soak before stable",
+        ),
+        entry(
+            Shadowsocks,
+            Inbound,
+            Tcp,
+            NoSecurity,
+            NativeUdp,
+            "password",
+            UsableNeedsSoak,
+            RenderNativeWithWarning,
+            GoLegacyBaseline,
+            LocalLoopback,
+            "kelinode/keli-core Xray Shadowsocks AEAD behavior",
+            "needs third-party client TCP/UDP soak",
+            "AEAD TCP/UDP is native-rendered and validated for supported ciphers",
+            &["shadowsocks aead tcp relay", "shadowsocks udp relay"],
+            &["renderer coverage", "cipher validation coverage"],
+            "run AEAD TCP/UDP client interop before stable",
+        ),
+        entry(
+            Vless,
+            Inbound,
+            Tcp,
+            NoSecurity,
+            UdpOverStream,
+            "uuid",
+            UsableNeedsSoak,
+            RenderNativeWithWarning,
+            GoLegacyBaseline,
+            LocalLoopback,
+            "kelinode/keli-core Xray VLESS TCP behavior",
+            "needs broad client soak for TCP and UDP command",
+            "VLESS TCP native path has local loopback coverage",
+            &["vless tcp auth", "vless tcp relay", "vless udp command"],
+            &["renderer coverage", "local loopback tests"],
+            "run gray TCP/UDP client soak before stable",
+        ),
+        entry_with_flow(
+            Vless,
+            Inbound,
+            Tcp,
+            Reality,
+            UdpOverStream,
+            "xtls-rprx-vision",
+            "uuid",
+            CanaryOnly,
+            RenderNativeWithWarning,
+            Mixed,
+            LocalLoopback,
+            "Xray VLESS REALITY Vision behavior plus ecosystem clients",
+            "needs real client REALITY Vision interop and soak",
+            "REALITY Vision renders native but remains canary-gated",
+            &["vless reality vision validation", "vless reality loopback"],
+            &["renderer coverage", "local reality listener tests"],
+            "run v2rayN/NekoBox/sing-box REALITY interop",
+        ),
+        entry(
+            Vless,
+            Inbound,
+            Ws,
+            Tls,
+            UdpOverStream,
+            "uuid",
+            CanaryOnly,
+            RenderNativeWithWarning,
+            GoLegacyBaseline,
+            LocalLoopback,
+            "kelinode/keli-core Xray VLESS WebSocket behavior",
+            "needs WebSocket fragmentation and browser/CDN soak",
+            "VLESS WS/TLS renders native with local coverage but needs soak",
+            &["vless ws upgrade", "vless tls ws relay"],
+            &["renderer coverage", "websocket runtime tests"],
+            "run CDN-shaped WS client soak before stable",
+        ),
+        entry(
+            Vmess,
+            Inbound,
+            Tcp,
+            NoSecurity,
+            UdpOverStream,
+            "uuid",
+            UsableNeedsSoak,
+            RenderNativeWithWarning,
+            GoLegacyBaseline,
+            LocalLoopback,
+            "kelinode/keli-core Xray VMess AEAD behavior",
+            "needs legacy and AEAD mixed client soak",
+            "VMess TCP native path has validation and local listener coverage",
+            &[
+                "vmess aead auth",
+                "vmess tcp relay",
+                "vmess udp over stream",
+            ],
+            &["renderer coverage", "local listener smoke"],
+            "run VMess AEAD and legacy route-outbound soak",
+        ),
+        entry(
+            Vmess,
+            Inbound,
+            Ws,
+            Tls,
+            UdpOverStream,
+            "uuid",
+            CanaryOnly,
+            RenderNativeWithWarning,
+            GoLegacyBaseline,
+            LocalLoopback,
+            "kelinode/keli-core Xray VMess WebSocket behavior",
+            "needs WebSocket fragmentation and third-party client soak",
+            "VMess WS/TLS renders native but still needs soak",
+            &["vmess ws upgrade", "vmess tls ws relay"],
+            &["renderer coverage", "websocket runtime tests"],
+            "run VMess WS/TLS real-client soak",
+        ),
+        entry(
+            Trojan,
+            Inbound,
+            Tcp,
+            NoSecurity,
+            UdpOverStream,
+            "password",
+            UsableNeedsSoak,
+            RenderNativeWithWarning,
+            GoLegacyBaseline,
+            LocalLoopback,
+            "kelinode/keli-core Xray Trojan TCP behavior",
+            "needs tail-traffic and mixed-route soak",
+            "Trojan TCP native path is usable but not yet stable",
+            &["trojan tcp auth", "trojan tcp relay", "trojan accounting"],
+            &["renderer coverage", "local auth smoke"],
+            "complete Trojan TCP accounting and user-delta regression",
+        ),
+        entry(
+            Trojan,
+            Inbound,
+            Tcp,
+            Tls,
+            UdpOverStream,
+            "password",
+            CanaryOnly,
+            RenderNativeWithWarning,
+            GoLegacyBaseline,
+            LocalLoopback,
+            "kelinode/keli-core Xray Trojan TLS behavior",
+            "needs SNI/ALPN/cert interop and soak",
+            "Trojan TLS native path is canary-only until TLS matrix passes",
+            &["trojan tls auth", "trojan sni cert behavior"],
+            &["renderer coverage", "TLS validation coverage"],
+            "run Trojan TLS client interop before widening",
+        ),
+        entry(
+            Trojan,
+            Inbound,
+            Ws,
+            NoSecurity,
+            UdpOverStream,
+            "password",
+            Broken,
+            Reject {
+                reason: "trojan websocket native relay is not production safe".to_string(),
+            },
+            GoLegacyBaseline,
+            UnitOnly,
+            "kelinode/keli-core Xray Trojan WebSocket behavior",
+            "needs websocket upgrade, frame split, close, and real-client interop",
+            "Trojan WS has known maturity gaps and must not default native",
+            &[
+                "trojan ws upgrade",
+                "trojan ws split frames",
+                "trojan ws close",
+            ],
+            &["unit render evidence only"],
+            "fix websocket relay and add interop before native rendering",
+        ),
+        entry(
+            Trojan,
+            Inbound,
+            Ws,
+            Tls,
+            UdpOverStream,
+            "password",
+            Broken,
+            Reject {
+                reason: "trojan tls websocket native relay is not production safe".to_string(),
+            },
+            GoLegacyBaseline,
+            UnitOnly,
+            "kelinode/keli-core Xray Trojan TLS WebSocket behavior",
+            "needs TLS/SNI before WS upgrade and real-client interop",
+            "Trojan TLS WS has known maturity gaps and must not default native",
+            &[
+                "trojan tls ws upgrade",
+                "trojan ws frame split",
+                "trojan ping pong",
+            ],
+            &["unit render evidence only"],
+            "fix TLS websocket relay and add interop before native rendering",
+        ),
+        entry(
+            Trojan,
+            Inbound,
+            Grpc,
+            Tls,
+            UdpOverStream,
+            "password",
+            Experimental,
+            Reject {
+                reason: "trojan grpc native inbound lacks production interop evidence".to_string(),
+            },
+            GoLegacyBaseline,
+            UnitOnly,
+            "kelinode/keli-core Xray Trojan gRPC behavior",
+            "needs gRPC client interop and soak",
+            "Trojan gRPC is not production-gated native yet",
+            &["trojan grpc relay", "trojan grpc tls relay"],
+            &["renderer evidence only"],
+            "add Trojan gRPC runtime and interop tests",
+        ),
+        entry(
+            Trojan,
+            Inbound,
+            HttpUpgrade,
+            Tls,
+            UdpOverStream,
+            "password",
+            Experimental,
+            Reject {
+                reason: "trojan httpupgrade native inbound lacks production interop evidence"
+                    .to_string(),
+            },
+            GoLegacyBaseline,
+            UnitOnly,
+            "kelinode/keli-core Xray Trojan HTTPUpgrade behavior",
+            "needs HTTPUpgrade client interop and soak",
+            "Trojan HTTPUpgrade is not production-gated native yet",
+            &["trojan httpupgrade relay", "trojan httpupgrade tls relay"],
+            &["renderer evidence only"],
+            "add Trojan HTTPUpgrade runtime and interop tests",
+        ),
+        entry(
+            AnyTls,
+            Inbound,
+            Tcp,
+            Tls,
+            UdpOverStream,
+            "password",
+            CanaryOnly,
+            RenderNativeWithWarning,
+            EcosystemInteropBaseline,
+            LocalLoopback,
+            "sing-box AnyTLS behavior and ecosystem clients",
+            "needs real-client padding and soak evidence",
+            "AnyTLS is native-rendered but canary-only",
+            &["anytls auth", "anytls padding", "anytls relay"],
+            &["renderer coverage", "local listener smoke"],
+            "run ecosystem client AnyTLS soak",
+        ),
+        entry(
+            Hysteria2,
+            Inbound,
+            Quic,
+            Tls,
+            NativeUdp,
+            "password",
+            UsableNeedsSoak,
+            RenderNativeWithWarning,
+            Mixed,
+            LocalLoopback,
+            "Go legacy HY2 behavior plus official/third-party QUIC clients",
+            "needs longer TCP/UDP QUIC soak and congestion evidence",
+            "HY2 TCP/UDP native path has local regression evidence",
+            &["hy2 password auth", "hy2 tcp relay", "hy2 udp relay"],
+            &["renderer coverage", "local QUIC regression tests"],
+            "run remote QUIC soak on high ports before stable",
+        ),
+        entry(
+            Tuic,
+            Inbound,
+            Quic,
+            Tls,
+            NativeUdp,
+            "uuid_password",
+            UsableNeedsSoak,
+            RenderNativeWithWarning,
+            Mixed,
+            LocalLoopback,
+            "TUIC protocol behavior plus ecosystem clients",
+            "needs longer TCP/UDP QUIC soak and zero-RTT rejection evidence",
+            "TUIC TCP/UDP native path has local regression evidence",
+            &["tuic auth", "tuic tcp relay", "tuic udp relay"],
+            &["renderer coverage", "local QUIC regression tests"],
+            "run TUIC remote soak before stable",
+        ),
+        entry(
+            Naive,
+            Inbound,
+            H2,
+            Tls,
+            NoUdp,
+            "basic_auth",
+            CanaryOnly,
+            RenderNativeWithWarning,
+            OfficialUpstreamBaseline,
+            LocalLoopback,
+            "official NaiveProxy H2/TLS CONNECT behavior",
+            "missing OfficialClientInterop + SoakTested evidence",
+            "Naive H2/TLS has local loopback but cannot be Stable without official interop",
+            &["naive h2 connect", "naive basic auth", "naive padding"],
+            &["local h2 listener tests"],
+            "run official NaiveProxy client script and soak",
+        ),
+        entry(
+            Naive,
+            Inbound,
+            Quic,
+            Tls,
+            NoUdp,
+            "basic_auth",
+            Experimental,
+            Reject {
+                reason: "naive h3/quic lacks official client and soak evidence".to_string(),
+            },
+            OfficialUpstreamBaseline,
+            LocalLoopback,
+            "official NaiveProxy H3/QUIC CONNECT behavior",
+            "missing OfficialClientInterop + SoakTested evidence",
+            "Naive H3/QUIC remains experimental until official-client evidence exists",
+            &["naive h3 connect", "naive h3 reconnect", "naive h3 auth"],
+            &["local h3 loopback tests"],
+            "run official NaiveProxy H3 client and soak before widening",
+        ),
+        entry(
+            Mieru,
+            Inbound,
+            Tcp,
+            NoSecurity,
+            UdpOverStream,
+            "username_password",
+            CanaryOnly,
+            RenderNativeWithWarning,
+            OfficialUpstreamBaseline,
+            LocalLoopback,
+            "official Mieru TCP underlay protocol behavior",
+            "missing OfficialClientInterop + SoakTested evidence",
+            "Mieru TCP underlay has local coverage but cannot be Stable without official interop",
+            &[
+                "mieru tcp underlay",
+                "mieru stream demux",
+                "mieru udp associate over tcp",
+            ],
+            &["renderer coverage", "local listener smoke"],
+            "run official Mieru client/server interop and soak",
+        ),
+        entry(
+            Mieru,
+            Inbound,
+            Udp,
+            NoSecurity,
+            NativeUdp,
+            "username_password",
+            Unsupported,
+            Reject {
+                reason: "mieru udp underlay is not implemented in native core".to_string(),
+            },
+            OfficialUpstreamBaseline,
+            UnitOnly,
+            "official Mieru UDP underlay protocol behavior",
+            "implementation missing; OfficialClientInterop + SoakTested impossible yet",
+            "Mieru UDP underlay is explicitly unsupported",
+            &["mieru udp underlay reject"],
+            &["capability matrix evidence"],
+            "implement UDP underlay before adding interop",
+        ),
+        entry(
+            DirectProtocol,
+            Outbound,
+            DirectTransport,
+            NoSecurity,
+            NativeUdp,
+            "none",
+            UsableNeedsSoak,
+            RenderNative,
+            GoLegacyBaseline,
+            LocalLoopback,
+            "keli-core freedom/direct outbound behavior",
+            "needs longer route soak",
+            "Direct outbound is the native default outbound",
+            &["direct tcp route", "direct udp route"],
+            &["renderer coverage"],
+            "keep route soak evidence current",
+        ),
+        entry(
+            Dns,
+            Outbound,
+            Udp,
+            NoSecurity,
+            NativeUdp,
+            "none",
+            UsableNeedsSoak,
+            RenderNativeWithWarning,
+            GoLegacyBaseline,
+            LocalLoopback,
+            "Go/Xray DNS route behavior",
+            "DoH/DoT and production resolver soak still missing",
+            "DNS UDP/tcp route rendering is partial but explicit",
+            &["dns udp resolution", "dns private ip guard"],
+            &["renderer coverage", "local resolver tests"],
+            "run DNS route soak with production resolver set",
+        ),
+        entry(
+            Route,
+            Inbound,
+            DirectTransport,
+            NoSecurity,
+            NativeUdp,
+            "none",
+            UsableNeedsSoak,
+            RenderNativeWithWarning,
+            GoLegacyBaseline,
+            LocalLoopback,
+            "Go/Xray route, block, and custom outbound behavior",
+            "geo data and custom outbound soak still partial",
+            "Route/block/custom outbound rendering rejects unsupported options loudly",
+            &["domain block", "ip cidr block", "custom outbound route"],
+            &["renderer coverage", "route validation coverage"],
+            "run route matrix soak with geosite/geoip fixtures",
+        ),
+    ]
+}
+
+fn entry(
+    protocol: NativeProtocol,
+    direction: CapabilityDirection,
+    transport: CapabilityTransport,
+    security: CapabilitySecurity,
+    udp_mode: UdpMode,
+    user_model: &str,
+    status: CapabilityStatus,
+    decision: RenderDecision,
+    baseline_source: BaselineSource,
+    evidence_level: EvidenceLevel,
+    baseline_reference: &str,
+    baseline_gap: &str,
+    reason: &str,
+    required_tests: &[&str],
+    current_evidence: &[&str],
+    next_action: &str,
+) -> CapabilityEntry {
+    entry_with_flow(
+        protocol,
+        direction,
+        transport,
+        security,
+        udp_mode,
+        "none",
+        user_model,
+        status,
+        decision,
+        baseline_source,
+        evidence_level,
+        baseline_reference,
+        baseline_gap,
+        reason,
+        required_tests,
+        current_evidence,
+        next_action,
+    )
+}
+
+fn entry_with_flow(
+    protocol: NativeProtocol,
+    direction: CapabilityDirection,
+    transport: CapabilityTransport,
+    security: CapabilitySecurity,
+    udp_mode: UdpMode,
+    flow: &str,
+    user_model: &str,
+    status: CapabilityStatus,
+    decision: RenderDecision,
+    baseline_source: BaselineSource,
+    evidence_level: EvidenceLevel,
+    baseline_reference: &str,
+    baseline_gap: &str,
+    reason: &str,
+    required_tests: &[&str],
+    current_evidence: &[&str],
+    next_action: &str,
+) -> CapabilityEntry {
+    CapabilityEntry {
+        key: CapabilityKey {
+            protocol,
+            direction,
+            transport,
+            security,
+            udp_mode,
+            flow: flow.to_string(),
+            user_model: user_model.to_string(),
+            route_outbound: route_outbound_label(direction),
+        },
+        status,
+        decision,
+        baseline_source,
+        baseline_reference: baseline_reference.to_string(),
+        baseline_gap: baseline_gap.to_string(),
+        evidence_level,
+        reason: reason.to_string(),
+        required_tests: required_tests
+            .iter()
+            .map(|value| value.to_string())
+            .collect(),
+        current_evidence: current_evidence
+            .iter()
+            .map(|value| value.to_string())
+            .collect(),
+        next_action: next_action.to_string(),
+    }
+}
+
+fn route_outbound_label(direction: CapabilityDirection) -> String {
+    match direction {
+        CapabilityDirection::Inbound => "per_inbound_routes".to_string(),
+        CapabilityDirection::Outbound => "outbound".to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeSet;
 
     #[test]
     fn capability_key_formats_all_gate_dimensions() {
@@ -333,5 +911,87 @@ mod tests {
         assert!(message.contains("baseline_source=GoLegacyBaseline"));
         assert!(message.contains("evidence_level=UnitOnly"));
         assert!(message.contains("reason=known websocket relay maturity gap"));
+    }
+
+    #[test]
+    fn initial_matrix_covers_all_required_protocols() {
+        let protocols = native_capability_matrix()
+            .iter()
+            .map(|entry| entry.key.protocol)
+            .collect::<BTreeSet<_>>();
+
+        for protocol in [
+            NativeProtocol::Socks,
+            NativeProtocol::Http,
+            NativeProtocol::Shadowsocks,
+            NativeProtocol::Vless,
+            NativeProtocol::Vmess,
+            NativeProtocol::Trojan,
+            NativeProtocol::AnyTls,
+            NativeProtocol::Hysteria2,
+            NativeProtocol::Tuic,
+            NativeProtocol::Naive,
+            NativeProtocol::Mieru,
+            NativeProtocol::Direct,
+            NativeProtocol::Dns,
+            NativeProtocol::Route,
+        ] {
+            assert!(
+                protocols.contains(&protocol),
+                "missing matrix entry for {}",
+                protocol.as_str()
+            );
+        }
+    }
+
+    #[test]
+    fn initial_matrix_blocks_trojan_websocket_default_native() {
+        let matrix = native_capability_matrix();
+        for (transport, security) in [
+            (CapabilityTransport::Ws, CapabilitySecurity::None),
+            (CapabilityTransport::Ws, CapabilitySecurity::Tls),
+        ] {
+            let entry = matrix
+                .iter()
+                .find(|entry| {
+                    entry.key.protocol == NativeProtocol::Trojan
+                        && entry.key.direction == CapabilityDirection::Inbound
+                        && entry.key.transport == transport
+                        && entry.key.security == security
+                })
+                .expect("trojan websocket entry");
+
+            assert!(matches!(
+                entry.status,
+                CapabilityStatus::Broken | CapabilityStatus::Experimental
+            ));
+            assert!(matches!(entry.decision, RenderDecision::Reject { .. }));
+            assert!(entry.gate_message().contains("trojan"));
+            assert!(entry.gate_message().contains("transport=ws"));
+        }
+    }
+
+    #[test]
+    fn official_only_protocols_are_not_marked_stable_without_official_interop_soak() {
+        for protocol in [NativeProtocol::Naive, NativeProtocol::Mieru] {
+            let entries = native_capability_matrix()
+                .into_iter()
+                .filter(|entry| entry.key.protocol == protocol)
+                .collect::<Vec<_>>();
+            assert!(!entries.is_empty(), "missing entries for {protocol:?}");
+            for entry in entries {
+                assert!(matches!(
+                    entry.baseline_source,
+                    BaselineSource::OfficialUpstreamBaseline | BaselineSource::Mixed
+                ));
+                assert_ne!(entry.status, CapabilityStatus::Stable);
+                assert!(
+                    entry.baseline_gap.contains("OfficialClientInterop")
+                        || entry.baseline_gap.contains("SoakTested"),
+                    "official protocol gap must name missing interop/soak evidence: {}",
+                    entry.gate_message()
+                );
+            }
+        }
     }
 }
