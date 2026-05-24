@@ -1679,9 +1679,11 @@ fn validate_keli_core_rs_inbound(inbound: &InboundPlan) -> Result<(), CoreError>
     }
 }
 
-fn validate_keli_core_rs_inbound_capability(inbound: &InboundPlan) -> Result<(), CoreError> {
+pub fn keli_core_rs_inbound_capability(
+    inbound: &InboundPlan,
+) -> Result<crate::native_capability::CapabilityEntry, CoreError> {
     let key = capability_key_for_inbound(inbound)?;
-    let entry = lookup_capability_entry(&key).unwrap_or_else(|| {
+    Ok(lookup_capability_entry(&key).unwrap_or_else(|| {
         unsupported_capability_entry(
             key,
             format!(
@@ -1689,7 +1691,11 @@ fn validate_keli_core_rs_inbound_capability(inbound: &InboundPlan) -> Result<(),
                 inbound.tag
             ),
         )
-    });
+    }))
+}
+
+fn validate_keli_core_rs_inbound_capability(inbound: &InboundPlan) -> Result<(), CoreError> {
+    let entry = keli_core_rs_inbound_capability(inbound)?;
 
     match &entry.decision {
         RenderDecision::RenderNative | RenderDecision::RenderNativeWithWarning => Ok(()),

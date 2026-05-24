@@ -2,7 +2,9 @@
 
 use kelinode_rs::config::{AppConfig, MachineProfileConfig, DEFAULT_TIMEOUT_SECS};
 use kelinode_rs::control::{handle_runtime_signal, RuntimeControlOptions, RuntimeLoopSignal};
+use kelinode_rs::core::{build_inbound_plan, keli_core_rs_inbound_capability};
 use kelinode_rs::logging;
+use kelinode_rs::native_capability::RenderDecision;
 use kelinode_rs::panel::client::{PanelClient, PanelClientOptions};
 use kelinode_rs::panel::contract::NODE_API_CONTRACT_VERSION;
 use kelinode_rs::port_forward::{
@@ -316,6 +318,8 @@ fn native_gray_preflight_report(plan: &RuntimeBootstrapPlan) -> NativeGrayPrefli
         ));
     }
 
+    push_native_capability_preflight_findings(plan, &mut report);
+
     let Some(core_plan) = plan.core_plan.as_ref() else {
         report
             .errors
@@ -358,6 +362,39 @@ fn native_gray_preflight_report(plan: &RuntimeBootstrapPlan) -> NativeGrayPrefli
     }
 
     report
+}
+
+fn push_native_capability_preflight_findings(
+    plan: &RuntimeBootstrapPlan,
+    report: &mut NativeGrayPreflightReport,
+) {
+    for node in &plan.node_infos {
+        let entry = match build_inbound_plan(node).and_then(|inbound| {
+            keli_core_rs_inbound_capability(&inbound).map_err(|err| {
+                kelinode_rs::core::CoreError::new(format!(
+                    "native capability classify failed for inbound {}: {}",
+                    inbound.tag, err.message
+                ))
+            })
+        }) {
+            Ok(entry) => entry,
+            Err(error) => {
+                report.errors.push(error.message);
+                continue;
+            }
+        };
+
+        match &entry.decision {
+            RenderDecision::RenderNative => {}
+            RenderDecision::RenderNativeWithWarning => report.warnings.push(format!(
+                "native capability warning: {}",
+                entry.gate_message()
+            )),
+            RenderDecision::FallbackGo | RenderDecision::Reject { .. } => report.errors.push(
+                format!("native capability blocker: {}", entry.gate_message()),
+            ),
+        }
+    }
 }
 
 fn is_wildcard_listen(value: &str) -> bool {
@@ -1027,6 +1064,47 @@ mod tests {
         }));
     }
 
+    #[test]
+    fn native_gray_preflight_warns_for_non_stable_capabilities() {
+        let mut plan = test_plan(vec![test_node_with_intervals(7, 30, 45)], Vec::new());
+        plan.resolved.kernel.r#type = "keli-core-rs".to_string();
+        plan.core_plan.as_mut().unwrap().kind = CoreKind::KeliCoreRs;
+
+        let report = native_gray_preflight_report(&plan);
+
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+        assert!(report.warnings.iter().any(|warning| {
+            warning.contains("protocol=vless")
+                && warning.contains("status=usable_needs_soak")
+                && warning.contains("decision=render_native_with_warning")
+                && warning.contains("baseline_source=GoLegacyBaseline")
+        }));
+    }
+
+    #[test]
+    fn native_gray_preflight_reports_rejected_capability_blocker() {
+        let mut node = test_node_with_protocol(8, "trojan");
+        node.common.network = "ws".to_string();
+        node.common.network_settings = json!({
+            "path": "/trojan",
+            "headers": {
+                "Host": "trojan.example.test"
+            }
+        });
+        let mut plan = test_plan(vec![node], Vec::new());
+        plan.resolved.kernel.r#type = "keli-core-rs".to_string();
+
+        let report = native_gray_preflight_report(&plan);
+
+        assert!(report.errors.iter().any(|error| {
+            error.contains("protocol=trojan")
+                && error.contains("transport=ws")
+                && error.contains("status=broken")
+                && error.contains("decision=reject")
+                && error.contains("baseline_source=GoLegacyBaseline")
+        }));
+    }
+
     fn test_plan(nodes: Vec<NodeInfo>, configs: Vec<NodeConfig>) -> RuntimeBootstrapPlan {
         test_plan_with_machine_profiles(nodes, configs, Vec::new())
     }
@@ -1065,6 +1143,16 @@ mod tests {
                 "push_interval": push,
                 "pull_interval": pull
             }
+        }))
+        .unwrap();
+
+        NodeInfo::from_common("https://panel.example.test", node_id, common).unwrap()
+    }
+
+    fn test_node_with_protocol(node_id: u32, protocol: &str) -> NodeInfo {
+        let common: CommonNode = serde_json::from_value(json!({
+            "protocol": protocol,
+            "server_port": 10000 + node_id
         }))
         .unwrap();
 
