@@ -11,8 +11,9 @@ use serde_json::{json, Map, Value};
 use crate::config::KernelConfig;
 use crate::logging;
 use crate::native_capability::{
-    lookup_capability_entry, unsupported_capability_entry, CapabilityDirection, CapabilityKey,
-    CapabilitySecurity, CapabilityTransport, NativeProtocol, RenderDecision, UdpMode,
+    entry_allowed_by_explicit_canary_allow_list, lookup_capability_entry,
+    unsupported_capability_entry, CapabilityDirection, CapabilityKey, CapabilitySecurity,
+    CapabilityTransport, NativeProtocol, RenderDecision, UdpMode, NATIVE_CANARY_ALLOW_ENV,
 };
 use crate::panel::types::{CertInfo, NodeInfo, Protocol, Security, TlsSettings, UserInfo};
 
@@ -1693,13 +1694,33 @@ pub fn keli_core_rs_inbound_capability(
 }
 
 fn validate_keli_core_rs_inbound_capability(inbound: &InboundPlan) -> Result<(), CoreError> {
+    let allow_list = std::env::var(NATIVE_CANARY_ALLOW_ENV).ok();
+    validate_keli_core_rs_inbound_capability_with_canary_allow_list(inbound, allow_list.as_deref())
+}
+
+fn validate_keli_core_rs_inbound_capability_with_canary_allow_list(
+    inbound: &InboundPlan,
+    allow_list: Option<&str>,
+) -> Result<(), CoreError> {
     let entry = keli_core_rs_inbound_capability(inbound)?;
 
     match &entry.decision {
         RenderDecision::RenderNative | RenderDecision::RenderNativeWithWarning => Ok(()),
-        RenderDecision::FallbackGo | RenderDecision::Reject { .. } => {
-            Err(CoreError::new(entry.gate_message()))
+        RenderDecision::FallbackGo => Err(CoreError::new(entry.gate_message())),
+        RenderDecision::Reject { .. }
+            if entry_allowed_by_explicit_canary_allow_list(&entry, allow_list) =>
+        {
+            logging::warn(
+                "core",
+                format!(
+                    "native capability canary override env={} {}",
+                    NATIVE_CANARY_ALLOW_ENV,
+                    entry.gate_message()
+                ),
+            );
+            Ok(())
         }
+        RenderDecision::Reject { .. } => Err(CoreError::new(entry.gate_message())),
     }
 }
 
@@ -3310,8 +3331,9 @@ mod tests {
         grpc_service_name_setting, keli_core_rs_inbound_capability, keli_core_rs_protocol_name,
         keli_core_rs_transport_network, render_core_config, resolve_node_listen_ip,
         should_fallback_node_listen_ip, split_core_plans_for_nodes,
-        split_core_plans_for_nodes_with_kind, websocket_host_setting, websocket_path_setting,
-        write_core_config, CoreKind, CorePlan, InboundPlan,
+        split_core_plans_for_nodes_with_kind,
+        validate_keli_core_rs_inbound_capability_with_canary_allow_list, websocket_host_setting,
+        websocket_path_setting, write_core_config, CoreKind, CorePlan, InboundPlan,
     };
     use crate::core_control::KeliCoreTrafficRecord;
     use crate::native_capability::{
@@ -5744,6 +5766,39 @@ mod tests {
         assert!(err
             .message
             .contains("trojan websocket native relay requires explicit canary gate and soak"));
+    }
+
+    #[test]
+    fn explicit_canary_allow_list_allows_trojan_tls_websocket_native_rendering() {
+        let mut trojan = test_node("trojan", 68, "");
+        trojan.security = Security::Tls;
+        trojan.common.tls = 1;
+        trojan.common.network = "ws".to_string();
+        trojan.common.network_settings = json!({
+            "path": "/answer",
+            "headers": {
+                "Host": "trojan.example.test"
+            }
+        });
+        {
+            let cert = trojan.common.cert_info.as_mut().unwrap();
+            cert.cert_mode = "file".to_string();
+            cert.cert_file = "/tmp/trojan.cer".to_string();
+            cert.key_file = "/tmp/trojan.key".to_string();
+            cert.cert_domain = "trojan.example.test".to_string();
+        }
+        let plan = CorePlan::from_nodes(
+            CoreKind::KeliCoreRs,
+            PathBuf::from("/srv/v2node/keli-core-rs.json"),
+            &[trojan],
+        )
+        .unwrap();
+
+        validate_keli_core_rs_inbound_capability_with_canary_allow_list(
+            &plan.inbounds[0],
+            Some("trojan_tls_ws"),
+        )
+        .unwrap();
     }
 
     #[test]

@@ -229,6 +229,8 @@ pub struct CapabilityEntry {
     pub next_action: String,
 }
 
+pub const NATIVE_CANARY_ALLOW_ENV: &str = "KELI_NATIVE_CANARY_ALLOW";
+
 impl CapabilityEntry {
     pub fn gate_message(&self) -> String {
         let mut message = format!(
@@ -246,6 +248,61 @@ impl CapabilityEntry {
         }
         message
     }
+}
+
+pub fn entry_allowed_by_explicit_native_canary_env(entry: &CapabilityEntry) -> bool {
+    let allow_list = std::env::var(NATIVE_CANARY_ALLOW_ENV).ok();
+    entry_allowed_by_explicit_canary_allow_list(entry, allow_list.as_deref())
+}
+
+pub fn entry_allowed_by_explicit_canary_allow_list(
+    entry: &CapabilityEntry,
+    allow_list: Option<&str>,
+) -> bool {
+    if entry.status != CapabilityStatus::CanaryOnly {
+        return false;
+    }
+    if !matches!(&entry.decision, RenderDecision::Reject { .. }) {
+        return false;
+    }
+
+    let Some(allow_list) = allow_list else {
+        return false;
+    };
+    let tokens = canary_allow_tokens(entry);
+    allow_list
+        .split(|ch: char| ch == ',' || ch == ';' || ch.is_ascii_whitespace())
+        .map(normalize_canary_allow_token)
+        .any(|token| !token.is_empty() && tokens.iter().any(|allowed| allowed == &token))
+}
+
+fn canary_allow_tokens(entry: &CapabilityEntry) -> Vec<String> {
+    let protocol = entry.key.protocol.as_str();
+    let transport = entry.key.transport.as_str();
+    let security = entry.key.security.as_str();
+
+    if entry.key.security == CapabilitySecurity::None {
+        vec![format!("{protocol}_{transport}")]
+    } else {
+        vec![
+            format!("{protocol}_{security}_{transport}"),
+            format!("{protocol}_{transport}_{security}"),
+        ]
+    }
+}
+
+fn normalize_canary_allow_token(token: &str) -> String {
+    token
+        .trim()
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() {
+                ch.to_ascii_lowercase()
+            } else {
+                '_'
+            }
+        })
+        .collect()
 }
 
 impl fmt::Display for BaselineSource {
@@ -1432,6 +1489,47 @@ mod tests {
                 .gate_message()
                 .contains("evidence_level=ThirdPartyClientInterop"));
         }
+    }
+
+    #[test]
+    fn explicit_canary_allow_list_matches_trojan_websocket_only_when_requested() {
+        let matrix = native_capability_matrix();
+        let plain = matrix
+            .iter()
+            .find(|entry| {
+                entry.key.protocol == NativeProtocol::Trojan
+                    && entry.key.direction == CapabilityDirection::Inbound
+                    && entry.key.transport == CapabilityTransport::Ws
+                    && entry.key.security == CapabilitySecurity::None
+            })
+            .expect("trojan websocket entry");
+        let tls = matrix
+            .iter()
+            .find(|entry| {
+                entry.key.protocol == NativeProtocol::Trojan
+                    && entry.key.direction == CapabilityDirection::Inbound
+                    && entry.key.transport == CapabilityTransport::Ws
+                    && entry.key.security == CapabilitySecurity::Tls
+            })
+            .expect("trojan tls websocket entry");
+
+        assert!(entry_allowed_by_explicit_canary_allow_list(
+            plain,
+            Some("trojan_ws")
+        ));
+        assert!(entry_allowed_by_explicit_canary_allow_list(
+            tls,
+            Some("trojan_tls_ws")
+        ));
+        assert!(entry_allowed_by_explicit_canary_allow_list(
+            tls,
+            Some("trojan/ws/tls")
+        ));
+        assert!(!entry_allowed_by_explicit_canary_allow_list(
+            tls,
+            Some("trojan_ws")
+        ));
+        assert!(!entry_allowed_by_explicit_canary_allow_list(plain, None));
     }
 
     #[test]

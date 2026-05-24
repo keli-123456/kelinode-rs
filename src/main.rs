@@ -4,7 +4,9 @@ use kelinode_rs::config::{AppConfig, MachineProfileConfig, DEFAULT_TIMEOUT_SECS}
 use kelinode_rs::control::{handle_runtime_signal, RuntimeControlOptions, RuntimeLoopSignal};
 use kelinode_rs::core::{build_inbound_plan, keli_core_rs_inbound_capability};
 use kelinode_rs::logging;
-use kelinode_rs::native_capability::RenderDecision;
+use kelinode_rs::native_capability::{
+    entry_allowed_by_explicit_native_canary_env, RenderDecision, NATIVE_CANARY_ALLOW_ENV,
+};
 use kelinode_rs::panel::client::{PanelClient, PanelClientOptions};
 use kelinode_rs::panel::contract::NODE_API_CONTRACT_VERSION;
 use kelinode_rs::port_forward::{
@@ -396,6 +398,15 @@ fn push_native_capability_preflight_findings(
                 "native capability warning: {}",
                 entry.gate_message()
             )),
+            RenderDecision::Reject { .. }
+                if entry_allowed_by_explicit_native_canary_env(&entry) =>
+            {
+                report.warnings.push(format!(
+                    "native capability canary override env={}: {}",
+                    NATIVE_CANARY_ALLOW_ENV,
+                    entry.gate_message()
+                ))
+            }
             RenderDecision::FallbackGo | RenderDecision::Reject { .. } => report.errors.push(
                 format!("native capability blocker: {}", entry.gate_message()),
             ),
