@@ -5353,10 +5353,10 @@ mod tests {
 
         assert!(err.message.contains("protocol=trojan"));
         assert!(err.message.contains("transport=ws"));
-        assert!(err.message.contains("status=broken"));
+        assert!(err.message.contains("status=canary_only"));
         assert!(err
             .message
-            .contains("trojan websocket native relay is not production safe"));
+            .contains("trojan websocket native relay requires explicit canary gate and soak"));
     }
 
     #[test]
@@ -5381,12 +5381,14 @@ mod tests {
         assert!(err.message.contains("protocol=trojan"));
         assert!(err.message.contains("direction=inbound"));
         assert!(err.message.contains("transport=ws"));
-        assert!(err.message.contains("status=broken"));
+        assert!(err.message.contains("status=canary_only"));
         assert!(err.message.contains("baseline_source=GoLegacyBaseline"));
-        assert!(err.message.contains("evidence_level=UnitOnly"));
         assert!(err
             .message
-            .contains("trojan websocket native relay is not production safe"));
+            .contains("evidence_level=ThirdPartyClientInterop"));
+        assert!(err
+            .message
+            .contains("trojan websocket native relay requires explicit canary gate and soak"));
     }
 
     #[test]
@@ -6142,7 +6144,7 @@ mod tests {
             assert!(err.message.contains("protocol=trojan"));
             assert!(err.message.contains("transport=ws"));
             assert!(err.message.contains("security=none"));
-            assert!(err.message.contains("status=broken"));
+            assert!(err.message.contains("status=canary_only"));
         }
     }
 
