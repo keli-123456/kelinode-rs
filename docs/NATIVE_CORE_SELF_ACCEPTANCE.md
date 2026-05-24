@@ -6,6 +6,14 @@ Branch: `codex/all-protocol-maturity-pass`
 This document is evidence-based. `reviewed` is not treated as `passed`, a matrix entry is not a
 maturity pass, and local loopback evidence is not treated as `Stable`.
 
+## Evidence Rules
+
+- Short remote interop passed does not mean `Stable`; it is evidence for `UsableNeedsSoak` or `CanaryOnly` until longer soak and gray rollout evidence exist.
+- Trojan WS/TLS WS/gRPC/HTTPUpgrade remain default `Reject` even after sing-box interop; they need an explicit canary switch plus soak before default native rendering.
+- Naive H3/QUIC official-client interop is still blocked at QUIC TLS certificate verification and cannot be marked stable.
+- Mieru TCP official interop passed, but it still lacks soak evidence and cannot be marked stable.
+- Mieru UDP underlay is explicitly `Unsupported / Reject`; it has a dedicated capability entry and must not fall through to a generic lookup miss.
+
 ## Capability Gates
 
 | Item | Evidence | Status |

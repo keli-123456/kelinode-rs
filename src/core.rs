@@ -1775,6 +1775,7 @@ fn capability_udp_mode_for_inbound(inbound: &InboundPlan) -> UdpMode {
         "socks" => UdpMode::UdpAssociate,
         "http" | "naive" => UdpMode::None,
         "shadowsocks" | "hysteria" | "hysteria2" | "tuic" => UdpMode::NativeUdp,
+        "mieru" if keli_core_rs_transport_network(inbound) == "udp" => UdpMode::NativeUdp,
         "vless" | "vmess" | "trojan" | "anytls" | "mieru" => UdpMode::UdpOverStream,
         _ => UdpMode::None,
     }
@@ -3303,9 +3304,14 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        build_inbound_plan, core_file_layout, core_kind_from_name, render_core_config,
-        resolve_node_listen_ip, should_fallback_node_listen_ip, split_core_plans_for_nodes,
+        build_inbound_plan, capability_key_for_inbound, core_file_layout, core_kind_from_name,
+        keli_core_rs_inbound_capability, render_core_config, resolve_node_listen_ip,
+        should_fallback_node_listen_ip, split_core_plans_for_nodes,
         split_core_plans_for_nodes_with_kind, write_core_config, CoreKind, CorePlan,
+    };
+    use crate::native_capability::{
+        CapabilityDirection, CapabilitySecurity, CapabilityStatus, CapabilityTransport,
+        NativeProtocol, RenderDecision, UdpMode,
     };
     use crate::panel::types::{
         CertInfo, CommonNode, NodeInfo, PortValue, Route, Security, UserInfo,
@@ -5389,6 +5395,32 @@ mod tests {
         assert!(err
             .message
             .contains("trojan websocket native relay requires explicit canary gate and soak"));
+    }
+
+    #[test]
+    fn mieru_udp_underlay_hits_specific_unsupported_entry() {
+        let mut mieru = test_node("mieru", 68, "");
+        mieru.common.transport = "udp".to_string();
+        let inbound = build_inbound_plan(&mieru).unwrap();
+
+        let key = capability_key_for_inbound(&inbound).unwrap();
+        assert_eq!(key.protocol, NativeProtocol::Mieru);
+        assert_eq!(key.direction, CapabilityDirection::Inbound);
+        assert_eq!(key.transport, CapabilityTransport::Udp);
+        assert_eq!(key.security, CapabilitySecurity::None);
+        assert_eq!(key.udp_mode, UdpMode::NativeUdp);
+
+        let entry = keli_core_rs_inbound_capability(&inbound).unwrap();
+        assert_eq!(entry.status, CapabilityStatus::Unsupported);
+        assert!(matches!(entry.decision, RenderDecision::Reject { .. }));
+        assert!(entry.reason.contains("Mieru UDP underlay"));
+        assert!(
+            !entry
+                .current_evidence
+                .iter()
+                .any(|evidence| evidence.contains("lookup miss")),
+            "Mieru UDP underlay must hit its explicit Unsupported entry, not a generic lookup miss"
+        );
     }
 
     #[test]

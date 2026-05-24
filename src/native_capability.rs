@@ -517,6 +517,27 @@ pub fn native_capability_matrix() -> Vec<CapabilityEntry> {
         entry(
             Vless,
             Inbound,
+            HttpUpgrade,
+            Tls,
+            UdpOverStream,
+            "uuid",
+            CanaryOnly,
+            RenderNativeWithWarning,
+            GoLegacyBaseline,
+            ThirdPartyClientInterop,
+            "kelinode/keli-core Xray VLESS HTTPUpgrade TLS behavior",
+            "needs HTTPUpgrade TLS real-client soak",
+            "VLESS HTTPUpgrade TLS passed short sing-box interop but needs soak",
+            &["vless httpupgrade tls upgrade", "vless httpupgrade tls relay"],
+            &[
+                "renderer coverage",
+                "2026-05-24 sing-box v1.12.22 remote 1-round vless-httpupgrade-tls probe passed on 2.56.116.39",
+            ],
+            "run HTTPUpgrade TLS real-client soak before stable",
+        ),
+        entry(
+            Vless,
+            Inbound,
             Grpc,
             NoSecurity,
             UdpOverStream,
@@ -535,6 +556,28 @@ pub fn native_capability_matrix() -> Vec<CapabilityEntry> {
                 "2026-05-24 sing-box v1.12.22 remote 1-round vless-grpc-none probe passed on 2.56.116.39",
             ],
             "run gRPC real-client soak before stable",
+        ),
+        entry(
+            Vless,
+            Inbound,
+            Grpc,
+            Tls,
+            UdpOverStream,
+            "uuid",
+            CanaryOnly,
+            RenderNativeWithWarning,
+            GoLegacyBaseline,
+            ThirdPartyClientInterop,
+            "kelinode/keli-core Xray VLESS gRPC TLS behavior",
+            "needs gRPC TLS real-client soak",
+            "VLESS gRPC TLS passed short sing-box interop but needs soak",
+            &["vless grpc tls relay"],
+            &[
+                "renderer coverage",
+                "local grpc runtime tests",
+                "2026-05-24 sing-box v1.12.22 remote 1-round vless-grpc-tls probe passed on 2.56.116.39",
+            ],
+            "run gRPC TLS real-client soak before stable",
         ),
         entry(
             Vmess,
@@ -652,6 +695,27 @@ pub fn native_capability_matrix() -> Vec<CapabilityEntry> {
         entry(
             Vmess,
             Inbound,
+            HttpUpgrade,
+            Tls,
+            UdpOverStream,
+            "uuid",
+            CanaryOnly,
+            RenderNativeWithWarning,
+            GoLegacyBaseline,
+            ThirdPartyClientInterop,
+            "kelinode/keli-core Xray VMess HTTPUpgrade TLS behavior",
+            "needs longer HTTPUpgrade TLS real-client soak",
+            "VMess HTTPUpgrade TLS passed short sing-box interop but still needs soak",
+            &["vmess httpupgrade tls relay"],
+            &[
+                "renderer coverage",
+                "2026-05-24 sing-box v1.12.22 remote 1-round vmess-httpupgrade-tls probe passed on 2.56.116.39",
+            ],
+            "run VMess HTTPUpgrade TLS real-client soak",
+        ),
+        entry(
+            Vmess,
+            Inbound,
             Grpc,
             NoSecurity,
             UdpOverStream,
@@ -669,6 +733,27 @@ pub fn native_capability_matrix() -> Vec<CapabilityEntry> {
                 "2026-05-24 sing-box v1.12.22 remote 1-round vmess-grpc-none probe passed on 2.56.116.39",
             ],
             "run VMess gRPC real-client soak",
+        ),
+        entry(
+            Vmess,
+            Inbound,
+            Grpc,
+            Tls,
+            UdpOverStream,
+            "uuid",
+            CanaryOnly,
+            RenderNativeWithWarning,
+            GoLegacyBaseline,
+            ThirdPartyClientInterop,
+            "kelinode/keli-core Xray VMess gRPC TLS behavior",
+            "needs longer gRPC TLS real-client soak",
+            "VMess gRPC TLS passed short sing-box interop but still needs soak",
+            &["vmess grpc tls relay"],
+            &[
+                "renderer coverage",
+                "2026-05-24 sing-box v1.12.22 remote 1-round vmess-grpc-tls probe passed on 2.56.116.39",
+            ],
+            "run VMess gRPC TLS real-client soak",
         ),
         entry(
             Trojan,
@@ -774,6 +859,30 @@ pub fn native_capability_matrix() -> Vec<CapabilityEntry> {
             Trojan,
             Inbound,
             Grpc,
+            NoSecurity,
+            UdpOverStream,
+            "password",
+            CanaryOnly,
+            Reject {
+                reason: "trojan grpc native inbound requires explicit canary gate and soak"
+                    .to_string(),
+            },
+            GoLegacyBaseline,
+            ThirdPartyClientInterop,
+            "kelinode/keli-core Xray Trojan gRPC behavior",
+            "missing explicit canary gate and longer gRPC client soak",
+            "Trojan plain gRPC passed short sing-box interop but is not production-gated native yet",
+            &["trojan grpc relay"],
+            &[
+                "renderer evidence",
+                "2026-05-24 sing-box v1.12.22 remote 1-round trojan-grpc-plain probe passed on 2.56.116.39",
+            ],
+            "add explicit canary switch and longer Trojan plain gRPC soak",
+        ),
+        entry(
+            Trojan,
+            Inbound,
+            Grpc,
             Tls,
             UdpOverStream,
             "password",
@@ -790,9 +899,33 @@ pub fn native_capability_matrix() -> Vec<CapabilityEntry> {
             &["trojan grpc relay", "trojan grpc tls relay"],
             &[
                 "renderer evidence",
-                "2026-05-24 sing-box v1.12.22 remote 1-round trojan-grpc-plain and trojan-grpc-tls probes passed on 2.56.116.39",
+                "2026-05-24 sing-box v1.12.22 remote 1-round trojan-grpc-tls probe passed on 2.56.116.39",
             ],
             "add explicit canary switch and longer Trojan gRPC soak",
+        ),
+        entry(
+            Trojan,
+            Inbound,
+            HttpUpgrade,
+            NoSecurity,
+            UdpOverStream,
+            "password",
+            CanaryOnly,
+            Reject {
+                reason: "trojan httpupgrade native inbound requires explicit canary gate and soak"
+                    .to_string(),
+            },
+            GoLegacyBaseline,
+            ThirdPartyClientInterop,
+            "kelinode/keli-core Xray Trojan HTTPUpgrade behavior",
+            "missing explicit canary gate and longer HTTPUpgrade client soak",
+            "Trojan plain HTTPUpgrade passed short sing-box interop but is not production-gated native yet",
+            &["trojan httpupgrade relay"],
+            &[
+                "renderer evidence",
+                "2026-05-24 sing-box v1.12.22 remote 1-round trojan-httpupgrade-plain probe passed on 2.56.116.39",
+            ],
+            "add explicit canary switch and longer Trojan plain HTTPUpgrade soak",
         ),
         entry(
             Trojan,
@@ -814,7 +947,7 @@ pub fn native_capability_matrix() -> Vec<CapabilityEntry> {
             &["trojan httpupgrade relay", "trojan httpupgrade tls relay"],
             &[
                 "renderer evidence",
-                "2026-05-24 sing-box v1.12.22 remote 1-round trojan-httpupgrade-plain and trojan-httpupgrade-tls probes passed on 2.56.116.39",
+                "2026-05-24 sing-box v1.12.22 remote 1-round trojan-httpupgrade-tls probe passed on 2.56.116.39",
             ],
             "add explicit canary switch and longer Trojan HTTPUpgrade soak",
         ),
@@ -1299,6 +1432,220 @@ mod tests {
                 .gate_message()
                 .contains("evidence_level=ThirdPartyClientInterop"));
         }
+    }
+
+    #[test]
+    fn capability_matrix_has_explicit_entries_for_stream_transport_tls_variants() {
+        for (protocol, transport, security, user_model, remote_case) in [
+            (
+                NativeProtocol::Vless,
+                CapabilityTransport::HttpUpgrade,
+                CapabilitySecurity::None,
+                "uuid",
+                "vless-httpupgrade-none",
+            ),
+            (
+                NativeProtocol::Vless,
+                CapabilityTransport::HttpUpgrade,
+                CapabilitySecurity::Tls,
+                "uuid",
+                "vless-httpupgrade-tls",
+            ),
+            (
+                NativeProtocol::Vless,
+                CapabilityTransport::Grpc,
+                CapabilitySecurity::None,
+                "uuid",
+                "vless-grpc-none",
+            ),
+            (
+                NativeProtocol::Vless,
+                CapabilityTransport::Grpc,
+                CapabilitySecurity::Tls,
+                "uuid",
+                "vless-grpc-tls",
+            ),
+            (
+                NativeProtocol::Vmess,
+                CapabilityTransport::HttpUpgrade,
+                CapabilitySecurity::None,
+                "uuid",
+                "vmess-httpupgrade-none",
+            ),
+            (
+                NativeProtocol::Vmess,
+                CapabilityTransport::HttpUpgrade,
+                CapabilitySecurity::Tls,
+                "uuid",
+                "vmess-httpupgrade-tls",
+            ),
+            (
+                NativeProtocol::Vmess,
+                CapabilityTransport::Grpc,
+                CapabilitySecurity::None,
+                "uuid",
+                "vmess-grpc-none",
+            ),
+            (
+                NativeProtocol::Vmess,
+                CapabilityTransport::Grpc,
+                CapabilitySecurity::Tls,
+                "uuid",
+                "vmess-grpc-tls",
+            ),
+            (
+                NativeProtocol::Trojan,
+                CapabilityTransport::HttpUpgrade,
+                CapabilitySecurity::None,
+                "password",
+                "trojan-httpupgrade-plain",
+            ),
+            (
+                NativeProtocol::Trojan,
+                CapabilityTransport::HttpUpgrade,
+                CapabilitySecurity::Tls,
+                "password",
+                "trojan-httpupgrade-tls",
+            ),
+            (
+                NativeProtocol::Trojan,
+                CapabilityTransport::Grpc,
+                CapabilitySecurity::None,
+                "password",
+                "trojan-grpc-plain",
+            ),
+            (
+                NativeProtocol::Trojan,
+                CapabilityTransport::Grpc,
+                CapabilitySecurity::Tls,
+                "password",
+                "trojan-grpc-tls",
+            ),
+        ] {
+            let entry = lookup_capability_entry(&CapabilityKey {
+                protocol,
+                direction: CapabilityDirection::Inbound,
+                transport,
+                security,
+                udp_mode: UdpMode::UdpOverStream,
+                flow: "none".to_string(),
+                user_model: user_model.to_string(),
+                route_outbound: "per_inbound_routes".to_string(),
+            })
+            .unwrap_or_else(|| {
+                panic!(
+                    "missing explicit capability entry for {} {} {}",
+                    protocol.as_str(),
+                    transport.as_str(),
+                    security.as_str()
+                )
+            });
+
+            assert_eq!(entry.evidence_level, EvidenceLevel::ThirdPartyClientInterop);
+            assert!(
+                entry
+                    .current_evidence
+                    .iter()
+                    .any(|evidence| evidence.contains(remote_case)),
+                "entry evidence for {} must mention remote case {remote_case}: {:?}",
+                entry.key.dimension_summary(),
+                entry.current_evidence
+            );
+        }
+    }
+
+    #[test]
+    fn vless_grpc_tls_capability_matches_remote_evidence() {
+        let entry = lookup_capability_entry(&CapabilityKey {
+            protocol: NativeProtocol::Vless,
+            direction: CapabilityDirection::Inbound,
+            transport: CapabilityTransport::Grpc,
+            security: CapabilitySecurity::Tls,
+            udp_mode: UdpMode::UdpOverStream,
+            flow: "none".to_string(),
+            user_model: "uuid".to_string(),
+            route_outbound: "per_inbound_routes".to_string(),
+        })
+        .expect("vless grpc tls capability");
+
+        assert_eq!(entry.status, CapabilityStatus::CanaryOnly);
+        assert!(matches!(
+            entry.decision,
+            RenderDecision::RenderNativeWithWarning
+        ));
+        assert!(entry
+            .current_evidence
+            .iter()
+            .any(|evidence| evidence.contains("vless-grpc-tls")));
+    }
+
+    #[test]
+    fn vmess_httpupgrade_tls_capability_matches_remote_evidence() {
+        let entry = lookup_capability_entry(&CapabilityKey {
+            protocol: NativeProtocol::Vmess,
+            direction: CapabilityDirection::Inbound,
+            transport: CapabilityTransport::HttpUpgrade,
+            security: CapabilitySecurity::Tls,
+            udp_mode: UdpMode::UdpOverStream,
+            flow: "none".to_string(),
+            user_model: "uuid".to_string(),
+            route_outbound: "per_inbound_routes".to_string(),
+        })
+        .expect("vmess httpupgrade tls capability");
+
+        assert_eq!(entry.status, CapabilityStatus::CanaryOnly);
+        assert!(matches!(
+            entry.decision,
+            RenderDecision::RenderNativeWithWarning
+        ));
+        assert!(entry
+            .current_evidence
+            .iter()
+            .any(|evidence| evidence.contains("vmess-httpupgrade-tls")));
+    }
+
+    #[test]
+    fn trojan_grpc_plain_capability_is_explicitly_classified() {
+        let entry = lookup_capability_entry(&CapabilityKey {
+            protocol: NativeProtocol::Trojan,
+            direction: CapabilityDirection::Inbound,
+            transport: CapabilityTransport::Grpc,
+            security: CapabilitySecurity::None,
+            udp_mode: UdpMode::UdpOverStream,
+            flow: "none".to_string(),
+            user_model: "password".to_string(),
+            route_outbound: "per_inbound_routes".to_string(),
+        })
+        .expect("trojan grpc plain capability");
+
+        assert_eq!(entry.status, CapabilityStatus::CanaryOnly);
+        assert!(matches!(entry.decision, RenderDecision::Reject { .. }));
+        assert!(entry
+            .current_evidence
+            .iter()
+            .any(|evidence| evidence.contains("trojan-grpc-plain")));
+    }
+
+    #[test]
+    fn trojan_httpupgrade_plain_capability_is_explicitly_classified() {
+        let entry = lookup_capability_entry(&CapabilityKey {
+            protocol: NativeProtocol::Trojan,
+            direction: CapabilityDirection::Inbound,
+            transport: CapabilityTransport::HttpUpgrade,
+            security: CapabilitySecurity::None,
+            udp_mode: UdpMode::UdpOverStream,
+            flow: "none".to_string(),
+            user_model: "password".to_string(),
+            route_outbound: "per_inbound_routes".to_string(),
+        })
+        .expect("trojan httpupgrade plain capability");
+
+        assert_eq!(entry.status, CapabilityStatus::CanaryOnly);
+        assert!(matches!(entry.decision, RenderDecision::Reject { .. }));
+        assert!(entry
+            .current_evidence
+            .iter()
+            .any(|evidence| evidence.contains("trojan-httpupgrade-plain")));
     }
 
     #[test]
