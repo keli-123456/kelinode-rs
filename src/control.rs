@@ -4,7 +4,8 @@ use std::sync::{Mutex, OnceLock};
 
 use crate::config::NodeConfig;
 use crate::core::{
-    render_core_config, write_core_config, CoreConfigWriteResult, CoreKind, CorePlan,
+    render_core_config, render_core_config_without_users, write_core_config, CoreConfigWriteResult,
+    CoreKind, CorePlan,
 };
 use crate::core_control::{KeliCoreResponse, KELI_CORE_APPLY_CONTROL_TIMEOUT};
 use crate::health::{build_machine_status_payload, HealthReportInput};
@@ -462,7 +463,12 @@ where
             }
         }
         if options.hot_apply_keli_core_rs {
-            match try_hot_apply_keli_core_rs_config(core_plan, process_supervisor, &spec) {
+            match try_hot_apply_keli_core_rs_config(
+                core_plan,
+                process_supervisor,
+                &spec,
+                write_result.route_config_changed,
+            ) {
                 Ok(Some(status)) => return Ok(status),
                 Ok(None) => {}
                 Err(error) if error.fallback_reload => {
@@ -488,6 +494,7 @@ fn try_hot_apply_keli_core_rs_config<P>(
     core_plan: &CorePlan,
     process_supervisor: &mut P,
     spec: &ProcessSpec,
+    route_config_changed: bool,
 ) -> Result<Option<ProcessStatus>, HotApplyError>
 where
     P: ProcessSupervisor,
@@ -499,10 +506,28 @@ where
         return Ok(None);
     }
 
-    let config = render_core_config(core_plan).map_err(|err| HotApplyError::fatal(err.message))?;
     let client = keli_core_rs_control_client(&core_plan.config_path)
         .map_err(|err| HotApplyError::fallback(err.message))?
         .with_timeout(KELI_CORE_APPLY_CONTROL_TIMEOUT);
+    if route_config_changed {
+        let route_config = render_core_config_without_users(core_plan)
+            .map_err(|err| HotApplyError::fatal(err.message))?;
+        match client.apply_routes_response(route_config) {
+            Ok(KeliCoreResponse::Applied { decision, .. }) => {
+                let mut status = current;
+                status.message = format!("hot applied keli-core-rs routes ({decision})");
+                return Ok(Some(status));
+            }
+            Ok(KeliCoreResponse::Error { .. }) | Err(_) => {}
+            Ok(response) => {
+                return Err(HotApplyError::fallback(format!(
+                    "unexpected keli-core-rs route apply response: {response:?}"
+                )));
+            }
+        }
+    }
+
+    let config = render_core_config(core_plan).map_err(|err| HotApplyError::fatal(err.message))?;
     match client.apply_config_response(config) {
         Ok(KeliCoreResponse::Applied { decision, .. }) => {
             let mut status = current;
@@ -774,6 +799,7 @@ mod tests {
     use serde_json::json;
 
     use crate::config::{NodeConfig, ResolvedConfig, ResolvedMachineConfig};
+    use crate::core::RoutePlan;
     use crate::panel::client::{PanelClient, PanelClientOptions};
     use crate::panel::types::{CommonNode, NodeInfo, UserInfo};
     use crate::port_forward::{
@@ -1062,6 +1088,111 @@ mod tests {
             .unwrap()
             .message
             .contains("updated"));
+        join.join().unwrap();
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn hot_applies_keli_core_rs_route_config_without_users() {
+        let (dir, initial_plan, listener) =
+            bindable_keli_core_rs_plan("11111111-1111-1111-1111-111111111111");
+        let mut process = MemoryProcessSupervisor::default();
+        let mut port_forward = FakePortForwardExecutor::default();
+
+        apply_runtime_plan(
+            &initial_plan,
+            &mut process,
+            &mut port_forward,
+            RuntimeControlOptions {
+                machine_id: 3,
+                start_core: true,
+                hot_apply_keli_core_rs: true,
+                ..RuntimeControlOptions::default()
+            },
+        )
+        .unwrap();
+
+        let mut updated_plan =
+            keli_core_rs_plan_with_user(&dir, "11111111-1111-1111-1111-111111111111");
+        updated_plan.core_plan.as_mut().unwrap().inbounds[0]
+            .routes
+            .push(RoutePlan {
+                id: 1,
+                action: "block".to_string(),
+                match_rules: vec!["domain:blocked.example.com".to_string()],
+                action_value: None,
+            });
+        let (seen_tx, seen_rx) = mpsc::channel();
+        let join = thread::spawn(move || {
+            listener.set_nonblocking(true).unwrap();
+            let deadline = Instant::now() + Duration::from_secs(2);
+            loop {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        let mut command = String::new();
+                        BufReader::new(stream.try_clone().unwrap())
+                            .read_line(&mut command)
+                            .unwrap();
+                        let command: serde_json::Value =
+                            serde_json::from_str(command.trim()).unwrap();
+                        writeln!(
+                            stream,
+                            "{}",
+                            json!({
+                                "type": "applied",
+                                "decision": "updated",
+                                "status": "running",
+                                "listeners": []
+                            })
+                        )
+                        .unwrap();
+                        seen_tx.send(command).unwrap();
+                        return;
+                    }
+                    Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                        if Instant::now() >= deadline {
+                            seen_tx
+                                .send(json!({ "error": "no hot apply connection" }))
+                                .unwrap();
+                            return;
+                        }
+                        thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(err) => panic!("accept keli-core-rs control connection: {err}"),
+                }
+            }
+        });
+
+        let result = apply_runtime_plan(
+            &updated_plan,
+            &mut process,
+            &mut port_forward,
+            RuntimeControlOptions {
+                machine_id: 3,
+                start_core: true,
+                hot_apply_keli_core_rs: true,
+                ..RuntimeControlOptions::default()
+            },
+        )
+        .unwrap();
+        let command = seen_rx.recv_timeout(Duration::from_secs(3)).unwrap();
+
+        assert_eq!(command["type"], json!("apply_routes"));
+        assert!(command["config"]
+            .to_string()
+            .contains("blocked.example.com"));
+        assert!(!command["config"]
+            .to_string()
+            .contains("11111111-1111-1111-1111-111111111111"));
+        assert_eq!(process.starts.len(), 1);
+        assert_eq!(process.stops.len(), 1);
+        assert!(result
+            .core_process
+            .as_ref()
+            .unwrap()
+            .message
+            .contains("routes"));
         join.join().unwrap();
 
         let _ = fs::remove_dir_all(dir);

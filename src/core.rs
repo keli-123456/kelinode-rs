@@ -112,6 +112,7 @@ pub struct CoreConfigWriteResult {
     pub bytes: usize,
     pub inbound_count: usize,
     pub changed: bool,
+    pub route_config_changed: bool,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -345,11 +346,17 @@ pub fn core_file_layout(config_path: impl AsRef<Path>) -> CoreFileLayout {
 
 pub fn render_core_config(plan: &CorePlan) -> Result<Value, CoreError> {
     match &plan.kind {
-        CoreKind::KeliCoreRs => render_keli_core_rs_config(plan),
+        CoreKind::KeliCoreRs => render_keli_core_rs_config(plan, true),
     }
 }
 
-fn render_keli_core_rs_config(plan: &CorePlan) -> Result<Value, CoreError> {
+pub fn render_core_config_without_users(plan: &CorePlan) -> Result<Value, CoreError> {
+    match &plan.kind {
+        CoreKind::KeliCoreRs => render_keli_core_rs_config(plan, false),
+    }
+}
+
+fn render_keli_core_rs_config(plan: &CorePlan, include_users: bool) -> Result<Value, CoreError> {
     let mut outbounds = vec![json!({
         "tag": "direct",
         "protocol": "freedom",
@@ -366,7 +373,7 @@ fn render_keli_core_rs_config(plan: &CorePlan) -> Result<Value, CoreError> {
         "log_level": "info",
         "policy": render_keli_core_rs_policy(),
         "dns": render_keli_core_rs_dns(plan)?,
-        "inbounds": render_keli_core_rs_inbounds(&plan.inbounds)?,
+        "inbounds": render_keli_core_rs_inbounds(&plan.inbounds, include_users)?,
         "outbounds": outbounds,
         "routes": [],
         "stats": {
@@ -2384,7 +2391,10 @@ fn keli_core_rs_instance_id(plan: &CorePlan) -> String {
         .to_string()
 }
 
-fn render_keli_core_rs_inbound(inbound: &InboundPlan) -> Result<Value, CoreError> {
+fn render_keli_core_rs_inbound(
+    inbound: &InboundPlan,
+    include_users: bool,
+) -> Result<Value, CoreError> {
     Ok(json!({
         "tag": &inbound.tag,
         "protocol": keli_core_rs_protocol_name(inbound),
@@ -2397,11 +2407,15 @@ fn render_keli_core_rs_inbound(inbound: &InboundPlan) -> Result<Value, CoreError
         },
         "flow": &inbound.flow,
         "padding_scheme": &inbound.padding_scheme,
-        "users": inbound
-            .users
-            .iter()
-            .map(render_keli_core_rs_user)
-            .collect::<Vec<_>>(),
+        "users": if include_users {
+            inbound
+                .users
+                .iter()
+                .map(render_keli_core_rs_user)
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        },
         "transport": render_keli_core_rs_transport(inbound),
         "tls": render_keli_core_rs_tls(inbound),
         "sniffing": {
@@ -2412,11 +2426,14 @@ fn render_keli_core_rs_inbound(inbound: &InboundPlan) -> Result<Value, CoreError
     }))
 }
 
-fn render_keli_core_rs_inbounds(inbounds: &[InboundPlan]) -> Result<Vec<Value>, CoreError> {
+fn render_keli_core_rs_inbounds(
+    inbounds: &[InboundPlan],
+    include_users: bool,
+) -> Result<Vec<Value>, CoreError> {
     let mut rendered = Vec::new();
     for inbound in inbounds {
         for expanded in expand_keli_core_rs_inbound(inbound)? {
-            rendered.push(render_keli_core_rs_inbound(&expanded)?);
+            rendered.push(render_keli_core_rs_inbound(&expanded, include_users)?);
         }
     }
     Ok(rendered)
@@ -2658,8 +2675,22 @@ fn render_keli_core_rs_user(user: &InboundUserPlan) -> Value {
 pub fn write_core_config(plan: &CorePlan) -> Result<CoreConfigWriteResult, CoreError> {
     ensure_core_plan_certificates(plan)?;
 
-    let content = render_keli_core_rs_config_bytes(plan)?;
-    write_core_config_bytes(&plan.config_path, content, plan.inbounds.len())
+    let route_content = render_keli_core_rs_config_bytes(plan, false)?;
+    let route_fingerprint = format!("{:016x}\n", fnv1a64(&route_content));
+    let route_fingerprint_path = core_route_fingerprint_path(&plan.config_path);
+    let previous_route_fingerprint = fs::read_to_string(&route_fingerprint_path).ok();
+    let route_config_changed = previous_route_fingerprint
+        .as_deref()
+        .map(|previous| previous != route_fingerprint.as_str())
+        .unwrap_or(false);
+
+    let content = render_keli_core_rs_config_bytes(plan, true)?;
+    let mut result = write_core_config_bytes(&plan.config_path, content, plan.inbounds.len())?;
+    result.route_config_changed = route_config_changed;
+    if result.changed || previous_route_fingerprint.is_none() {
+        write_route_fingerprint(&route_fingerprint_path, &route_fingerprint)?;
+    }
+    Ok(result)
 }
 
 #[derive(Serialize)]
@@ -2672,7 +2703,10 @@ struct KeliCoreRsUserRef<'a> {
     device_limit: u32,
 }
 
-fn render_keli_core_rs_config_bytes(plan: &CorePlan) -> Result<Vec<u8>, CoreError> {
+fn render_keli_core_rs_config_bytes(
+    plan: &CorePlan,
+    include_users: bool,
+) -> Result<Vec<u8>, CoreError> {
     let mut outbounds = vec![json!({
         "tag": "direct",
         "protocol": "freedom",
@@ -2702,7 +2736,7 @@ fn render_keli_core_rs_config_bytes(plan: &CorePlan) -> Result<Vec<u8>, CoreErro
             if !first_inbound {
                 content.push(b',');
             }
-            write_keli_core_rs_inbound(&mut content, &expanded)?;
+            write_keli_core_rs_inbound(&mut content, &expanded, include_users)?;
             first_inbound = false;
         }
     }
@@ -2725,6 +2759,7 @@ fn render_keli_core_rs_config_bytes(plan: &CorePlan) -> Result<Vec<u8>, CoreErro
 fn write_keli_core_rs_inbound<W: Write>(
     writer: &mut W,
     inbound: &InboundPlan,
+    include_users: bool,
 ) -> Result<(), CoreError> {
     writer
         .write_all(b"{")
@@ -2749,22 +2784,24 @@ fn write_keli_core_rs_inbound<W: Write>(
     writer
         .write_all(br#","users":["#)
         .map_err(|err| CoreError::new(format!("encode keli-core-rs users: {err}")))?;
-    for (idx, user) in inbound.users.iter().enumerate() {
-        if idx > 0 {
-            writer
-                .write_all(b",")
-                .map_err(|err| CoreError::new(format!("encode keli-core-rs users: {err}")))?;
+    if include_users {
+        for (idx, user) in inbound.users.iter().enumerate() {
+            if idx > 0 {
+                writer
+                    .write_all(b",")
+                    .map_err(|err| CoreError::new(format!("encode keli-core-rs users: {err}")))?;
+            }
+            let user = KeliCoreRsUserRef {
+                id: user.id,
+                uuid: &user.uuid,
+                password: None,
+                email: None,
+                speed_limit: user.speed_limit,
+                device_limit: user.device_limit,
+            };
+            serde_json::to_writer(&mut *writer, &user)
+                .map_err(|err| CoreError::new(format!("encode keli-core-rs user: {err}")))?;
         }
-        let user = KeliCoreRsUserRef {
-            id: user.id,
-            uuid: &user.uuid,
-            password: None,
-            email: None,
-            speed_limit: user.speed_limit,
-            device_limit: user.device_limit,
-        };
-        serde_json::to_writer(&mut *writer, &user)
-            .map_err(|err| CoreError::new(format!("encode keli-core-rs user: {err}")))?;
     }
     writer
         .write_all(b"]")
@@ -2819,6 +2856,35 @@ where
         .map_err(|err| CoreError::new(format!("encode core config field {name}: {err}")))?;
     serde_json::to_writer(writer, value)
         .map_err(|err| CoreError::new(format!("encode core config field {name}: {err}")))
+}
+
+fn core_route_fingerprint_path(config_path: &Path) -> PathBuf {
+    let Some(file_name) = config_path.file_name().and_then(|name| name.to_str()) else {
+        return config_path.with_extension("routes.fingerprint");
+    };
+    config_path.with_file_name(format!("{file_name}.routes.fingerprint"))
+}
+
+fn write_route_fingerprint(path: &Path, fingerprint: &str) -> Result<(), CoreError> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|err| {
+            CoreError::new(format!(
+                "create route fingerprint dir {}: {err}",
+                parent.display()
+            ))
+        })?;
+    }
+    fs::write(path, fingerprint)
+        .map_err(|err| CoreError::new(format!("write route fingerprint {}: {err}", path.display())))
+}
+
+fn fnv1a64(bytes: &[u8]) -> u64 {
+    let mut hash = 0xcbf29ce484222325u64;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
 }
 
 fn ensure_core_plan_certificates(plan: &CorePlan) -> Result<(), CoreError> {
@@ -3000,6 +3066,7 @@ fn write_core_config_bytes(
             bytes: content.len(),
             inbound_count,
             changed: false,
+            route_config_changed: false,
         });
     }
 
@@ -3017,6 +3084,7 @@ fn write_core_config_bytes(
         bytes: content.len(),
         inbound_count,
         changed: true,
+        route_config_changed: false,
     })
 }
 

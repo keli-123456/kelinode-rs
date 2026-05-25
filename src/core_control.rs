@@ -41,6 +41,7 @@ impl std::error::Error for KeliCoreControlError {}
 #[serde(tag = "type", rename_all = "snake_case")]
 enum KeliCoreCommand {
     ApplyConfig { config: Value },
+    ApplyRoutes { config: Value },
     ApplyUserDelta { node_tag: String, delta: Value },
     DrainTraffic { minimum_bytes: u64 },
     RequeueTraffic { records: Vec<KeliCoreTrafficRecord> },
@@ -167,6 +168,13 @@ impl KeliCoreControlClient {
         config: Value,
     ) -> Result<KeliCoreResponse, KeliCoreControlError> {
         self.send(&KeliCoreCommand::ApplyConfig { config })
+    }
+
+    pub fn apply_routes_response(
+        &self,
+        config: Value,
+    ) -> Result<KeliCoreResponse, KeliCoreControlError> {
+        self.send(&KeliCoreCommand::ApplyRoutes { config })
     }
 
     pub fn apply_config(&self, config: Value) -> Result<KeliCoreApplyResult, KeliCoreControlError> {
