@@ -8,7 +8,9 @@ use crate::control::{
     report_runtime_apply_result_to_panels, run_runtime_tick, runtime_loop_signal,
     RuntimeControlOptions, RuntimeLoopSignal, RuntimeTickOptions,
 };
-use crate::core::{parse_keli_core_rs_port_range, CorePlan};
+use crate::core::{
+    effective_device_limit, node_device_limit_fallback, parse_keli_core_rs_port_range, CorePlan,
+};
 use crate::core_control::KELI_CORE_APPLY_CONTROL_TIMEOUT;
 use crate::health::ResourceSnapshot;
 use crate::logging;
@@ -21,7 +23,10 @@ use crate::realtime::{
     RealtimeRuntimeTask,
 };
 use crate::realtime_client::{connect_realtime_transport, RealtimeTransport};
-use crate::report::{report_keli_core_activity_to_panel_with_user_lookup, KeliCoreUserIdLookup};
+use crate::report::{
+    refresh_keli_core_device_limit_snapshots, report_keli_core_activity_to_panel_with_user_lookup,
+    KeliCoreUserIdLookup,
+};
 use crate::runtime::{
     node_config_for_info as runtime_node_config_for_info, rebuild_runtime_plan_with_users,
     RuntimeBootstrapPlan,
@@ -497,6 +502,9 @@ where
                     &startup_full_snapshot_tags,
                 );
             }
+            nonfatal_keli_core_device_limit_snapshot(
+                refresh_keli_core_device_limit_snapshots(&self.plan).await,
+            );
             if report_to_panel {
                 let action = nonfatal_panel_status_report(
                     report_runtime_apply_result_to_panels(&self.panel_clients, &result.apply).await,
@@ -537,6 +545,15 @@ fn nonfatal_keli_core_activity_report(
         logging::warn(
             "panel",
             format!("traffic report failed; keeping runtime alive error={error}"),
+        );
+    }
+}
+
+fn nonfatal_keli_core_device_limit_snapshot(result: Result<usize, String>) {
+    if let Err(error) = result {
+        logging::warn(
+            "core",
+            format!("device limit alive refresh failed; keeping runtime alive error={error}"),
         );
     }
 }
@@ -593,7 +610,8 @@ fn try_apply_keli_core_rs_user_deltas(
             }
             return RuntimeUserDeltaApplyOutcome::Rebuild;
         }
-        let delta = keli_core_user_delta_payload(node_tag, change);
+        let device_limit_fallback = keli_core_device_limit_fallback_for_node(plan, node_tag);
+        let delta = keli_core_user_delta_payload(node_tag, change, device_limit_fallback);
         for target_tag in target_tags {
             match client.apply_user_delta(target_tag.clone(), delta.clone()) {
                 Ok(_) => metrics.record_success(),
@@ -629,7 +647,11 @@ fn try_apply_keli_core_rs_user_deltas(
                             error.message
                         ),
                     );
-                    let full_delta = keli_core_user_full_snapshot_payload(node_tag, entry);
+                    let full_delta = keli_core_user_full_snapshot_payload(
+                        node_tag,
+                        entry,
+                        device_limit_fallback,
+                    );
                     match client.apply_user_delta(target_tag.clone(), full_delta) {
                         Ok(_) => metrics.record_success(),
                         Err(error) => {
@@ -731,7 +753,8 @@ fn try_establish_keli_core_rs_revision_baseline(
             );
             continue;
         }
-        let delta = keli_core_user_full_snapshot_payload(node_tag, entry);
+        let device_limit_fallback = keli_core_device_limit_fallback_for_node(plan, node_tag);
+        let delta = keli_core_user_full_snapshot_payload(node_tag, entry, device_limit_fallback);
         for target_tag in target_tags {
             match client.apply_user_delta(target_tag.clone(), delta.clone()) {
                 Ok(_) => applied += 1,
@@ -787,31 +810,39 @@ fn keli_core_user_delta_missing_inbound(error: &str) -> bool {
     error.contains("unknown inbound") || error.contains("inbound not found")
 }
 
-fn keli_core_user_full_snapshot_payload(node_tag: &str, entry: &RuntimeUserSyncEntry) -> Value {
+fn keli_core_user_full_snapshot_payload(
+    _node_tag: &str,
+    entry: &RuntimeUserSyncEntry,
+    device_limit_fallback: u32,
+) -> Value {
     json!({
         "full": entry
             .state
             .users
             .iter()
-            .map(|user| keli_core_user_delta_user(node_tag, user))
+            .map(|user| keli_core_user_delta_user(user, device_limit_fallback))
             .collect::<Vec<_>>(),
         "revision": entry.state.revision.to_string()
     })
 }
 
-fn keli_core_user_delta_payload(node_tag: &str, change: &RuntimeUserDeltaChange) -> Value {
+fn keli_core_user_delta_payload(
+    _node_tag: &str,
+    change: &RuntimeUserDeltaChange,
+    device_limit_fallback: u32,
+) -> Value {
     json!({
         "added": change
             .diff
             .added
             .iter()
-            .map(|user| keli_core_user_delta_user(node_tag, user))
+            .map(|user| keli_core_user_delta_user(user, device_limit_fallback))
             .collect::<Vec<_>>(),
         "updated": change
             .diff
             .updated
             .iter()
-            .map(|user| keli_core_user_delta_user(node_tag, user))
+            .map(|user| keli_core_user_delta_user(user, device_limit_fallback))
             .collect::<Vec<_>>(),
         "deleted": change
             .diff
@@ -824,15 +855,23 @@ fn keli_core_user_delta_payload(node_tag: &str, change: &RuntimeUserDeltaChange)
     })
 }
 
-fn keli_core_user_delta_user(_node_tag: &str, user: &UserInfo) -> Value {
+fn keli_core_user_delta_user(user: &UserInfo, device_limit_fallback: u32) -> Value {
     json!({
         "id": user.id,
         "uuid": user.uuid,
         "password": null,
         "email": null,
         "speed_limit": user.speed_limit,
-        "device_limit": user.device_limit
+        "device_limit": effective_device_limit(user.device_limit, device_limit_fallback)
     })
+}
+
+fn keli_core_device_limit_fallback_for_node(plan: &RuntimeBootstrapPlan, node_tag: &str) -> u32 {
+    plan.node_infos
+        .iter()
+        .find(|node| node.tag == node_tag)
+        .map(node_device_limit_fallback)
+        .unwrap_or(0)
 }
 
 fn ensure_keli_core_rs_restart_uses_latest_users<P>(
@@ -1766,7 +1805,7 @@ mod tests {
             },
         };
 
-        let payload = keli_core_user_delta_payload("panel|vless|1", &change);
+        let payload = keli_core_user_delta_payload("panel|vless|1", &change, 0);
 
         assert_eq!(
             payload,
@@ -1792,6 +1831,29 @@ mod tests {
                 "revision": "42"
             })
         );
+    }
+
+    #[test]
+    fn keli_core_user_delta_payload_applies_device_limit_fallback() {
+        let change = RuntimeUserDeltaChange {
+            full: false,
+            base_revision: 41,
+            revision: 42,
+            diff: UserListDiff {
+                added: vec![UserInfo {
+                    id: 2,
+                    uuid: "fallback-user".to_string(),
+                    speed_limit: 10,
+                    device_limit: 0,
+                }],
+                updated: Vec::new(),
+                deleted: Vec::new(),
+            },
+        };
+
+        let payload = keli_core_user_delta_payload("panel|vless|1", &change, 4);
+
+        assert_eq!(payload["added"][0]["device_limit"], 4);
     }
 
     #[test]
@@ -1825,7 +1887,7 @@ mod tests {
             last_change: None,
         };
 
-        let payload = keli_core_user_full_snapshot_payload("panel|vless|1", &entry);
+        let payload = keli_core_user_full_snapshot_payload("panel|vless|1", &entry, 0);
 
         assert_eq!(payload["revision"], "88");
         assert_eq!(

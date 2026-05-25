@@ -3152,7 +3152,7 @@ pub fn build_inbound_plan_with_users(
         users: users
             .iter()
             .filter(|user| !user.uuid.trim().is_empty())
-            .map(|user| inbound_user_plan(&node.tag, user))
+            .map(|user| inbound_user_plan(&node.tag, user, node_device_limit_fallback(node)))
             .collect(),
         routes: node
             .common
@@ -3373,14 +3373,30 @@ fn first_non_empty(value: &str, fallback: &str) -> String {
     }
 }
 
-fn inbound_user_plan(tag: &str, user: &UserInfo) -> InboundUserPlan {
+pub(crate) fn node_device_limit_fallback(node: &NodeInfo) -> u32 {
+    node.common
+        .base_config
+        .as_ref()
+        .map(|config| config.device_limit_fallback)
+        .unwrap_or(0)
+}
+
+pub(crate) fn effective_device_limit(device_limit: u32, fallback: u32) -> u32 {
+    if device_limit > 0 {
+        device_limit
+    } else {
+        fallback
+    }
+}
+
+fn inbound_user_plan(tag: &str, user: &UserInfo, fallback: u32) -> InboundUserPlan {
     let uuid = user.uuid.trim().to_string();
     InboundUserPlan {
         id: user.id,
         email: user_tag(tag, &uuid),
         uuid,
         speed_limit: user.speed_limit,
-        device_limit: user.device_limit,
+        device_limit: effective_device_limit(user.device_limit, fallback),
     }
 }
 
@@ -3411,6 +3427,7 @@ fn route_plan(route: &crate::panel::types::Route) -> RoutePlan {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
     use std::fs;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -3711,6 +3728,47 @@ mod tests {
         assert_eq!(config["inbounds"][0]["users"][0]["speed_limit"], 1024);
         assert_eq!(config["inbounds"][0]["users"][0]["device_limit"], 2);
         assert!(config["inbounds"][0]["users"][0]["email"].is_null());
+    }
+
+    #[test]
+    fn renders_panel_device_limit_fallback_for_unlimited_users() {
+        let common: CommonNode = serde_json::from_value(json!({
+            "protocol": "socks",
+            "server_port": 1080,
+            "base_config": {
+                "device_limit_fallback": 3
+            }
+        }))
+        .unwrap();
+        let node = NodeInfo::from_common("https://panel.example.test", 109, common).unwrap();
+        let plan = CorePlan::from_nodes_with_users(
+            CoreKind::KeliCoreRs,
+            temp_test_dir("device-limit-fallback"),
+            &[node.clone()],
+            &BTreeMap::from([(
+                node.tag.clone(),
+                vec![
+                    UserInfo {
+                        id: 7,
+                        uuid: "fallback-user".to_string(),
+                        speed_limit: 0,
+                        device_limit: 0,
+                    },
+                    UserInfo {
+                        id: 8,
+                        uuid: "explicit-user".to_string(),
+                        speed_limit: 0,
+                        device_limit: 5,
+                    },
+                ],
+            )]),
+        )
+        .unwrap();
+
+        let config = render_core_config(&plan).unwrap();
+
+        assert_eq!(config["inbounds"][0]["users"][0]["device_limit"], 3);
+        assert_eq!(config["inbounds"][0]["users"][1]["device_limit"], 5);
     }
 
     #[test]

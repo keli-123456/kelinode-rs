@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fmt;
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpStream;
@@ -40,11 +41,28 @@ impl std::error::Error for KeliCoreControlError {}
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum KeliCoreCommand {
-    ApplyConfig { config: Value },
-    ApplyRoutes { config: Value },
-    ApplyUserDelta { node_tag: String, delta: Value },
-    DrainTraffic { minimum_bytes: u64 },
-    RequeueTraffic { records: Vec<KeliCoreTrafficRecord> },
+    ApplyConfig {
+        config: Value,
+    },
+    ApplyRoutes {
+        config: Value,
+    },
+    ApplyUserDelta {
+        node_tag: String,
+        delta: Value,
+    },
+    ApplyDeviceLimitSnapshot {
+        snapshot: KeliCoreDeviceLimitSnapshot,
+    },
+    CommitDeviceLimitReport {
+        records: Vec<KeliCoreDeviceLimitOnlineRecord>,
+    },
+    DrainTraffic {
+        minimum_bytes: u64,
+    },
+    RequeueTraffic {
+        records: Vec<KeliCoreTrafficRecord>,
+    },
     Status,
     Metrics,
     Stop,
@@ -70,6 +88,13 @@ pub enum KeliCoreResponse {
     TrafficRequeued {
         count: usize,
     },
+    DeviceLimitSnapshotApplied {
+        node_tag: String,
+        users: usize,
+    },
+    DeviceLimitReportCommitted {
+        count: usize,
+    },
     Status {
         status: Value,
         listeners: Vec<Value>,
@@ -93,6 +118,24 @@ pub struct KeliCoreTrafficRecord {
     pub download: u64,
     #[serde(default)]
     pub online_ips: Vec<String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KeliCoreDeviceLimitSnapshot {
+    pub node_tag: String,
+    #[serde(default)]
+    pub alive: BTreeMap<u32, u32>,
+    #[serde(default)]
+    pub alive_ips: BTreeMap<u32, Vec<String>>,
+    #[serde(default)]
+    pub mode: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KeliCoreDeviceLimitOnlineRecord {
+    pub node_tag: String,
+    pub user_id: u64,
+    pub ip: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -215,6 +258,32 @@ impl KeliCoreControlClient {
             KeliCoreResponse::Error { message } => Err(KeliCoreControlError::new(message)),
             response => Err(KeliCoreControlError::new(format!(
                 "unexpected keli-core-rs user delta response: {response:?}"
+            ))),
+        }
+    }
+
+    pub fn apply_device_limit_snapshot(
+        &self,
+        snapshot: KeliCoreDeviceLimitSnapshot,
+    ) -> Result<(), KeliCoreControlError> {
+        match self.send(&KeliCoreCommand::ApplyDeviceLimitSnapshot { snapshot })? {
+            KeliCoreResponse::DeviceLimitSnapshotApplied { .. } => Ok(()),
+            KeliCoreResponse::Error { message } => Err(KeliCoreControlError::new(message)),
+            response => Err(KeliCoreControlError::new(format!(
+                "unexpected keli-core-rs device limit snapshot response: {response:?}"
+            ))),
+        }
+    }
+
+    pub fn commit_device_limit_report(
+        &self,
+        records: Vec<KeliCoreDeviceLimitOnlineRecord>,
+    ) -> Result<usize, KeliCoreControlError> {
+        match self.send(&KeliCoreCommand::CommitDeviceLimitReport { records })? {
+            KeliCoreResponse::DeviceLimitReportCommitted { count } => Ok(count),
+            KeliCoreResponse::Error { message } => Err(KeliCoreControlError::new(message)),
+            response => Err(KeliCoreControlError::new(format!(
+                "unexpected keli-core-rs device limit report response: {response:?}"
             ))),
         }
     }

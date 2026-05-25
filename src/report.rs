@@ -4,9 +4,13 @@ use std::path::{Path, PathBuf};
 
 use crate::config::NodeConfig;
 use crate::core::CorePlan;
-use crate::core_control::{KeliCoreControlClient, KeliCoreTrafficRecord};
+use crate::core_control::{
+    KeliCoreControlClient, KeliCoreDeviceLimitOnlineRecord, KeliCoreDeviceLimitSnapshot,
+    KeliCoreTrafficRecord,
+};
+use crate::logging;
 use crate::panel::client::{PanelClient, PanelClientOptions};
-use crate::panel::types::UserTraffic;
+use crate::panel::types::{AliveMap, UserTraffic};
 use crate::process::keli_core_rs_control_client;
 use crate::runtime::{node_config_for_info, RuntimeBootstrapPlan};
 
@@ -394,9 +398,126 @@ pub async fn report_keli_core_activity_to_panel_with_user_lookup(
     let snapshots = keli_core_traffic_snapshots_with_user_lookup(core_plan, &records, user_lookup);
     let targets = runtime_activity_targets(plan);
     let batch = report_activity_batch_to_panel(&targets, &snapshots).await;
+    let online_records =
+        device_limit_online_records_from_successful_snapshots(core_plan, &snapshots, &batch);
+    if !online_records.is_empty() {
+        if let Err(error) = client.commit_device_limit_report(online_records) {
+            logging::warn(
+                "core",
+                format!("device limit online commit skipped: {}", error.message),
+            );
+        }
+    }
     let failed = failed_keli_core_records(core_plan, &records, &batch);
     save_pending_keli_core_traffic(&spool_path, &failed)?;
     Ok(batch)
+}
+
+pub async fn refresh_keli_core_device_limit_snapshots(
+    plan: &RuntimeBootstrapPlan,
+) -> Result<usize, String> {
+    let Some(core_plan) = &plan.core_plan else {
+        return Ok(0);
+    };
+    let client = keli_core_rs_control_client(&core_plan.config_path).map_err(|err| err.message)?;
+    let mut applied = 0usize;
+    for node in &plan.node_infos {
+        let Some(config) = node_config_for_info(&plan.resolved, node.id, &node.tag) else {
+            continue;
+        };
+        let panel = PanelClient::new(PanelClientOptions::from(config))
+            .map_err(|err| format!("create panel client node_tag={}: {err}", node.tag))?;
+        let alive = panel
+            .get_alive_list()
+            .await
+            .map_err(|err| format!("get alive list node_tag={}: {err}", node.tag))?;
+        for snapshot in device_limit_snapshots_for_alive_map(core_plan, &node.tag, &alive) {
+            client
+                .apply_device_limit_snapshot(snapshot)
+                .map_err(|err| err.message)?;
+            applied += 1;
+        }
+    }
+    Ok(applied)
+}
+
+fn device_limit_snapshots_for_alive_map(
+    core_plan: &CorePlan,
+    node_tag: &str,
+    alive: &AliveMap,
+) -> Vec<KeliCoreDeviceLimitSnapshot> {
+    device_limit_snapshot_target_tags(core_plan, node_tag)
+        .into_iter()
+        .map(|target_tag| KeliCoreDeviceLimitSnapshot {
+            node_tag: target_tag,
+            alive: alive.alive.clone(),
+            alive_ips: alive
+                .alive_ips
+                .iter()
+                .filter_map(|(user_id, ips)| {
+                    let ips = ips
+                        .iter()
+                        .filter(|ip| ip.parse::<std::net::IpAddr>().is_ok())
+                        .cloned()
+                        .collect::<Vec<_>>();
+                    (!ips.is_empty()).then_some((*user_id, ips))
+                })
+                .collect(),
+            mode: alive.mode,
+        })
+        .collect()
+}
+
+fn device_limit_snapshot_target_tags(core_plan: &CorePlan, node_tag: &str) -> Vec<String> {
+    let expanded_prefix = format!("{node_tag}|port:");
+    let mut exact = Vec::new();
+    let mut expanded = Vec::new();
+    for inbound in &core_plan.inbounds {
+        if inbound.tag == node_tag {
+            exact.push(node_tag.to_string());
+        } else if inbound.tag.starts_with(&expanded_prefix) {
+            expanded.push(inbound.tag.clone());
+        }
+    }
+    if exact.is_empty() {
+        expanded
+    } else {
+        exact.extend(expanded);
+        exact
+    }
+}
+
+fn device_limit_online_records_from_successful_snapshots(
+    core_plan: &CorePlan,
+    snapshots: &BTreeMap<String, NodeActivitySnapshot>,
+    batch: &NodeActivityBatchReport,
+) -> Vec<KeliCoreDeviceLimitOnlineRecord> {
+    let failed_tags = batch
+        .failures
+        .iter()
+        .map(|failure| failure.tag.as_str())
+        .collect::<BTreeSet<_>>();
+    let mut records = Vec::new();
+    for (node_tag, snapshot) in snapshots {
+        if failed_tags.contains(node_tag.as_str()) {
+            continue;
+        }
+        for target_tag in device_limit_snapshot_target_tags(core_plan, node_tag) {
+            for (user_id, ips) in &snapshot.online {
+                for ip in ips {
+                    if ip.parse::<std::net::IpAddr>().is_err() {
+                        continue;
+                    }
+                    records.push(KeliCoreDeviceLimitOnlineRecord {
+                        node_tag: target_tag.clone(),
+                        user_id: u64::from(*user_id),
+                        ip: ip.clone(),
+                    });
+                }
+            }
+        }
+    }
+    records
 }
 
 fn append_unique_keli_core_records(
@@ -524,7 +645,8 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::{
-        append_unique_keli_core_records, drain_keli_core_activity_snapshots,
+        append_unique_keli_core_records, device_limit_online_records_from_successful_snapshots,
+        device_limit_snapshots_for_alive_map, drain_keli_core_activity_snapshots,
         keli_core_traffic_snapshots, keli_core_traffic_snapshots_with_user_lookup,
         keli_core_traffic_spool_path, load_pending_keli_core_traffic, minimum_report_bytes,
         report_activity_batch_with, report_activity_with_fallback,
@@ -536,7 +658,7 @@ mod tests {
     use crate::config::{AgentConfig, NodeConfig, ResolvedConfig, ResolvedMachineConfig};
     use crate::core::{CoreKind, CorePlan, InboundPlan, InboundUserPlan};
     use crate::core_control::KeliCoreTrafficRecord;
-    use crate::panel::types::{CommonNode, NodeInfo, UserTraffic};
+    use crate::panel::types::{AliveMap, CommonNode, NodeInfo, UserTraffic};
     use crate::runtime::build_runtime_bootstrap_plan;
 
     #[test]
@@ -725,6 +847,53 @@ mod tests {
                 "198.51.100.9".to_string()
             ]
         );
+    }
+
+    #[test]
+    fn device_limit_commit_records_include_only_successful_reported_nodes() {
+        let mut snapshots = BTreeMap::new();
+        snapshots.insert("node-a".to_string(), sample_snapshot());
+        snapshots.insert("node-b".to_string(), sample_snapshot());
+        let batch = NodeActivityBatchReport {
+            reported: 1,
+            skipped: 0,
+            failures: vec![NodeActivityFailure {
+                tag: "node-b".to_string(),
+                error: "panel unavailable".to_string(),
+            }],
+        };
+
+        let records =
+            device_limit_online_records_from_successful_snapshots(&core_plan(), &snapshots, &batch);
+
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].node_tag, "node-a");
+        assert_eq!(records[0].user_id, 7);
+        assert_eq!(records[0].ip, "198.51.100.7");
+    }
+
+    #[test]
+    fn device_limit_alive_snapshots_expand_port_targets_and_filter_invalid_ips() {
+        let mut plan = core_plan();
+        let mut expanded = plan.inbounds[0].clone();
+        expanded.tag = "node-a|port:2100".to_string();
+        plan.inbounds.push(expanded);
+        let alive = AliveMap {
+            alive: BTreeMap::from([(7, 2)]),
+            alive_ips: BTreeMap::from([(
+                7,
+                vec!["198.51.100.7".to_string(), "not-an-ip".to_string()],
+            )]),
+            mode: 1,
+        };
+
+        let snapshots = device_limit_snapshots_for_alive_map(&plan, "node-a", &alive);
+
+        assert_eq!(snapshots.len(), 2);
+        assert_eq!(snapshots[0].node_tag, "node-a");
+        assert_eq!(snapshots[1].node_tag, "node-a|port:2100");
+        assert_eq!(snapshots[0].alive[&7], 2);
+        assert_eq!(snapshots[0].alive_ips[&7], vec!["198.51.100.7".to_string()]);
     }
 
     #[test]
