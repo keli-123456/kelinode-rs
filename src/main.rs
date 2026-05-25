@@ -1101,12 +1101,9 @@ mod tests {
     #[test]
     fn native_gray_preflight_reports_rejected_capability_blocker() {
         let mut node = test_node_with_protocol(8, "trojan");
-        node.common.network = "ws".to_string();
+        node.common.network = "grpc".to_string();
         node.common.network_settings = json!({
-            "path": "/trojan",
-            "headers": {
-                "Host": "trojan.example.test"
-            }
+            "serviceName": "trojan"
         });
         let mut plan = test_plan(vec![test_node_with_intervals(7, 30, 45)], Vec::new());
         plan.resolved.kernel.r#type = "keli-core-rs".to_string();
@@ -1117,7 +1114,7 @@ mod tests {
 
         assert!(report.errors.iter().any(|error| {
             error.contains("protocol=trojan")
-                && error.contains("transport=ws")
+                && error.contains("transport=grpc")
                 && error.contains("status=canary_only")
                 && error.contains("decision=reject")
                 && error.contains("baseline_source=GoLegacyBaseline")
