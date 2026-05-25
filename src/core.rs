@@ -3559,15 +3559,18 @@ mod tests {
         let entry = keli_core_rs_inbound_capability(&inbound).unwrap();
         assert_eq!(entry.key.protocol, NativeProtocol::Trojan);
         assert_eq!(entry.key.transport, CapabilityTransport::Ws);
-        assert_eq!(entry.status, CapabilityStatus::CanaryOnly);
-        assert!(matches!(entry.decision, RenderDecision::Reject { .. }));
+        assert_eq!(entry.status, CapabilityStatus::UsableNeedsSoak);
+        assert!(matches!(
+            entry.decision,
+            RenderDecision::RenderNativeWithWarning
+        ));
+        let config = render_core_config(&plan).unwrap();
 
-        let err = render_core_config(&plan).unwrap_err();
-        assert_go_expected_reject(&case.expected, &err.message);
-        assert!(err.message.contains("baseline_source=GoLegacyBaseline"));
-        assert!(err
-            .message
-            .contains("evidence_level=ThirdPartyClientInterop"));
+        assert_go_expected_rendered_inbound(&case.expected, &config["inbounds"][0]);
+        assert_eq!(
+            config["inbounds"][0]["users"][0]["uuid"],
+            "trojan-ws-password"
+        );
     }
 
     #[test]
@@ -3585,12 +3588,18 @@ mod tests {
         assert_eq!(entry.key.protocol, NativeProtocol::Trojan);
         assert_eq!(entry.key.transport, CapabilityTransport::Ws);
         assert_eq!(entry.key.security, CapabilitySecurity::Tls);
-        assert!(matches!(entry.decision, RenderDecision::Reject { .. }));
+        assert_eq!(entry.status, CapabilityStatus::UsableNeedsSoak);
+        assert!(matches!(
+            entry.decision,
+            RenderDecision::RenderNativeWithWarning
+        ));
+        let config = render_core_config(&plan).unwrap();
 
-        let err = render_core_config(&plan).unwrap_err();
-        assert_go_expected_reject(&case.expected, &err.message);
-        assert!(err.message.contains("transport=ws"));
-        assert!(err.message.contains("security=tls"));
+        assert_go_expected_rendered_inbound(&case.expected, &config["inbounds"][0]);
+        assert_eq!(
+            config["inbounds"][0]["users"][0]["uuid"],
+            "trojan-tls-ws-password"
+        );
     }
 
     #[test]
@@ -3851,51 +3860,50 @@ mod tests {
     }
 
     #[test]
-    fn split_core_plans_for_nodes_with_kind_trojan_ws_rejects_instead_of_skipping() {
+    fn split_core_plans_for_nodes_with_kind_trojan_ws_renders_instead_of_skipping() {
         let mut trojan_ws = test_node("trojan", 42, "");
         trojan_ws.common.network = "ws".to_string();
         trojan_ws.common.network_settings = json!({"path": "/trojan"});
 
-        let err = split_core_plans_for_nodes_with_kind(
+        let bundle = split_core_plans_for_nodes_with_kind(
             CoreKind::KeliCoreRs,
             PathBuf::from("/srv/v2node/config.json"),
             &[trojan_ws],
             &std::collections::BTreeMap::new(),
         )
-        .unwrap_err();
+        .unwrap();
+        let core = bundle.core.expect("native core plan");
 
-        assert!(err.message.contains("protocol=trojan"));
-        assert!(err.message.contains("direction=inbound"));
-        assert!(err.message.contains("transport=ws"));
-        assert!(err.message.contains("security=none"));
-        assert!(err.message.contains("status=canary_only"));
-        assert!(err.message.contains("decision=reject"));
-        assert!(err.message.contains("baseline_source=GoLegacyBaseline"));
-        assert!(err
-            .message
-            .contains("evidence_level=ThirdPartyClientInterop"));
+        assert_eq!(core.inbounds.len(), 1);
+        assert_eq!(core.inbounds[0].protocol, "trojan");
+        assert_eq!(core.inbounds[0].network, "ws");
+        assert_eq!(
+            websocket_path_setting(&core.inbounds[0].network_settings).as_deref(),
+            Some("/trojan")
+        );
     }
 
     #[test]
-    fn split_core_plans_for_nodes_with_kind_mixed_good_and_rejected_node_fails_all() {
+    fn split_core_plans_for_nodes_with_kind_mixed_vless_and_trojan_ws_renders_both() {
         let supported = test_node("vless", 41, "");
         let mut trojan_ws = test_node("trojan", 42, "");
         trojan_ws.common.network = "ws".to_string();
         trojan_ws.common.network_settings = json!({"path": "/trojan"});
         let nodes = vec![supported, trojan_ws];
 
-        let err = split_core_plans_for_nodes_with_kind(
+        let bundle = split_core_plans_for_nodes_with_kind(
             CoreKind::KeliCoreRs,
             PathBuf::from("/srv/v2node/config.json"),
             &nodes,
             &std::collections::BTreeMap::new(),
         )
-        .unwrap_err();
+        .unwrap();
+        let core = bundle.core.expect("native core plan");
 
-        assert!(err.message.contains("protocol=trojan"));
-        assert!(err.message.contains("transport=ws"));
-        assert!(err.message.contains("status=canary_only"));
-        assert!(err.message.contains("decision=reject"));
+        assert_eq!(core.inbounds.len(), 2);
+        assert_eq!(core.inbounds[0].protocol, "vless");
+        assert_eq!(core.inbounds[1].protocol, "trojan");
+        assert_eq!(core.inbounds[1].network, "ws");
     }
 
     #[test]
@@ -5754,7 +5762,7 @@ mod tests {
     }
 
     #[test]
-    fn capability_gate_rejects_trojan_websocket_with_legacy_panel_ipaddress_setting() {
+    fn renders_trojan_websocket_with_legacy_panel_ipaddress_setting() {
         let mut trojan = test_node("trojan", 66, "");
         trojan.common.network = "ws".to_string();
         trojan.common.network_settings = json!({
@@ -5771,18 +5779,25 @@ mod tests {
         )
         .unwrap();
 
-        let err = render_core_config(&plan).unwrap_err();
+        let entry = keli_core_rs_inbound_capability(&plan.inbounds[0]).unwrap();
+        assert_eq!(entry.status, CapabilityStatus::UsableNeedsSoak);
+        assert!(matches!(
+            entry.decision,
+            RenderDecision::RenderNativeWithWarning
+        ));
+        let config = render_core_config(&plan).unwrap();
 
-        assert!(err.message.contains("protocol=trojan"));
-        assert!(err.message.contains("transport=ws"));
-        assert!(err.message.contains("status=canary_only"));
-        assert!(err
-            .message
-            .contains("trojan websocket native relay requires explicit canary gate and soak"));
+        assert_eq!(config["inbounds"][0]["protocol"], "trojan");
+        assert_eq!(config["inbounds"][0]["transport"]["network"], "ws");
+        assert_eq!(config["inbounds"][0]["transport"]["path"], "/trojan");
+        assert_eq!(
+            config["inbounds"][0]["transport"]["host"],
+            "trojan.example.test"
+        );
     }
 
     #[test]
-    fn capability_gate_rejects_trojan_websocket_native_rendering() {
+    fn renders_trojan_websocket_native_by_default_with_warning_capability() {
         let mut trojan = test_node("trojan", 67, "");
         trojan.common.network = "ws".to_string();
         trojan.common.network_settings = json!({
@@ -5798,19 +5813,27 @@ mod tests {
         )
         .unwrap();
 
-        let err = render_core_config(&plan).unwrap_err();
+        let entry = keli_core_rs_inbound_capability(&plan.inbounds[0]).unwrap();
+        assert_eq!(entry.status, CapabilityStatus::UsableNeedsSoak);
+        assert!(matches!(
+            entry.decision,
+            RenderDecision::RenderNativeWithWarning
+        ));
+        assert!(entry.gate_message().contains("protocol=trojan"));
+        assert!(entry.gate_message().contains("direction=inbound"));
+        assert!(entry.gate_message().contains("transport=ws"));
+        assert!(entry.gate_message().contains("status=usable_needs_soak"));
+        assert!(entry
+            .gate_message()
+            .contains("baseline_source=GoLegacyBaseline"));
+        assert!(entry
+            .gate_message()
+            .contains("evidence_level=ProductionObserved"));
+        let config = render_core_config(&plan).unwrap();
 
-        assert!(err.message.contains("protocol=trojan"));
-        assert!(err.message.contains("direction=inbound"));
-        assert!(err.message.contains("transport=ws"));
-        assert!(err.message.contains("status=canary_only"));
-        assert!(err.message.contains("baseline_source=GoLegacyBaseline"));
-        assert!(err
-            .message
-            .contains("evidence_level=ThirdPartyClientInterop"));
-        assert!(err
-            .message
-            .contains("trojan websocket native relay requires explicit canary gate and soak"));
+        assert_eq!(config["inbounds"][0]["protocol"], "trojan");
+        assert_eq!(config["inbounds"][0]["transport"]["network"], "ws");
+        assert_eq!(config["inbounds"][0]["transport"]["path"], "/trojan");
     }
 
     #[test]
@@ -6598,7 +6621,7 @@ mod tests {
     }
 
     #[test]
-    fn tls_cert_mode_none_or_empty_keeps_trojan_ws_capability_blocked() {
+    fn tls_cert_mode_none_or_empty_renders_trojan_ws_as_plain_websocket() {
         for cert_mode in ["none", ""] {
             let mut node = test_node("trojan", 54, "");
             node.security = Security::Tls;
@@ -6619,13 +6642,13 @@ mod tests {
                 &[node],
             )
             .unwrap();
-            let err = render_core_config(&plan).unwrap_err();
+            let config = render_core_config(&plan).unwrap();
 
             assert_eq!(plan.inbounds[0].security, "none");
-            assert!(err.message.contains("protocol=trojan"));
-            assert!(err.message.contains("transport=ws"));
-            assert!(err.message.contains("security=none"));
-            assert!(err.message.contains("status=canary_only"));
+            assert_eq!(config["inbounds"][0]["protocol"], "trojan");
+            assert_eq!(config["inbounds"][0]["tls"], Value::Null);
+            assert_eq!(config["inbounds"][0]["transport"]["network"], "ws");
+            assert_eq!(config["inbounds"][0]["transport"]["path"], "/answer");
         }
     }
 

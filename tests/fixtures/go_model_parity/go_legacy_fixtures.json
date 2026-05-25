@@ -103,8 +103,7 @@
         "transport_host": "cdn.example.test",
         "security": "none",
         "user_model": "password",
-        "decision": "reject",
-        "reject_reason_contains": "trojan websocket native relay requires explicit canary gate and soak"
+        "decision": "render"
       }
     },
     {
@@ -152,8 +151,7 @@
         "security": "tls",
         "tls_server_name": "trojan-ws.example.test",
         "user_model": "password",
-        "decision": "reject",
-        "reject_reason_contains": "trojan tls websocket native relay requires explicit canary gate and soak"
+        "decision": "render"
       }
     },
     {

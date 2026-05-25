@@ -863,16 +863,13 @@ pub fn native_capability_matrix() -> Vec<CapabilityEntry> {
             NoSecurity,
             UdpOverStream,
             "password",
-            CanaryOnly,
-            Reject {
-                reason: "trojan websocket native relay requires explicit canary gate and soak"
-                    .to_string(),
-            },
+            UsableNeedsSoak,
+            RenderNativeWithWarning,
             GoLegacyBaseline,
-            ThirdPartyClientInterop,
+            ProductionObserved,
             "kelinode/keli-core Xray Trojan WebSocket behavior",
-            "missing SoakTested and CDN-shaped Host/path/header evidence",
-            "Trojan WS passed short sing-box interop but must not default native without an explicit canary gate",
+            "needs longer CDN-shaped Host/path/header soak before stable",
+            "Trojan WS passed sing-box interop and real Cloudflare/Sparkle playback on problem-node, but still needs soak",
             &[
                 "trojan ws upgrade",
                 "trojan ws split frames",
@@ -881,8 +878,9 @@ pub fn native_capability_matrix() -> Vec<CapabilityEntry> {
             &[
                 "local websocket runtime regression suite",
                 "2026-05-24 sing-box v1.12.22 remote 3-round trojan-ws-plain probe passed on 2.56.116.39",
+                "2026-05-25 Sparkle/Chrome YouTube playback via Cloudflare CNAME path passed on problem-node 2.56.116.39",
             ],
-            "add explicit canary switch and longer CDN-shaped soak before rendering",
+            "run 24-48h CDN-shaped Trojan WS soak before marking stable",
         ),
         entry(
             Trojan,
@@ -891,16 +889,13 @@ pub fn native_capability_matrix() -> Vec<CapabilityEntry> {
             Tls,
             UdpOverStream,
             "password",
-            CanaryOnly,
-            Reject {
-                reason: "trojan tls websocket native relay requires explicit canary gate and soak"
-                    .to_string(),
-            },
+            UsableNeedsSoak,
+            RenderNativeWithWarning,
             GoLegacyBaseline,
-            ThirdPartyClientInterop,
+            ProductionObserved,
             "kelinode/keli-core Xray Trojan TLS WebSocket behavior",
-            "missing SoakTested and broader TLS/SNI/ALPN client matrix",
-            "Trojan TLS WS passed short sing-box interop but must not default native without an explicit canary gate",
+            "needs longer TLS/SNI/ALPN and CDN-shaped client soak before stable",
+            "Trojan TLS WS passed sing-box interop and real Cloudflare/Sparkle playback on problem-node, but still needs soak",
             &[
                 "trojan tls ws upgrade",
                 "trojan ws frame split",
@@ -909,8 +904,9 @@ pub fn native_capability_matrix() -> Vec<CapabilityEntry> {
             &[
                 "local TLS websocket runtime regression suite",
                 "2026-05-24 sing-box v1.12.22 remote 3-round trojan-ws-tls probe passed on 2.56.116.39",
+                "2026-05-25 Sparkle/Chrome YouTube playback via Cloudflare CNAME path passed on problem-node 2.56.116.39",
             ],
-            "add explicit canary switch and longer TLS/CDN-shaped soak before rendering",
+            "run 24-48h TLS/CDN-shaped Trojan WS soak before marking stable",
         ),
         entry(
             Trojan,
@@ -1465,7 +1461,7 @@ mod tests {
     }
 
     #[test]
-    fn initial_matrix_canary_gates_trojan_websocket_default_native() {
+    fn matrix_warns_for_trojan_websocket_default_native() {
         let matrix = native_capability_matrix();
         for (transport, security) in [
             (CapabilityTransport::Ws, CapabilitySecurity::None),
@@ -1481,18 +1477,49 @@ mod tests {
                 })
                 .expect("trojan websocket entry");
 
-            assert!(matches!(entry.status, CapabilityStatus::CanaryOnly));
-            assert!(matches!(entry.decision, RenderDecision::Reject { .. }));
+            assert_eq!(entry.status, CapabilityStatus::UsableNeedsSoak);
+            assert!(matches!(
+                entry.decision,
+                RenderDecision::RenderNativeWithWarning
+            ));
             assert!(entry.gate_message().contains("trojan"));
             assert!(entry.gate_message().contains("transport=ws"));
             assert!(entry
                 .gate_message()
-                .contains("evidence_level=ThirdPartyClientInterop"));
+                .contains("evidence_level=ProductionObserved"));
         }
     }
 
     #[test]
-    fn explicit_canary_allow_list_matches_trojan_websocket_only_when_requested() {
+    fn trojan_websocket_problem_node_cf_evidence_promotes_default_warning_render() {
+        let matrix = native_capability_matrix();
+        for security in [CapabilitySecurity::None, CapabilitySecurity::Tls] {
+            let entry = matrix
+                .iter()
+                .find(|entry| {
+                    entry.key.protocol == NativeProtocol::Trojan
+                        && entry.key.direction == CapabilityDirection::Inbound
+                        && entry.key.transport == CapabilityTransport::Ws
+                        && entry.key.security == security
+                })
+                .expect("trojan websocket entry");
+
+            assert_eq!(entry.status, CapabilityStatus::UsableNeedsSoak);
+            assert!(matches!(
+                entry.decision,
+                RenderDecision::RenderNativeWithWarning
+            ));
+            assert!(entry.current_evidence.iter().any(|evidence| {
+                evidence.contains("Sparkle")
+                    && evidence.contains("Cloudflare")
+                    && evidence.contains("2.56.116.39")
+            }));
+            assert!(entry.next_action.contains("soak"));
+        }
+    }
+
+    #[test]
+    fn explicit_canary_allow_list_is_noop_after_trojan_websocket_default_render() {
         let matrix = native_capability_matrix();
         let plain = matrix
             .iter()
@@ -1513,15 +1540,15 @@ mod tests {
             })
             .expect("trojan tls websocket entry");
 
-        assert!(entry_allowed_by_explicit_canary_allow_list(
+        assert!(!entry_allowed_by_explicit_canary_allow_list(
             plain,
             Some("trojan_ws")
         ));
-        assert!(entry_allowed_by_explicit_canary_allow_list(
+        assert!(!entry_allowed_by_explicit_canary_allow_list(
             tls,
             Some("trojan_tls_ws")
         ));
-        assert!(entry_allowed_by_explicit_canary_allow_list(
+        assert!(!entry_allowed_by_explicit_canary_allow_list(
             tls,
             Some("trojan/ws/tls")
         ));
