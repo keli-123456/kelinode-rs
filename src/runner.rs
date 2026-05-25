@@ -1580,7 +1580,7 @@ mod tests {
     use std::collections::BTreeSet;
     use std::fs;
     use std::io::{BufRead, BufReader, Write};
-    use std::net::TcpListener;
+    use std::net::{TcpListener, TcpStream};
     use std::thread;
     use std::time::{Duration, Instant};
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -1616,6 +1616,16 @@ mod tests {
     use crate::subscription_proxy::SubscriptionProxyRuntimeManager;
     use crate::user::{UserListDiff, UserSyncState};
     use serde_json::json;
+
+    fn read_control_command(stream: &TcpStream) -> serde_json::Value {
+        let reader_stream = stream.try_clone().unwrap();
+        reader_stream.set_nonblocking(false).unwrap();
+        let mut command = String::new();
+        BufReader::new(reader_stream)
+            .read_line(&mut command)
+            .unwrap();
+        serde_json::from_str::<serde_json::Value>(command.trim()).unwrap()
+    }
 
     #[test]
     fn should_run_matches_tick_interval() {
@@ -1917,11 +1927,7 @@ mod tests {
                         Err(error) => panic!("accept keli-core-rs control command: {error}"),
                     }
                 };
-                let mut command = String::new();
-                BufReader::new(stream.try_clone().unwrap())
-                    .read_line(&mut command)
-                    .unwrap();
-                let command = serde_json::from_str::<serde_json::Value>(command.trim()).unwrap();
+                let command = read_control_command(&stream);
                 commands.push(command.clone());
                 if index == 0 {
                     writeln!(
@@ -2073,11 +2079,7 @@ mod tests {
                         Err(error) => panic!("accept keli-core-rs control command: {error}"),
                     }
                 };
-                let mut command = String::new();
-                BufReader::new(stream.try_clone().unwrap())
-                    .read_line(&mut command)
-                    .unwrap();
-                let command = serde_json::from_str::<serde_json::Value>(command.trim()).unwrap();
+                let command = read_control_command(&stream);
                 assert_eq!(command["type"], "apply_user_delta");
                 assert_eq!(command["node_tag"], expected_tags_for_thread[index]);
                 assert_eq!(command["delta"]["base_revision"], "1");
@@ -2258,11 +2260,7 @@ mod tests {
                         Err(error) => panic!("accept keli-core-rs control command: {error}"),
                     }
                 };
-                let mut command = String::new();
-                BufReader::new(stream.try_clone().unwrap())
-                    .read_line(&mut command)
-                    .unwrap();
-                let command = serde_json::from_str::<serde_json::Value>(command.trim()).unwrap();
+                let command = read_control_command(&stream);
                 assert_eq!(command["type"], "apply_user_delta");
                 assert_eq!(command["node_tag"], expected_tags_for_thread[index]);
                 assert_eq!(command["delta"]["revision"], "9");
@@ -2434,11 +2432,7 @@ mod tests {
         let listener = TcpListener::bind(&control_addr).unwrap();
         let control_thread = thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
-            let mut command = String::new();
-            BufReader::new(stream.try_clone().unwrap())
-                .read_line(&mut command)
-                .unwrap();
-            let command = serde_json::from_str::<serde_json::Value>(command.trim()).unwrap();
+            let command = read_control_command(&stream);
             assert_eq!(command["type"], "metrics");
             assert_eq!(command["token"], token);
             writeln!(
@@ -3179,11 +3173,7 @@ mod tests {
                         Err(error) => panic!("accept keli-core-rs control command: {error}"),
                     }
                 };
-                let mut command = String::new();
-                BufReader::new(stream.try_clone().unwrap())
-                    .read_line(&mut command)
-                    .unwrap();
-                let command = serde_json::from_str::<serde_json::Value>(command.trim()).unwrap();
+                let command = read_control_command(&stream);
                 if index == 0 {
                     assert_eq!(command["type"], "metrics");
                     writeln!(
@@ -3379,11 +3369,7 @@ mod tests {
                     Err(error) => panic!("accept keli-core-rs control command: {error}"),
                 }
             };
-            let mut command = String::new();
-            BufReader::new(stream.try_clone().unwrap())
-                .read_line(&mut command)
-                .unwrap();
-            let command = serde_json::from_str::<serde_json::Value>(command.trim()).unwrap();
+            let command = read_control_command(&stream);
             assert_eq!(command["type"], "apply_user_delta");
             assert_eq!(command["node_tag"], tag_for_thread);
             assert_eq!(command["delta"]["added"][0]["uuid"], new_uuid_for_thread);
@@ -3655,11 +3641,7 @@ mod tests {
                     Err(error) => panic!("accept keli-core-rs control command: {error}"),
                 }
             };
-            let mut command = String::new();
-            BufReader::new(stream.try_clone().unwrap())
-                .read_line(&mut command)
-                .unwrap();
-            let command = serde_json::from_str::<serde_json::Value>(command.trim()).unwrap();
+            let command = read_control_command(&stream);
             assert_eq!(command["type"], "apply_user_delta");
             assert_eq!(command["node_tag"], tag_for_thread);
             assert_eq!(command["delta"]["added"].as_array().unwrap().len(), 0);
@@ -3817,11 +3799,7 @@ mod tests {
                         Err(error) => panic!("accept keli-core-rs control command: {error}"),
                     }
                 };
-                let mut command = String::new();
-                BufReader::new(stream.try_clone().unwrap())
-                    .read_line(&mut command)
-                    .unwrap();
-                let command = serde_json::from_str::<serde_json::Value>(command.trim()).unwrap();
+                let command = read_control_command(&stream);
                 match index {
                     0 => {
                         assert_eq!(command["type"], "metrics");
@@ -4008,11 +3986,7 @@ mod tests {
                     Err(error) => panic!("accept keli-core-rs control command: {error}"),
                 }
             };
-            let mut command = String::new();
-            BufReader::new(stream.try_clone().unwrap())
-                .read_line(&mut command)
-                .unwrap();
-            let command = serde_json::from_str::<serde_json::Value>(command.trim()).unwrap();
+            let command = read_control_command(&stream);
             assert_eq!(command["type"], "apply_user_delta");
             assert_eq!(command["node_tag"], tag_for_thread);
             assert_eq!(command["delta"]["base_revision"], "42");
@@ -4166,11 +4140,7 @@ mod tests {
                     Err(error) => panic!("accept keli-core-rs control command: {error}"),
                 }
             };
-            let mut command = String::new();
-            BufReader::new(stream.try_clone().unwrap())
-                .read_line(&mut command)
-                .unwrap();
-            let command = serde_json::from_str::<serde_json::Value>(command.trim()).unwrap();
+            let command = read_control_command(&stream);
             assert_eq!(command["type"], "apply_user_delta");
             assert_eq!(command["node_tag"], tag_for_thread);
             writeln!(
