@@ -1485,7 +1485,7 @@ fn runtime_user_delta_change(
     revision: i64,
     diff: UserListDiff,
 ) -> Option<RuntimeUserDeltaChange> {
-    if user_list_diff_is_empty(&diff) {
+    if user_list_diff_is_empty(&diff) && base_revision == revision {
         return None;
     }
     Some(RuntimeUserDeltaChange {
@@ -1709,8 +1709,14 @@ mod tests {
     }
 
     #[test]
-    fn revision_only_user_delta_does_not_trigger_runtime_change() {
-        assert!(runtime_user_delta_change(false, 42, 43, UserListDiff::default()).is_none());
+    fn revision_only_user_delta_advances_native_core_revision() {
+        let change = runtime_user_delta_change(false, 42, 43, UserListDiff::default())
+            .expect("revision-only delta should still advance native core revision");
+        assert_eq!(change.base_revision, 42);
+        assert_eq!(change.revision, 43);
+        assert!(change.diff.added.is_empty());
+        assert!(change.diff.updated.is_empty());
+        assert!(change.diff.deleted.is_empty());
         assert!(user_delta_body_is_revision_only(
             &crate::panel::types::UserDeltaBody {
                 full: false,
