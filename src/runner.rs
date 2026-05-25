@@ -11,7 +11,7 @@ use crate::control::{
 use crate::core::{
     effective_device_limit, node_device_limit_fallback, parse_keli_core_rs_port_range, CorePlan,
 };
-use crate::core_control::KELI_CORE_APPLY_CONTROL_TIMEOUT;
+use crate::core_control::{KeliCoreUserDeltaApplyResult, KELI_CORE_APPLY_CONTROL_TIMEOUT};
 use crate::health::ResourceSnapshot;
 use crate::logging;
 use crate::panel::client::{PanelClient, PanelClientOptions};
@@ -558,6 +558,110 @@ fn nonfatal_keli_core_device_limit_snapshot(result: Result<usize, String>) {
     }
 }
 
+fn panel_user_sync_log_message(
+    config: &NodeConfig,
+    node_tag: &str,
+    entry: &RuntimeUserSyncEntry,
+) -> String {
+    let api_host = config.url.trim_end_matches('/');
+    match entry.last_change.as_ref() {
+        Some(change) if change.full => format!(
+            "panel full api_host={api_host} node_id={} node_tag={node_tag} users={} added={} updated={} deleted={} base_revision={} revision={}",
+            config.node_id,
+            entry.state.users.len(),
+            change.diff.added.len(),
+            change.diff.updated.len(),
+            change.diff.deleted.len(),
+            change.base_revision,
+            change.revision
+        ),
+        Some(change) => format!(
+            "panel delta api_host={api_host} node_id={} node_tag={node_tag} added={} updated={} deleted={} cached_users={} base_revision={} revision={}",
+            config.node_id,
+            change.diff.added.len(),
+            change.diff.updated.len(),
+            change.diff.deleted.len(),
+            entry.state.users.len(),
+            change.base_revision,
+            change.revision
+        ),
+        None => format!(
+            "panel unchanged api_host={api_host} node_id={} node_tag={node_tag} cached_users={} revision={}",
+            config.node_id,
+            entry.state.users.len(),
+            entry.state.revision
+        ),
+    }
+}
+
+fn keli_core_user_delta_apply_log_message(
+    node_tag: &str,
+    target_tag: &str,
+    change: &RuntimeUserDeltaChange,
+    device_limit_fallback: u32,
+    result: &KeliCoreUserDeltaApplyResult,
+) -> String {
+    let (fallback_applied_upserts, explicit_device_limit_upserts) =
+        user_device_limit_counts_for_iter(
+            change.diff.added.iter().chain(change.diff.updated.iter()),
+            device_limit_fallback,
+        );
+    format!(
+        "core delta applied node_tag={node_tag} target_tag={target_tag} added={} updated={} deleted={} active_users={} full_applied={} base_revision={} revision={} fallback_device_limit={} fallback_applied_upserts={} explicit_device_limit_upserts={}",
+        result.result.added,
+        result.result.updated,
+        result.result.deleted,
+        result.result.active_users,
+        result.result.full_applied,
+        change.base_revision,
+        change.revision,
+        device_limit_fallback,
+        fallback_applied_upserts,
+        explicit_device_limit_upserts
+    )
+}
+
+fn keli_core_user_full_snapshot_apply_log_message(
+    reason: &str,
+    node_tag: &str,
+    target_tag: &str,
+    entry: &RuntimeUserSyncEntry,
+    device_limit_fallback: u32,
+    result: &KeliCoreUserDeltaApplyResult,
+) -> String {
+    let (fallback_applied_users, explicit_device_limit_users) =
+        user_device_limit_counts(&entry.state.users, device_limit_fallback);
+    format!(
+        "core full applied reason={reason} node_tag={node_tag} target_tag={target_tag} users={} active_users={} revision={} full_applied={} fallback_device_limit={} fallback_applied_users={} explicit_device_limit_users={}",
+        entry.state.users.len(),
+        result.result.active_users,
+        entry.state.revision,
+        result.result.full_applied,
+        device_limit_fallback,
+        fallback_applied_users,
+        explicit_device_limit_users
+    )
+}
+
+fn user_device_limit_counts(users: &[UserInfo], device_limit_fallback: u32) -> (usize, usize) {
+    user_device_limit_counts_for_iter(users.iter(), device_limit_fallback)
+}
+
+fn user_device_limit_counts_for_iter<'a>(
+    users: impl Iterator<Item = &'a UserInfo>,
+    device_limit_fallback: u32,
+) -> (usize, usize) {
+    users.fold((0usize, 0usize), |(fallback, explicit), user| {
+        if user.device_limit > 0 {
+            (fallback, explicit.saturating_add(1))
+        } else if device_limit_fallback > 0 {
+            (fallback.saturating_add(1), explicit)
+        } else {
+            (fallback, explicit)
+        }
+    })
+}
+
 fn try_apply_keli_core_rs_user_deltas(
     plan: &RuntimeBootstrapPlan,
     sync_state: &BTreeMap<String, RuntimeUserSyncEntry>,
@@ -614,7 +718,19 @@ fn try_apply_keli_core_rs_user_deltas(
         let delta = keli_core_user_delta_payload(node_tag, change, device_limit_fallback);
         for target_tag in target_tags {
             match client.apply_user_delta(target_tag.clone(), delta.clone()) {
-                Ok(_) => metrics.record_success(),
+                Ok(result) => {
+                    metrics.record_success();
+                    logging::info(
+                        "users",
+                        keli_core_user_delta_apply_log_message(
+                            node_tag,
+                            &target_tag,
+                            change,
+                            device_limit_fallback,
+                            &result,
+                        ),
+                    );
+                }
                 Err(error) => {
                     metrics.record_failed();
                     if plan.resolved.machine.continue_on_error
@@ -653,7 +769,20 @@ fn try_apply_keli_core_rs_user_deltas(
                         device_limit_fallback,
                     );
                     match client.apply_user_delta(target_tag.clone(), full_delta) {
-                        Ok(_) => metrics.record_success(),
+                        Ok(result) => {
+                            metrics.record_success();
+                            logging::info(
+                                "users",
+                                keli_core_user_full_snapshot_apply_log_message(
+                                    "delta_fallback",
+                                    node_tag,
+                                    &target_tag,
+                                    entry,
+                                    device_limit_fallback,
+                                    &result,
+                                ),
+                            );
+                        }
                         Err(error) => {
                             metrics.record_failed();
                             if plan.resolved.machine.continue_on_error
@@ -757,7 +886,20 @@ fn try_establish_keli_core_rs_revision_baseline(
         let delta = keli_core_user_full_snapshot_payload(node_tag, entry, device_limit_fallback);
         for target_tag in target_tags {
             match client.apply_user_delta(target_tag.clone(), delta.clone()) {
-                Ok(_) => applied += 1,
+                Ok(result) => {
+                    applied += 1;
+                    logging::info(
+                        "users",
+                        keli_core_user_full_snapshot_apply_log_message(
+                            "revision_baseline",
+                            node_tag,
+                            &target_tag,
+                            entry,
+                            device_limit_fallback,
+                            &result,
+                        ),
+                    );
+                }
                 Err(error) => {
                     logging::warn(
                         "core",
@@ -1418,6 +1560,10 @@ async fn load_users_by_node_tag_from_panel_with_state(
             }
             Err(error) => return Err(error),
         };
+        logging::info(
+            "users",
+            panel_user_sync_log_message(config, &node.tag, entry),
+        );
         if entry.last_change.is_some() {
             users_by_tag.insert(node.tag.clone(), users);
         } else if runtime_plan_needs_cached_users(plan, &node.tag, entry) {
@@ -1625,23 +1771,27 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::{
-        handle_runtime_loop_event, keli_core_rs_metrics_snapshot, keli_core_user_delta_payload,
-        keli_core_user_delta_requires_full_snapshot, keli_core_user_full_snapshot_payload,
+        handle_runtime_loop_event, keli_core_rs_metrics_snapshot,
+        keli_core_user_delta_apply_log_message, keli_core_user_delta_payload,
+        keli_core_user_delta_requires_full_snapshot,
+        keli_core_user_full_snapshot_apply_log_message, keli_core_user_full_snapshot_payload,
         load_users_by_node_tag_from_panel_with_state, node_config_for_info,
-        nonfatal_keli_core_activity_report, nonfatal_panel_status_report, refresh_runtime_health,
-        refresh_subscription_proxy_health, run_runtime_loop, run_runtime_loop_async,
-        run_runtime_loop_async_with_events, runtime_loop_event_for_task,
-        runtime_plan_needs_cached_users, runtime_user_delta_change, should_run,
-        try_apply_keli_core_rs_user_deltas, try_establish_keli_core_rs_revision_baseline,
-        user_delta_body_is_revision_only, user_delta_not_supported,
-        user_sync_users_for_runtime_rebuild, AsyncRuntimeLoopCallbacks, PanelRuntimeLoop,
-        RuntimeLoopCallbacks, RuntimeLoopEvent, RuntimeLoopEventKind, RuntimeLoopExit,
-        RuntimeLoopExitReason, RuntimeLoopFuture, RuntimeLoopOptions, RuntimeUserDeltaApplyOutcome,
-        RuntimeUserDeltaChange, RuntimeUserDeltaMetrics, RuntimeUserSyncEntry,
+        nonfatal_keli_core_activity_report, nonfatal_panel_status_report,
+        panel_user_sync_log_message, refresh_runtime_health, refresh_subscription_proxy_health,
+        run_runtime_loop, run_runtime_loop_async, run_runtime_loop_async_with_events,
+        runtime_loop_event_for_task, runtime_plan_needs_cached_users, runtime_user_delta_change,
+        should_run, try_apply_keli_core_rs_user_deltas,
+        try_establish_keli_core_rs_revision_baseline, user_delta_body_is_revision_only,
+        user_delta_not_supported, user_device_limit_counts, user_sync_users_for_runtime_rebuild,
+        AsyncRuntimeLoopCallbacks, PanelRuntimeLoop, RuntimeLoopCallbacks, RuntimeLoopEvent,
+        RuntimeLoopEventKind, RuntimeLoopExit, RuntimeLoopExitReason, RuntimeLoopFuture,
+        RuntimeLoopOptions, RuntimeUserDeltaApplyOutcome, RuntimeUserDeltaChange,
+        RuntimeUserDeltaMetrics, RuntimeUserSyncEntry,
     };
     use crate::config::{NodeConfig, ResolvedConfig, ResolvedMachineConfig};
     use crate::control::RuntimeControlOptions;
     use crate::control::{RuntimeLoopSignal, RuntimePanelAction, RuntimeTickOptions};
+    use crate::core_control::{KeliCoreUserDeltaApplyResult, KeliCoreUserDeltaResult};
     use crate::health::ResourceSnapshot;
     use crate::machine::MachineUpgradeCommand;
     use crate::panel::types::{CommonNode, NodeInfo, PortValue, UserInfo};
@@ -1854,6 +2004,184 @@ mod tests {
         let payload = keli_core_user_delta_payload("panel|vless|1", &change, 4);
 
         assert_eq!(payload["added"][0]["device_limit"], 4);
+    }
+
+    #[test]
+    fn panel_user_sync_log_message_reports_user_counts() {
+        let config = NodeConfig {
+            url: "https://panel.example.test/".to_string(),
+            node_id: 12,
+            ..NodeConfig::default()
+        };
+        let users = vec![
+            UserInfo {
+                id: 1,
+                uuid: "secret-one".to_string(),
+                speed_limit: 0,
+                device_limit: 0,
+            },
+            UserInfo {
+                id: 2,
+                uuid: "secret-two".to_string(),
+                speed_limit: 0,
+                device_limit: 1,
+            },
+            UserInfo {
+                id: 3,
+                uuid: "secret-three".to_string(),
+                speed_limit: 0,
+                device_limit: 0,
+            },
+            UserInfo {
+                id: 4,
+                uuid: "secret-four".to_string(),
+                speed_limit: 0,
+                device_limit: 2,
+            },
+        ];
+        let changed = RuntimeUserSyncEntry {
+            state: UserSyncState {
+                revision: 10,
+                users: users.clone(),
+                updated_at: None,
+            },
+            delta_supported: true,
+            path: String::new(),
+            last_change: Some(RuntimeUserDeltaChange {
+                full: true,
+                base_revision: 9,
+                revision: 10,
+                diff: UserListDiff {
+                    added: vec![users[0].clone()],
+                    updated: vec![users[1].clone()],
+                    deleted: vec![users[2].clone()],
+                },
+            }),
+        };
+
+        assert_eq!(
+            panel_user_sync_log_message(&config, "panel|trojan|12", &changed),
+            "panel full api_host=https://panel.example.test node_id=12 node_tag=panel|trojan|12 users=4 added=1 updated=1 deleted=1 base_revision=9 revision=10"
+        );
+
+        let mut delta = changed.clone();
+        delta.last_change.as_mut().unwrap().full = false;
+        assert_eq!(
+            panel_user_sync_log_message(&config, "panel|trojan|12", &delta),
+            "panel delta api_host=https://panel.example.test node_id=12 node_tag=panel|trojan|12 added=1 updated=1 deleted=1 cached_users=4 base_revision=9 revision=10"
+        );
+
+        let mut unchanged = changed.clone();
+        unchanged.last_change = None;
+        assert_eq!(
+            panel_user_sync_log_message(&config, "panel|trojan|12", &unchanged),
+            "panel unchanged api_host=https://panel.example.test node_id=12 node_tag=panel|trojan|12 cached_users=4 revision=10"
+        );
+    }
+
+    #[test]
+    fn native_core_user_apply_logs_counts_without_user_secrets() {
+        let change = RuntimeUserDeltaChange {
+            full: false,
+            base_revision: 41,
+            revision: 42,
+            diff: UserListDiff {
+                added: vec![UserInfo {
+                    id: 2,
+                    uuid: "added-user-secret".to_string(),
+                    speed_limit: 10,
+                    device_limit: 0,
+                }],
+                updated: vec![UserInfo {
+                    id: 3,
+                    uuid: "updated-user-secret".to_string(),
+                    speed_limit: 20,
+                    device_limit: 3,
+                }],
+                deleted: Vec::new(),
+            },
+        };
+        let result = KeliCoreUserDeltaApplyResult {
+            node_tag: "target-a".to_string(),
+            result: KeliCoreUserDeltaResult {
+                added: 1,
+                updated: 1,
+                deleted: 0,
+                active_users: 8,
+                ..KeliCoreUserDeltaResult::default()
+            },
+            status: json!({}),
+            listeners: Vec::new(),
+        };
+
+        let message = keli_core_user_delta_apply_log_message(
+            "panel|vless|12",
+            "target-a",
+            &change,
+            4,
+            &result,
+        );
+
+        assert_eq!(
+            message,
+            "core delta applied node_tag=panel|vless|12 target_tag=target-a added=1 updated=1 deleted=0 active_users=8 full_applied=false base_revision=41 revision=42 fallback_device_limit=4 fallback_applied_upserts=1 explicit_device_limit_upserts=1"
+        );
+        assert!(!message.contains("added-user-secret"));
+        assert!(!message.contains("updated-user-secret"));
+    }
+
+    #[test]
+    fn native_core_full_snapshot_log_reports_panel_and_core_counts() {
+        let entry = RuntimeUserSyncEntry {
+            state: UserSyncState {
+                revision: 88,
+                users: vec![
+                    UserInfo {
+                        id: 7,
+                        uuid: "secret-one".to_string(),
+                        speed_limit: 1024,
+                        device_limit: 0,
+                    },
+                    UserInfo {
+                        id: 8,
+                        uuid: "secret-two".to_string(),
+                        speed_limit: 2048,
+                        device_limit: 3,
+                    },
+                ],
+                updated_at: None,
+            },
+            delta_supported: true,
+            path: String::new(),
+            last_change: None,
+        };
+        let result = KeliCoreUserDeltaApplyResult {
+            node_tag: "target-a".to_string(),
+            result: KeliCoreUserDeltaResult {
+                active_users: 2,
+                full_applied: true,
+                ..KeliCoreUserDeltaResult::default()
+            },
+            status: json!({}),
+            listeners: Vec::new(),
+        };
+
+        let message = keli_core_user_full_snapshot_apply_log_message(
+            "revision_baseline",
+            "panel|trojan|12",
+            "target-a",
+            &entry,
+            5,
+            &result,
+        );
+
+        assert_eq!(
+            message,
+            "core full applied reason=revision_baseline node_tag=panel|trojan|12 target_tag=target-a users=2 active_users=2 revision=88 full_applied=true fallback_device_limit=5 fallback_applied_users=1 explicit_device_limit_users=1"
+        );
+        assert_eq!(user_device_limit_counts(&entry.state.users, 5), (1, 1));
+        assert!(!message.contains("secret-one"));
+        assert!(!message.contains("secret-two"));
     }
 
     #[test]

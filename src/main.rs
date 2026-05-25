@@ -489,6 +489,7 @@ async fn run_agent_once(
     port_forward_executor: &mut SystemPortForwardExecutor,
     upgrade_status: Option<Value>,
 ) -> Result<RuntimeLoopExit, String> {
+    logging::info("agent", startup_banner_message(&agent_version(), path));
     logging::info("agent", format!("loading config path={path}"));
     let config = AppConfig::load_from_path(path)?;
     logging::info("agent", "building runtime bootstrap");
@@ -786,6 +787,10 @@ fn agent_version() -> String {
     format!("v{}", env!("CARGO_PKG_VERSION"))
 }
 
+fn startup_banner_message(version: &str, config_path: &str) -> String {
+    format!("Keli Node {version} service_log=\"kelinode log --tail 200\" config_path={config_path}")
+}
+
 fn print_help() {
     println!("kelinode commands:");
     println!("  version    print version and API contract");
@@ -813,8 +818,8 @@ mod tests {
     use super::{
         apply_embedded_core_process_defaults, config_path_from_args, machine_panel_clients,
         native_gray_preflight_report, parse_log_args, parse_rules_args, runtime_loop_options,
-        runtime_tick_interval, start_subscription_proxy_manager, LogOptions, RulesAction,
-        DEFAULT_CONFIG_FILE,
+        runtime_tick_interval, start_subscription_proxy_manager, startup_banner_message,
+        LogOptions, RulesAction, DEFAULT_CONFIG_FILE,
     };
     use kelinode_rs::config::{
         AgentConfig, MachineProfileConfig, NodeConfig, ResolvedConfig, ResolvedMachineConfig,
@@ -853,6 +858,15 @@ mod tests {
             config_path_from_args(vec!["/tmp/c.yml".to_string()], DEFAULT_CONFIG_FILE,).unwrap(),
             "/tmp/c.yml"
         );
+    }
+
+    #[test]
+    fn startup_banner_mentions_version_logs_and_config_path() {
+        let message = startup_banner_message("v9.9.9", "/etc/kelinode/config.yml");
+
+        assert!(message.contains("Keli Node v9.9.9"));
+        assert!(message.contains("service_log=\"kelinode log --tail 200\""));
+        assert!(message.contains("config_path=/etc/kelinode/config.yml"));
     }
 
     #[test]
