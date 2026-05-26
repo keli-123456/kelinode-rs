@@ -208,6 +208,7 @@ struct RuntimeUserSyncEntry {
 }
 
 const UNCHANGED_PANEL_USER_LOG_INTERVAL_SECS: i64 = 60;
+const UNCHANGED_PANEL_USER_SUMMARY_LOG_KEY: &str = "panel-user-sync-unchanged-summary";
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct RuntimeUserDeltaChange {
@@ -215,6 +216,46 @@ struct RuntimeUserDeltaChange {
     base_revision: i64,
     revision: i64,
     diff: UserListDiff,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct PanelUserSyncUnchangedSummary {
+    panels: BTreeMap<String, PanelUserSyncUnchangedPanelSummary>,
+    nodes: usize,
+    cached_users: usize,
+    min_revision: Option<i64>,
+    max_revision: Option<i64>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct PanelUserSyncUnchangedPanelSummary {
+    nodes: usize,
+    cached_users: usize,
+    min_revision: Option<i64>,
+    max_revision: Option<i64>,
+}
+
+impl PanelUserSyncUnchangedSummary {
+    fn record(&mut self, config: &NodeConfig, entry: &RuntimeUserSyncEntry) {
+        let api_host = config.url.trim_end_matches('/').to_string();
+        let cached_users = entry.state.users.len();
+        self.nodes += 1;
+        self.cached_users += cached_users;
+        update_revision_range(
+            &mut self.min_revision,
+            &mut self.max_revision,
+            entry.state.revision,
+        );
+
+        let panel = self.panels.entry(api_host).or_default();
+        panel.nodes += 1;
+        panel.cached_users += cached_users;
+        update_revision_range(
+            &mut panel.min_revision,
+            &mut panel.max_revision,
+            entry.state.revision,
+        );
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -595,33 +636,71 @@ fn panel_user_sync_log_message(
     }
 }
 
-fn should_log_panel_user_sync_entry(
-    config: &NodeConfig,
-    node_tag: &str,
-    entry: &RuntimeUserSyncEntry,
-) -> bool {
-    if entry.last_change.is_some() {
-        return true;
+fn panel_user_sync_unchanged_summary_log_message(
+    summary: &PanelUserSyncUnchangedSummary,
+) -> Option<String> {
+    if summary.nodes == 0 {
+        return None;
     }
+    let panel_breakdown = summary
+        .panels
+        .iter()
+        .map(|(api_host, panel)| {
+            format!(
+                "{api_host}:nodes={},cached_users={},revisions={}",
+                panel.nodes,
+                panel.cached_users,
+                revision_range_label(panel.min_revision, panel.max_revision)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(";");
+    Some(format!(
+        "panel unchanged summary panels={} nodes={} cached_users={} revisions={} panel_breakdown={}",
+        summary.panels.len(),
+        summary.nodes,
+        summary.cached_users,
+        revision_range_label(summary.min_revision, summary.max_revision),
+        panel_breakdown
+    ))
+}
+
+fn update_revision_range(
+    min_revision: &mut Option<i64>,
+    max_revision: &mut Option<i64>,
+    revision: i64,
+) {
+    *min_revision = Some(min_revision.map_or(revision, |current| current.min(revision)));
+    *max_revision = Some(max_revision.map_or(revision, |current| current.max(revision)));
+}
+
+fn revision_range_label(min_revision: Option<i64>, max_revision: Option<i64>) -> String {
+    match (min_revision, max_revision) {
+        (Some(min), Some(max)) if min == max => min.to_string(),
+        (Some(min), Some(max)) => format!("{min}..{max}"),
+        _ => "unknown".to_string(),
+    }
+}
+
+fn should_log_panel_user_sync_unchanged_summary() -> bool {
     static LAST_UNCHANGED_LOGS: OnceLock<Mutex<BTreeMap<String, i64>>> = OnceLock::new();
-    let key = format!(
-        "{}|{}|{}",
-        config.url.trim_end_matches('/'),
-        config.node_id,
-        node_tag
-    );
     let mut logs = LAST_UNCHANGED_LOGS
         .get_or_init(|| Mutex::new(BTreeMap::new()))
         .lock()
         .expect("panel user sync log state poisoned");
-    should_log_panel_user_sync_unchanged_at(&mut logs, key, unix_now())
+    should_log_panel_user_sync_unchanged_at(
+        &mut logs,
+        UNCHANGED_PANEL_USER_SUMMARY_LOG_KEY.to_string(),
+        unix_now(),
+    )
 }
 
 fn should_log_panel_user_sync_unchanged_at(
     logs: &mut BTreeMap<String, i64>,
-    key: String,
+    _key: String,
     now: i64,
 ) -> bool {
+    let key = UNCHANGED_PANEL_USER_SUMMARY_LOG_KEY.to_string();
     match logs.get(&key).copied() {
         Some(last) if now >= last && now - last < UNCHANGED_PANEL_USER_LOG_INTERVAL_SECS => false,
         _ => {
@@ -1565,6 +1644,7 @@ async fn load_users_by_node_tag_from_panel_with_state(
     sync_state: &mut BTreeMap<String, RuntimeUserSyncEntry>,
 ) -> Result<BTreeMap<String, Vec<UserInfo>>, String> {
     let mut users_by_tag = BTreeMap::new();
+    let mut unchanged_summary = PanelUserSyncUnchangedSummary::default();
     for node in &plan.node_infos {
         let Some(config) = node_config_for_info(plan, node.id, &node.tag) else {
             continue;
@@ -1591,16 +1671,23 @@ async fn load_users_by_node_tag_from_panel_with_state(
             }
             Err(error) => return Err(error),
         };
-        if should_log_panel_user_sync_entry(config, &node.tag, entry) {
+        if entry.last_change.is_some() {
             logging::info(
                 "users",
                 panel_user_sync_log_message(config, &node.tag, entry),
             );
+        } else {
+            unchanged_summary.record(config, entry);
         }
         if entry.last_change.is_some() {
             users_by_tag.insert(node.tag.clone(), users);
         } else if runtime_plan_needs_cached_users(plan, &node.tag, entry) {
             users_by_tag.insert(node.tag.clone(), entry.state.users.clone());
+        }
+    }
+    if should_log_panel_user_sync_unchanged_summary() {
+        if let Some(message) = panel_user_sync_unchanged_summary_log_message(&unchanged_summary) {
+            logging::info("users", message);
         }
     }
     Ok(users_by_tag)
@@ -1810,16 +1897,17 @@ mod tests {
         keli_core_user_full_snapshot_apply_log_message, keli_core_user_full_snapshot_payload,
         load_users_by_node_tag_from_panel_with_state, node_config_for_info,
         nonfatal_keli_core_activity_report, nonfatal_panel_status_report,
-        panel_user_sync_log_message, refresh_runtime_health, refresh_subscription_proxy_health,
-        run_runtime_loop, run_runtime_loop_async, run_runtime_loop_async_with_events,
-        runtime_loop_event_for_task, runtime_plan_needs_cached_users, runtime_user_delta_change,
+        panel_user_sync_log_message, panel_user_sync_unchanged_summary_log_message,
+        refresh_runtime_health, refresh_subscription_proxy_health, run_runtime_loop,
+        run_runtime_loop_async, run_runtime_loop_async_with_events, runtime_loop_event_for_task,
+        runtime_plan_needs_cached_users, runtime_user_delta_change,
         should_log_panel_user_sync_unchanged_at, should_run, try_apply_keli_core_rs_user_deltas,
         try_establish_keli_core_rs_revision_baseline, user_delta_body_is_revision_only,
         user_delta_not_supported, user_device_limit_counts, user_sync_users_for_runtime_rebuild,
-        AsyncRuntimeLoopCallbacks, PanelRuntimeLoop, RuntimeLoopCallbacks, RuntimeLoopEvent,
-        RuntimeLoopEventKind, RuntimeLoopExit, RuntimeLoopExitReason, RuntimeLoopFuture,
-        RuntimeLoopOptions, RuntimeUserDeltaApplyOutcome, RuntimeUserDeltaChange,
-        RuntimeUserDeltaMetrics, RuntimeUserSyncEntry,
+        AsyncRuntimeLoopCallbacks, PanelRuntimeLoop, PanelUserSyncUnchangedSummary,
+        RuntimeLoopCallbacks, RuntimeLoopEvent, RuntimeLoopEventKind, RuntimeLoopExit,
+        RuntimeLoopExitReason, RuntimeLoopFuture, RuntimeLoopOptions, RuntimeUserDeltaApplyOutcome,
+        RuntimeUserDeltaChange, RuntimeUserDeltaMetrics, RuntimeUserSyncEntry,
     };
     use crate::config::{NodeConfig, ResolvedConfig, ResolvedMachineConfig};
     use crate::control::RuntimeControlOptions;
@@ -2113,7 +2201,69 @@ mod tests {
     }
 
     #[test]
-    fn panel_user_sync_unchanged_log_is_rate_limited_per_node() {
+    fn panel_user_sync_unchanged_summary_reports_counts_without_node_spam() {
+        let mut summary = PanelUserSyncUnchangedSummary::default();
+        let panel_a = NodeConfig {
+            url: "https://panel-a.example.test/".to_string(),
+            node_id: 12,
+            ..NodeConfig::default()
+        };
+        let panel_b = NodeConfig {
+            url: "https://panel-b.example.test".to_string(),
+            node_id: 7,
+            ..NodeConfig::default()
+        };
+        let entry_a = RuntimeUserSyncEntry {
+            state: UserSyncState {
+                revision: 10,
+                users: vec![
+                    UserInfo {
+                        id: 1,
+                        uuid: "panel-a-one".to_string(),
+                        speed_limit: 0,
+                        device_limit: 0,
+                    },
+                    UserInfo {
+                        id: 2,
+                        uuid: "panel-a-two".to_string(),
+                        speed_limit: 0,
+                        device_limit: 0,
+                    },
+                ],
+                updated_at: None,
+            },
+            delta_supported: true,
+            path: String::new(),
+            last_change: None,
+        };
+        let entry_b = RuntimeUserSyncEntry {
+            state: UserSyncState {
+                revision: 11,
+                users: vec![UserInfo {
+                    id: 3,
+                    uuid: "panel-b-one".to_string(),
+                    speed_limit: 0,
+                    device_limit: 0,
+                }],
+                updated_at: None,
+            },
+            delta_supported: true,
+            path: String::new(),
+            last_change: None,
+        };
+
+        summary.record(&panel_a, &entry_a);
+        summary.record(&panel_a, &entry_b);
+        summary.record(&panel_b, &entry_b);
+
+        assert_eq!(
+            panel_user_sync_unchanged_summary_log_message(&summary).as_deref(),
+            Some("panel unchanged summary panels=2 nodes=3 cached_users=4 revisions=10..11 panel_breakdown=https://panel-a.example.test:nodes=2,cached_users=3,revisions=10..11;https://panel-b.example.test:nodes=1,cached_users=1,revisions=11")
+        );
+    }
+
+    #[test]
+    fn panel_user_sync_unchanged_log_is_rate_limited_for_summary() {
         let mut logs = BTreeMap::new();
         let key = "https://panel.example.test|12|panel|trojan|12".to_string();
 
@@ -2132,7 +2282,7 @@ mod tests {
             key.clone(),
             1_060
         ));
-        assert!(should_log_panel_user_sync_unchanged_at(
+        assert!(!should_log_panel_user_sync_unchanged_at(
             &mut logs,
             "https://panel.example.test|13|panel|trojan|13".to_string(),
             1_061
