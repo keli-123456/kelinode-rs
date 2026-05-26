@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpListener, UdpSocket};
 use std::sync::{Mutex, OnceLock};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::config::NodeConfig;
 use crate::core::{
@@ -37,6 +38,14 @@ pub struct RuntimeControlOptions {
     pub keli_core_rs_user_delta_applied: bool,
     pub repair_port_forward: bool,
     pub health: HealthReportInput,
+}
+
+const CLEAN_PORT_FORWARD_LOG_INTERVAL_SECS: i64 = 60;
+
+#[derive(Debug, Default)]
+struct CleanPortForwardLogState {
+    summary: Option<String>,
+    last_secs: i64,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -377,23 +386,54 @@ fn log_mieru_port_forward_status(
 
     let summary = mieru_port_forward_summary(status, repaired, infos);
     if status.errors.is_empty() && total_hy2_missing_rules(status) == 0 {
-        logging::info("rules", summary);
+        if should_log_clean_mieru_port_forward_status(&summary) {
+            logging::info("rules", summary);
+        }
     } else {
         logging::warn("rules", summary);
     }
 }
 
 fn should_log_clean_hy2_port_forward_status(summary: &str) -> bool {
-    static LAST_CLEAN_SUMMARY: OnceLock<Mutex<Option<String>>> = OnceLock::new();
+    static LAST_CLEAN_SUMMARY: OnceLock<Mutex<CleanPortForwardLogState>> = OnceLock::new();
     let mut last = LAST_CLEAN_SUMMARY
-        .get_or_init(|| Mutex::new(None))
+        .get_or_init(|| Mutex::new(CleanPortForwardLogState::default()))
         .lock()
         .expect("hy2 port-forward log state poisoned");
-    if last.as_deref() == Some(summary) {
+    should_log_clean_port_forward_status_at(&mut last, summary, unix_now())
+}
+
+fn should_log_clean_mieru_port_forward_status(summary: &str) -> bool {
+    static LAST_CLEAN_SUMMARY: OnceLock<Mutex<CleanPortForwardLogState>> = OnceLock::new();
+    let mut last = LAST_CLEAN_SUMMARY
+        .get_or_init(|| Mutex::new(CleanPortForwardLogState::default()))
+        .lock()
+        .expect("mieru port-forward log state poisoned");
+    should_log_clean_port_forward_status_at(&mut last, summary, unix_now())
+}
+
+fn should_log_clean_port_forward_status_at(
+    state: &mut CleanPortForwardLogState,
+    summary: &str,
+    now: i64,
+) -> bool {
+    let same_summary = state.summary.as_deref() == Some(summary);
+    if same_summary
+        && now >= state.last_secs
+        && now - state.last_secs < CLEAN_PORT_FORWARD_LOG_INTERVAL_SECS
+    {
         return false;
     }
-    *last = Some(summary.to_string());
+    state.summary = Some(summary.to_string());
+    state.last_secs = now;
     true
+}
+
+fn unix_now() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs() as i64)
+        .unwrap_or_default()
 }
 
 fn hy2_port_forward_summary(
@@ -939,8 +979,9 @@ mod tests {
     use super::{
         apply_runtime_plan, handle_runtime_signal, hy2_port_forward_summary,
         machine_status_payload_for_client, merge_runtime_panel_action, run_runtime_tick,
-        runtime_loop_signal, runtime_panel_action, should_log_clean_hy2_port_forward_status,
-        RuntimeControlOptions, RuntimeLoopSignal, RuntimePanelAction, RuntimeTickOptions,
+        runtime_loop_signal, runtime_panel_action, should_log_clean_port_forward_status_at,
+        CleanPortForwardLogState, RuntimeControlOptions, RuntimeLoopSignal, RuntimePanelAction,
+        RuntimeTickOptions,
     };
 
     #[test]
@@ -1112,11 +1153,21 @@ mod tests {
     fn clean_hy2_port_forward_log_suppresses_duplicate_summary() {
         let summary = format!("clean hy2 summary {}", line!());
 
-        assert!(should_log_clean_hy2_port_forward_status(&summary));
-        assert!(!should_log_clean_hy2_port_forward_status(&summary));
-        assert!(should_log_clean_hy2_port_forward_status(&format!(
-            "{summary} changed"
-        )));
+        let mut state = CleanPortForwardLogState::default();
+        assert!(should_log_clean_port_forward_status_at(
+            &mut state, &summary, 1_000
+        ));
+        assert!(!should_log_clean_port_forward_status_at(
+            &mut state, &summary, 1_030
+        ));
+        assert!(should_log_clean_port_forward_status_at(
+            &mut state, &summary, 1_060
+        ));
+        assert!(should_log_clean_port_forward_status_at(
+            &mut state,
+            &format!("{summary} changed"),
+            1_061
+        ));
     }
 
     #[test]

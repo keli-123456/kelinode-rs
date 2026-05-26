@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::config::NodeConfig;
@@ -205,6 +206,8 @@ struct RuntimeUserSyncEntry {
     path: String,
     last_change: Option<RuntimeUserDeltaChange>,
 }
+
+const UNCHANGED_PANEL_USER_LOG_INTERVAL_SECS: i64 = 60;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct RuntimeUserDeltaChange {
@@ -589,6 +592,42 @@ fn panel_user_sync_log_message(
             entry.state.users.len(),
             entry.state.revision
         ),
+    }
+}
+
+fn should_log_panel_user_sync_entry(
+    config: &NodeConfig,
+    node_tag: &str,
+    entry: &RuntimeUserSyncEntry,
+) -> bool {
+    if entry.last_change.is_some() {
+        return true;
+    }
+    static LAST_UNCHANGED_LOGS: OnceLock<Mutex<BTreeMap<String, i64>>> = OnceLock::new();
+    let key = format!(
+        "{}|{}|{}",
+        config.url.trim_end_matches('/'),
+        config.node_id,
+        node_tag
+    );
+    let mut logs = LAST_UNCHANGED_LOGS
+        .get_or_init(|| Mutex::new(BTreeMap::new()))
+        .lock()
+        .expect("panel user sync log state poisoned");
+    should_log_panel_user_sync_unchanged_at(&mut logs, key, unix_now())
+}
+
+fn should_log_panel_user_sync_unchanged_at(
+    logs: &mut BTreeMap<String, i64>,
+    key: String,
+    now: i64,
+) -> bool {
+    match logs.get(&key).copied() {
+        Some(last) if now >= last && now - last < UNCHANGED_PANEL_USER_LOG_INTERVAL_SECS => false,
+        _ => {
+            logs.insert(key, now);
+            true
+        }
     }
 }
 
@@ -1552,10 +1591,12 @@ async fn load_users_by_node_tag_from_panel_with_state(
             }
             Err(error) => return Err(error),
         };
-        logging::info(
-            "users",
-            panel_user_sync_log_message(config, &node.tag, entry),
-        );
+        if should_log_panel_user_sync_entry(config, &node.tag, entry) {
+            logging::info(
+                "users",
+                panel_user_sync_log_message(config, &node.tag, entry),
+            );
+        }
         if entry.last_change.is_some() {
             users_by_tag.insert(node.tag.clone(), users);
         } else if runtime_plan_needs_cached_users(plan, &node.tag, entry) {
@@ -1772,7 +1813,7 @@ mod tests {
         panel_user_sync_log_message, refresh_runtime_health, refresh_subscription_proxy_health,
         run_runtime_loop, run_runtime_loop_async, run_runtime_loop_async_with_events,
         runtime_loop_event_for_task, runtime_plan_needs_cached_users, runtime_user_delta_change,
-        should_run, try_apply_keli_core_rs_user_deltas,
+        should_log_panel_user_sync_unchanged_at, should_run, try_apply_keli_core_rs_user_deltas,
         try_establish_keli_core_rs_revision_baseline, user_delta_body_is_revision_only,
         user_delta_not_supported, user_device_limit_counts, user_sync_users_for_runtime_rebuild,
         AsyncRuntimeLoopCallbacks, PanelRuntimeLoop, RuntimeLoopCallbacks, RuntimeLoopEvent,
@@ -2069,6 +2110,33 @@ mod tests {
             panel_user_sync_log_message(&config, "panel|trojan|12", &unchanged),
             "panel unchanged api_host=https://panel.example.test node_id=12 node_tag=panel|trojan|12 cached_users=4 revision=10"
         );
+    }
+
+    #[test]
+    fn panel_user_sync_unchanged_log_is_rate_limited_per_node() {
+        let mut logs = BTreeMap::new();
+        let key = "https://panel.example.test|12|panel|trojan|12".to_string();
+
+        assert!(should_log_panel_user_sync_unchanged_at(
+            &mut logs,
+            key.clone(),
+            1_000
+        ));
+        assert!(!should_log_panel_user_sync_unchanged_at(
+            &mut logs,
+            key.clone(),
+            1_030
+        ));
+        assert!(should_log_panel_user_sync_unchanged_at(
+            &mut logs,
+            key.clone(),
+            1_060
+        ));
+        assert!(should_log_panel_user_sync_unchanged_at(
+            &mut logs,
+            "https://panel.example.test|13|panel|trojan|13".to_string(),
+            1_061
+        ));
     }
 
     #[test]
