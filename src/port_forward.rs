@@ -1315,7 +1315,11 @@ pub fn normalize_port_forward_spec_fields(fields: &[String]) -> Vec<String> {
     let mut out = Vec::with_capacity(fields.len());
     let mut index = 0usize;
     while index < fields.len() {
-        if fields[index] == "-m" && fields.get(index + 1).is_some_and(|value| value == "udp") {
+        if fields[index] == "-m"
+            && fields
+                .get(index + 1)
+                .is_some_and(|value| value == "udp" || value == "tcp")
+        {
             index += 2;
             continue;
         }
@@ -2030,9 +2034,13 @@ mod tests {
         let specs =
             list_port_forward_specs_from_output_with_comment(&output, MIERU_PORT_FORWARD_COMMENT);
 
-        assert_eq!(specs.len(), 2, "{specs:?}");
-        assert!(specs.iter().all(|spec| spec.contains("V2NODE-MIERU")));
-        assert!(specs.iter().all(|spec| !spec.contains("-j V2NODE-HY2")));
+        assert_eq!(
+            specs,
+            vec![
+                "-A PREROUTING -p tcp --dport 30000:30002 -m comment --comment V2NODE-MIERU -j REDIRECT --to-ports 28870",
+                "-A PREROUTING -p udp --dport 31000:31002 -m comment --comment V2NODE-MIERU -j REDIRECT --to-ports 28871",
+            ]
+        );
     }
 
     #[test]
