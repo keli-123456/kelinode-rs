@@ -72,6 +72,10 @@ pub fn build_machine_status_payload(
         hy2_port_forward_value(&plan.hy2_port_forward),
     );
     payload.insert_status(
+        "mieru_port_forward",
+        hy2_port_forward_value(&plan.mieru_port_forward),
+    );
+    payload.insert_status(
         "node_failures",
         json!(node_failure_payloads(&plan.node_failures, machine_id)),
     );

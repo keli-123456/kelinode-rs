@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::fs;
 use std::io::Write;
 use std::net::IpAddr;
@@ -2432,75 +2432,9 @@ fn render_keli_core_rs_inbounds(
 ) -> Result<Vec<Value>, CoreError> {
     let mut rendered = Vec::new();
     for inbound in inbounds {
-        for expanded in expand_keli_core_rs_inbound(inbound)? {
-            rendered.push(render_keli_core_rs_inbound(&expanded, include_users)?);
-        }
+        rendered.push(render_keli_core_rs_inbound(inbound, include_users)?);
     }
     Ok(rendered)
-}
-
-fn expand_keli_core_rs_inbound(inbound: &InboundPlan) -> Result<Vec<InboundPlan>, CoreError> {
-    if inbound.protocol != "mieru" || inbound.port_range.trim().is_empty() {
-        return Ok(vec![inbound.clone()]);
-    }
-    let ports = parse_keli_core_rs_port_range(&inbound.port_range).map_err(|message| {
-        CoreError::new(format!(
-            "keli-core-rs mieru port range on inbound {} is invalid: {message}",
-            inbound.tag
-        ))
-    })?;
-    Ok(ports
-        .into_iter()
-        .map(|port| {
-            let mut expanded = inbound.clone();
-            expanded.tag = format!("{}|port:{port}", inbound.tag);
-            expanded.port = port;
-            expanded.port_range.clear();
-            expanded
-        })
-        .collect())
-}
-
-pub(crate) fn parse_keli_core_rs_port_range(raw: &str) -> Result<Vec<u16>, String> {
-    let mut ports = Vec::new();
-    let mut seen = BTreeSet::new();
-    for token in raw.split(',') {
-        let token = token.trim();
-        if token.is_empty() {
-            continue;
-        }
-        let (start, end) = if let Some((start, end)) = token.split_once('-') {
-            let start = start
-                .trim()
-                .parse::<u16>()
-                .map_err(|_| format!("bad port range start {token}"))?;
-            let end = end
-                .trim()
-                .parse::<u16>()
-                .map_err(|_| format!("bad port range end {token}"))?;
-            if start > end {
-                return Err(format!("range start is greater than end in {token}"));
-            }
-            (start, end)
-        } else {
-            let port = token
-                .parse::<u16>()
-                .map_err(|_| format!("bad port {token}"))?;
-            (port, port)
-        };
-        for port in start..=end {
-            if seen.insert(port) {
-                ports.push(port);
-            }
-            if ports.len() > 2048 {
-                return Err("port range expands to more than 2048 ports".to_string());
-            }
-        }
-    }
-    if ports.is_empty() {
-        return Err("empty port range".to_string());
-    }
-    Ok(ports)
 }
 
 fn keli_core_rs_protocol_name(inbound: &InboundPlan) -> &str {
@@ -2732,13 +2666,11 @@ fn render_keli_core_rs_config_bytes(
     content.extend_from_slice(br#","inbounds":["#);
     let mut first_inbound = true;
     for inbound in &plan.inbounds {
-        for expanded in expand_keli_core_rs_inbound(inbound)? {
-            if !first_inbound {
-                content.push(b',');
-            }
-            write_keli_core_rs_inbound(&mut content, &expanded, include_users)?;
-            first_inbound = false;
+        if !first_inbound {
+            content.push(b',');
         }
+        write_keli_core_rs_inbound(&mut content, inbound, include_users)?;
+        first_inbound = false;
     }
     content.push(b']');
     write_json_field(&mut content, "outbounds", &outbounds, false)?;
@@ -4155,7 +4087,7 @@ mod tests {
     }
 
     #[test]
-    fn keli_core_rs_expands_mieru_port_range_inbounds() {
+    fn keli_core_rs_keeps_mieru_port_range_on_backend_listener() {
         let mut node = test_node("mieru", 41, "");
         node.common.ports = PortValue("2100-2102".to_string());
         let plan = CorePlan::from_nodes(
@@ -4167,13 +4099,12 @@ mod tests {
 
         let config = render_core_config(&plan).unwrap();
 
-        assert_eq!(config["inbounds"].as_array().unwrap().len(), 3);
-        assert_eq!(config["inbounds"][0]["port"], 2100);
+        assert_eq!(config["inbounds"].as_array().unwrap().len(), 1);
+        assert_eq!(config["inbounds"][0]["port"], 10041);
         assert_eq!(
             config["inbounds"][0]["tag"],
-            "[https://panel.example.test]-mieru:41|port:2100"
+            "[https://panel.example.test]-mieru:41"
         );
-        assert_eq!(config["inbounds"][2]["port"], 2102);
     }
 
     #[test]

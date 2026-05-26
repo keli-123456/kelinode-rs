@@ -15,8 +15,8 @@ use crate::node::NodeFailure;
 use crate::panel::types::{NodeInfo, Protocol, UserInfo};
 use crate::panel::PanelClient;
 use crate::port_forward::{
-    inspect_hysteria_port_forward, repair_hysteria_port_forward, HysteriaPortForwardStatus,
-    PortForwardExecutor,
+    inspect_hysteria_port_forward, inspect_mieru_port_forward, repair_hysteria_port_forward,
+    repair_mieru_port_forward, HysteriaPortForwardStatus, PortForwardExecutor,
 };
 use crate::process::{
     core_process_spec, keli_core_rs_control_client, ProcessSpec, ProcessStatus, ProcessSupervisor,
@@ -44,6 +44,7 @@ pub struct RuntimeApplyResult {
     pub core_config: Option<CoreConfigWriteResult>,
     pub core_process: Option<ProcessStatus>,
     pub hy2_port_forward: HysteriaPortForwardStatus,
+    pub mieru_port_forward: HysteriaPortForwardStatus,
     pub machine_status: MachineStatusPayload,
 }
 
@@ -135,8 +136,19 @@ where
         options.repair_port_forward,
         &report_plan.node_infos,
     );
+    let mieru_port_forward = if options.repair_port_forward {
+        repair_mieru_port_forward(&report_plan.node_infos, port_forward_executor)
+    } else {
+        inspect_mieru_port_forward(&report_plan.node_infos, port_forward_executor)
+    };
+    log_mieru_port_forward_status(
+        &mieru_port_forward,
+        options.repair_port_forward,
+        &report_plan.node_infos,
+    );
 
     report_plan.hy2_port_forward = hy2_port_forward.clone();
+    report_plan.mieru_port_forward = mieru_port_forward.clone();
     let mut health = options.health;
     if health.core.is_none() {
         health.core = core_process.clone();
@@ -147,6 +159,7 @@ where
         core_config,
         core_process,
         hy2_port_forward,
+        mieru_port_forward,
         machine_status,
     })
 }
@@ -346,6 +359,30 @@ fn log_hy2_port_forward_status(
     }
 }
 
+fn log_mieru_port_forward_status(
+    status: &HysteriaPortForwardStatus,
+    repaired: bool,
+    infos: &[NodeInfo],
+) {
+    if !status.enabled {
+        return;
+    }
+    let mieru_nodes = infos
+        .iter()
+        .filter(|info| matches!(info.protocol, Protocol::Mieru))
+        .count();
+    if mieru_nodes == 0 && status.expected_rules.is_empty() && status.errors.is_empty() {
+        return;
+    }
+
+    let summary = mieru_port_forward_summary(status, repaired, infos);
+    if status.errors.is_empty() && total_hy2_missing_rules(status) == 0 {
+        logging::info("rules", summary);
+    } else {
+        logging::warn("rules", summary);
+    }
+}
+
 fn should_log_clean_hy2_port_forward_status(summary: &str) -> bool {
     static LAST_CLEAN_SUMMARY: OnceLock<Mutex<Option<String>>> = OnceLock::new();
     let mut last = LAST_CLEAN_SUMMARY
@@ -410,6 +447,56 @@ fn hy2_port_forward_summary(
     )
 }
 
+fn mieru_port_forward_summary(
+    status: &HysteriaPortForwardStatus,
+    repaired: bool,
+    infos: &[NodeInfo],
+) -> String {
+    let tool_summary = status
+        .tools
+        .iter()
+        .map(|tool| {
+            let state = if !tool.available {
+                "unavailable".to_string()
+            } else if !tool.error.is_empty() {
+                format!("error:{}", tool.error)
+            } else {
+                format!(
+                    "current={} expected={} missing={} extra={}",
+                    tool.current.len(),
+                    tool.expected.len(),
+                    tool.missing.len(),
+                    tool.extra.len()
+                )
+            };
+            format!("{}({})", tool.tool, state)
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    let first_rule = status
+        .expected_rules
+        .first()
+        .map(|rule| rule.spec.as_str())
+        .unwrap_or("-");
+    let tool_display = if tool_summary.is_empty() {
+        "-"
+    } else {
+        tool_summary.as_str()
+    };
+
+    format!(
+        "mieru port-forward {} root={} expected={} missing={} errors={} first_rule={} nodes={} tools={}",
+        if repaired { "repair" } else { "inspect" },
+        status.running_as_root,
+        status.expected_rules.len(),
+        total_hy2_missing_rules(status),
+        status.errors.len(),
+        first_rule,
+        mieru_port_forward_node_summary(infos),
+        tool_display
+    )
+}
+
 fn hy2_port_forward_node_summary(infos: &[NodeInfo]) -> String {
     let nodes = infos
         .iter()
@@ -427,6 +514,39 @@ fn hy2_port_forward_node_summary(infos: &[NodeInfo]) -> String {
             format!(
                 "{}:server_port={} external={}",
                 info.id, info.common.server_port, external
+            )
+        })
+        .collect::<Vec<_>>();
+
+    if nodes.is_empty() {
+        "-".to_string()
+    } else {
+        nodes.join(",")
+    }
+}
+
+fn mieru_port_forward_node_summary(infos: &[NodeInfo]) -> String {
+    let nodes = infos
+        .iter()
+        .filter(|info| matches!(info.protocol, Protocol::Mieru))
+        .map(|info| {
+            let port = info.common.port.0.trim();
+            let ports = info.common.ports.0.trim();
+            let external = if !ports.is_empty() {
+                ports
+            } else if !port.is_empty() {
+                port
+            } else {
+                "-"
+            };
+            let transport = if info.common.transport.trim().is_empty() {
+                "TCP"
+            } else {
+                info.common.transport.trim()
+            };
+            format!(
+                "{}:server_port={} external={} transport={}",
+                info.id, info.common.server_port, external, transport
             )
         })
         .collect::<Vec<_>>();

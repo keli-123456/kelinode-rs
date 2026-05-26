@@ -10,6 +10,7 @@ use serde::Serialize;
 pub const HYSTERIA_PORT_FORWARD_COMMENT: &str = "V2NODE-HY2";
 pub const HYSTERIA_PORT_FORWARD_CHAIN: &str = "V2NODE-HY2";
 pub const HYSTERIA_PORT_FORWARD_TOOLS: [&str; 2] = ["iptables", "ip6tables"];
+pub const MIERU_PORT_FORWARD_COMMENT: &str = "V2NODE-MIERU";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PortForwardMatcher {
@@ -21,6 +22,15 @@ pub struct PortForwardMatcher {
 pub struct PortForwardRule {
     pub matcher: PortForwardMatcher,
     pub target_port: u16,
+    pub protocol: String,
+    pub comment: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct FirewallAllowRule {
+    protocol: String,
+    port: u16,
+    comment: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -78,25 +88,31 @@ struct PortForwardRange {
 struct AllocatedPortForwardRange {
     node_id: u32,
     target_port: u16,
+    protocol: String,
     range: PortForwardRange,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct HysteriaPortForwardPlan {
     nat_rules: Vec<PortForwardRule>,
-    allow_ports: Vec<u16>,
+    allow_rules: Vec<FirewallAllowRule>,
     errors: Vec<String>,
 }
 
 fn build_hysteria_port_forward_plan(infos: &[NodeInfo]) -> HysteriaPortForwardPlan {
     let (nat_rules, errors) = build_hysteria_port_forward_rules(infos);
-    let allow_ports = collect_hysteria_target_ports(infos)
+    let allow_rules = collect_hysteria_target_ports(infos)
         .keys()
         .copied()
+        .map(|port| FirewallAllowRule {
+            protocol: "udp".to_string(),
+            port,
+            comment: HYSTERIA_PORT_FORWARD_COMMENT.to_string(),
+        })
         .collect::<Vec<_>>();
     HysteriaPortForwardPlan {
         nat_rules,
-        allow_ports,
+        allow_rules,
         errors,
     }
 }
@@ -143,7 +159,7 @@ pub fn build_hysteria_port_forward_rules(
             continue;
         }
         let ranges = trim_target_port_conflicts(ranges, target_port, &target_ports);
-        let ranges = trim_allocated_range_conflicts(ranges, target_port, &allocated);
+        let ranges = trim_allocated_range_conflicts(ranges, target_port, "udp", &allocated);
         if ranges.is_empty() {
             errors.push(format!(
                 "node {} port {:?} is fully covered by other HY2 port-forward ranges",
@@ -157,6 +173,7 @@ pub fn build_hysteria_port_forward_rules(
             allocated.push(AllocatedPortForwardRange {
                 node_id: info.id,
                 target_port,
+                protocol: "udp".to_string(),
                 range,
             });
         }
@@ -168,6 +185,98 @@ pub fn build_hysteria_port_forward_rules(
             rules.push(PortForwardRule {
                 matcher,
                 target_port,
+                protocol: "udp".to_string(),
+                comment: HYSTERIA_PORT_FORWARD_COMMENT.to_string(),
+            });
+        }
+    }
+
+    (rules, errors)
+}
+
+pub fn build_mieru_port_forward_rules(infos: &[NodeInfo]) -> (Vec<PortForwardRule>, Vec<String>) {
+    let mut rules = Vec::new();
+    let mut errors = Vec::new();
+    let mut seen = BTreeSet::new();
+    let mut allocated = Vec::new();
+    let target_ports = collect_mieru_target_ports_by_protocol(infos);
+
+    for info in infos {
+        if !matches!(info.protocol, Protocol::Mieru) {
+            continue;
+        }
+        let target_port = info.common.server_port;
+        if target_port == 0 {
+            errors.push(format!(
+                "node {} has invalid server_port {}",
+                info.id, target_port
+            ));
+            continue;
+        }
+
+        let external_port = first_non_empty(info.common.ports.0.trim(), info.common.port.0.trim());
+        if external_port.is_empty() {
+            continue;
+        }
+
+        let protocol = match mieru_port_forward_protocol(&info.common.transport) {
+            Ok(protocol) => protocol,
+            Err(error) => {
+                errors.push(format!(
+                    "node {} has invalid Mieru transport: {error}",
+                    info.id
+                ));
+                continue;
+            }
+        };
+
+        let (_, ranges) =
+            match parse_port_forward_matchers_and_ranges_except(&external_port, target_port) {
+                Ok(result) => result,
+                Err(error) => {
+                    errors.push(format!(
+                        "node {} has invalid port {:?}: {}",
+                        info.id, external_port, error
+                    ));
+                    continue;
+                }
+            };
+        if ranges.is_empty() {
+            continue;
+        }
+        let protocol_target_ports = target_ports
+            .get(protocol)
+            .cloned()
+            .unwrap_or_else(BTreeMap::new);
+        let ranges = trim_target_port_conflicts(ranges, target_port, &protocol_target_ports);
+        let ranges = trim_allocated_range_conflicts(ranges, target_port, protocol, &allocated);
+        if ranges.is_empty() {
+            errors.push(format!(
+                "node {} port {:?} is fully covered by other Mieru port-forward ranges",
+                info.id, external_port
+            ));
+            continue;
+        }
+        let matchers = port_forward_matchers_from_ranges(&ranges);
+
+        for range in ranges {
+            allocated.push(AllocatedPortForwardRange {
+                node_id: info.id,
+                target_port,
+                protocol: protocol.to_string(),
+                range,
+            });
+        }
+        for matcher in matchers {
+            let key = format!("{protocol}|{}|{}", target_port, matcher.args.join("\0"));
+            if !seen.insert(key) {
+                continue;
+            }
+            rules.push(PortForwardRule {
+                matcher,
+                target_port,
+                protocol: protocol.to_string(),
+                comment: MIERU_PORT_FORWARD_COMMENT.to_string(),
             });
         }
     }
@@ -196,7 +305,7 @@ fn new_hysteria_port_forward_status_from_plan(
     HysteriaPortForwardStatus {
         enabled: true,
         running_as_root,
-        expected_rules: describe_hysteria_managed_rules(&plan.nat_rules, &plan.allow_ports),
+        expected_rules: describe_hysteria_managed_rules(&plan.nat_rules, &plan.allow_rules),
         tools: Vec::new(),
         errors: plan.errors.clone(),
     }
@@ -222,11 +331,11 @@ pub fn inspect_hysteria_port_forward<E: PortForwardExecutor>(
     for tool in HYSTERIA_PORT_FORWARD_TOOLS {
         status
             .tools
-            .push(inspect_port_forward_tool_with_allow_ports(
+            .push(inspect_port_forward_tool_with_allow_rules(
                 executor,
                 tool,
                 &plan.nat_rules,
-                &plan.allow_ports,
+                &plan.allow_rules,
             ));
     }
 
@@ -244,15 +353,15 @@ pub fn repair_hysteria_port_forward<E: PortForwardExecutor>(
         for tool in HYSTERIA_PORT_FORWARD_TOOLS {
             status
                 .tools
-                .push(inspect_port_forward_tool_with_allow_ports(
+                .push(inspect_port_forward_tool_with_allow_rules(
                     executor,
                     tool,
                     &plan.nat_rules,
-                    &plan.allow_ports,
+                    &plan.allow_rules,
                 ));
         }
         if !plan.nat_rules.is_empty()
-            || !plan.allow_ports.is_empty()
+            || !plan.allow_rules.is_empty()
             || hysteria_port_forward_needs_repair(&status)
         {
             status
@@ -263,11 +372,11 @@ pub fn repair_hysteria_port_forward<E: PortForwardExecutor>(
     }
 
     for tool in HYSTERIA_PORT_FORWARD_TOOLS {
-        let mut tool_status = inspect_port_forward_tool_with_allow_ports(
+        let mut tool_status = inspect_port_forward_tool_with_allow_rules(
             executor,
             tool,
             &plan.nat_rules,
-            &plan.allow_ports,
+            &plan.allow_rules,
         );
         if tool_status.available {
             let needs_repair = tool_status.error.is_empty()
@@ -279,14 +388,14 @@ pub fn repair_hysteria_port_forward<E: PortForwardExecutor>(
                     executor,
                     tool,
                     &plan.nat_rules,
-                    &plan.allow_ports,
+                    &plan.allow_rules,
                 ) {
                     Ok(()) => {
-                        tool_status = inspect_port_forward_tool_with_allow_ports(
+                        tool_status = inspect_port_forward_tool_with_allow_rules(
                             executor,
                             tool,
                             &plan.nat_rules,
-                            &plan.allow_ports,
+                            &plan.allow_rules,
                         );
                     }
                     Err(error) => {
@@ -320,12 +429,12 @@ pub fn cleanup_hysteria_port_forward<E: PortForwardExecutor>(
     }
 
     for tool in HYSTERIA_PORT_FORWARD_TOOLS {
-        let mut tool_status = inspect_port_forward_tool_with_allow_ports(executor, tool, &[], &[]);
+        let mut tool_status = inspect_port_forward_tool_with_allow_rules(executor, tool, &[], &[]);
         if tool_status.available {
             match execute_cleanup_port_forward_tool(executor, tool) {
                 Ok(()) => {
                     tool_status =
-                        inspect_port_forward_tool_with_allow_ports(executor, tool, &[], &[]);
+                        inspect_port_forward_tool_with_allow_rules(executor, tool, &[], &[]);
                 }
                 Err(error) => {
                     tool_status.error = error.clone();
@@ -339,11 +448,146 @@ pub fn cleanup_hysteria_port_forward<E: PortForwardExecutor>(
     status
 }
 
+fn build_mieru_port_forward_plan(infos: &[NodeInfo]) -> HysteriaPortForwardPlan {
+    let (nat_rules, errors) = build_mieru_port_forward_rules(infos);
+    let mut seen = BTreeSet::new();
+    let allow_rules = nat_rules
+        .iter()
+        .filter_map(|rule| {
+            let key = format!("{}|{}|{}", rule.protocol, rule.target_port, rule.comment);
+            if !seen.insert(key) {
+                return None;
+            }
+            Some(FirewallAllowRule {
+                protocol: rule.protocol.clone(),
+                port: rule.target_port,
+                comment: rule.comment.clone(),
+            })
+        })
+        .collect::<Vec<_>>();
+    HysteriaPortForwardPlan {
+        nat_rules,
+        allow_rules,
+        errors,
+    }
+}
+
+pub fn inspect_mieru_port_forward<E: PortForwardExecutor>(
+    infos: &[NodeInfo],
+    executor: &mut E,
+) -> HysteriaPortForwardStatus {
+    let plan = build_mieru_port_forward_plan(infos);
+    let mut status = new_mieru_port_forward_status_from_plan(&plan, executor.running_as_root());
+
+    for tool in HYSTERIA_PORT_FORWARD_TOOLS {
+        status.tools.push(inspect_port_forward_tool_with_comment(
+            executor,
+            tool,
+            &plan.nat_rules,
+            &plan.allow_rules,
+            MIERU_PORT_FORWARD_COMMENT,
+        ));
+    }
+
+    status
+}
+
+pub fn repair_mieru_port_forward<E: PortForwardExecutor>(
+    infos: &[NodeInfo],
+    executor: &mut E,
+) -> HysteriaPortForwardStatus {
+    let plan = build_mieru_port_forward_plan(infos);
+    let mut status = new_mieru_port_forward_status_from_plan(&plan, executor.running_as_root());
+
+    if !status.running_as_root {
+        for tool in HYSTERIA_PORT_FORWARD_TOOLS {
+            status.tools.push(inspect_port_forward_tool_with_comment(
+                executor,
+                tool,
+                &plan.nat_rules,
+                &plan.allow_rules,
+                MIERU_PORT_FORWARD_COMMENT,
+            ));
+        }
+        if !plan.nat_rules.is_empty()
+            || !plan.allow_rules.is_empty()
+            || hysteria_port_forward_needs_repair(&status)
+        {
+            status
+                .errors
+                .push("Mieru port forwarding repair requires root".to_string());
+        }
+        return status;
+    }
+
+    for tool in HYSTERIA_PORT_FORWARD_TOOLS {
+        let mut tool_status = inspect_port_forward_tool_with_comment(
+            executor,
+            tool,
+            &plan.nat_rules,
+            &plan.allow_rules,
+            MIERU_PORT_FORWARD_COMMENT,
+        );
+        if tool_status.available {
+            let needs_repair = tool_status.error.is_empty()
+                && (!tool_status.missing.is_empty()
+                    || !tool_status.extra.is_empty()
+                    || tool_status.stale_chain);
+            if needs_repair {
+                match execute_mieru_port_forward_tool(
+                    executor,
+                    tool,
+                    &plan.nat_rules,
+                    &plan.allow_rules,
+                ) {
+                    Ok(()) => {
+                        tool_status = inspect_port_forward_tool_with_comment(
+                            executor,
+                            tool,
+                            &plan.nat_rules,
+                            &plan.allow_rules,
+                            MIERU_PORT_FORWARD_COMMENT,
+                        );
+                    }
+                    Err(error) => {
+                        tool_status.error = error.clone();
+                        status.errors.push(format!("{tool}: {error}"));
+                    }
+                }
+            }
+        }
+        status.tools.push(tool_status);
+    }
+
+    status
+}
+
+pub fn new_mieru_port_forward_status(
+    infos: &[NodeInfo],
+    running_as_root: bool,
+) -> HysteriaPortForwardStatus {
+    let plan = build_mieru_port_forward_plan(infos);
+    new_mieru_port_forward_status_from_plan(&plan, running_as_root)
+}
+
+fn new_mieru_port_forward_status_from_plan(
+    plan: &HysteriaPortForwardPlan,
+    running_as_root: bool,
+) -> HysteriaPortForwardStatus {
+    HysteriaPortForwardStatus {
+        enabled: !plan.nat_rules.is_empty(),
+        running_as_root,
+        expected_rules: describe_hysteria_managed_rules(&plan.nat_rules, &plan.allow_rules),
+        tools: Vec::new(),
+        errors: plan.errors.clone(),
+    }
+}
+
 pub fn describe_port_forward_rules(rules: &[PortForwardRule]) -> Vec<HysteriaPortForwardRuleSpec> {
     rules
         .iter()
         .map(|rule| HysteriaPortForwardRuleSpec {
-            protocol: "udp".to_string(),
+            protocol: rule.protocol.clone(),
             match_rule: rule.matcher.args.join(" "),
             target_port: rule.target_port,
             spec: expected_port_forward_spec_fields(rule).join(" "),
@@ -353,14 +597,14 @@ pub fn describe_port_forward_rules(rules: &[PortForwardRule]) -> Vec<HysteriaPor
 
 fn describe_hysteria_managed_rules(
     nat_rules: &[PortForwardRule],
-    allow_ports: &[u16],
+    allow_rules: &[FirewallAllowRule],
 ) -> Vec<HysteriaPortForwardRuleSpec> {
     let mut specs = describe_port_forward_rules(nat_rules);
-    specs.extend(allow_ports.iter().map(|port| HysteriaPortForwardRuleSpec {
-        protocol: "udp".to_string(),
-        match_rule: format!("INPUT --dport {port}"),
-        target_port: *port,
-        spec: expected_firewall_allow_spec_fields(*port).join(" "),
+    specs.extend(allow_rules.iter().map(|rule| HysteriaPortForwardRuleSpec {
+        protocol: rule.protocol.clone(),
+        match_rule: format!("INPUT --dport {}", rule.port),
+        target_port: rule.port,
+        spec: expected_firewall_allow_spec_fields(rule).join(" "),
     }));
     specs
 }
@@ -370,18 +614,18 @@ pub fn inspect_port_forward_tool<E: PortForwardExecutor>(
     tool: &str,
     rules: &[PortForwardRule],
 ) -> HysteriaPortForwardToolStatus {
-    inspect_port_forward_tool_with_allow_ports(executor, tool, rules, &[])
+    inspect_port_forward_tool_with_allow_rules(executor, tool, rules, &[])
 }
 
-fn inspect_port_forward_tool_with_allow_ports<E: PortForwardExecutor>(
+fn inspect_port_forward_tool_with_allow_rules<E: PortForwardExecutor>(
     executor: &mut E,
     tool: &str,
     rules: &[PortForwardRule],
-    allow_ports: &[u16],
+    allow_rules: &[FirewallAllowRule],
 ) -> HysteriaPortForwardToolStatus {
     let mut status = HysteriaPortForwardToolStatus {
         tool: tool.to_string(),
-        expected: expected_hysteria_managed_specs(rules, allow_ports),
+        expected: expected_hysteria_managed_specs(rules, allow_rules),
         current: Vec::new(),
         missing: Vec::new(),
         extra: Vec::new(),
@@ -412,10 +656,59 @@ fn inspect_port_forward_tool_with_allow_ports<E: PortForwardExecutor>(
     status = inspect_hysteria_managed_specs(
         tool,
         rules,
-        allow_ports,
+        allow_rules,
         &prerouting_output,
         &input_output,
         executor.command_output(&chain_command).is_ok(),
+    );
+    status.available = true;
+    status
+}
+
+fn inspect_port_forward_tool_with_comment<E: PortForwardExecutor>(
+    executor: &mut E,
+    tool: &str,
+    rules: &[PortForwardRule],
+    allow_rules: &[FirewallAllowRule],
+    comment: &str,
+) -> HysteriaPortForwardToolStatus {
+    let mut status = HysteriaPortForwardToolStatus {
+        tool: tool.to_string(),
+        expected: expected_hysteria_managed_specs(rules, allow_rules),
+        current: Vec::new(),
+        missing: Vec::new(),
+        extra: Vec::new(),
+        ..HysteriaPortForwardToolStatus::default()
+    };
+    if !executor.is_tool_available(tool) {
+        return status;
+    }
+    status.available = true;
+
+    let prerouting_command = command(tool, vec!["-t", "nat", "-S", "PREROUTING"]);
+    let prerouting_output = match executor.command_output(&prerouting_command) {
+        Ok(output) => output,
+        Err(error) => {
+            status.error = error;
+            return status;
+        }
+    };
+    let input_command = command(tool, vec!["-S", "INPUT"]);
+    let input_output = match executor.command_output(&input_command) {
+        Ok(output) => output,
+        Err(error) => {
+            status.error = error;
+            return status;
+        }
+    };
+    status = inspect_managed_specs_with_comment(
+        tool,
+        rules,
+        allow_rules,
+        &prerouting_output,
+        &input_output,
+        false,
+        comment,
     );
     status.available = true;
     status
@@ -433,14 +726,41 @@ pub fn inspect_port_forward_specs(
 fn inspect_hysteria_managed_specs(
     tool: &str,
     rules: &[PortForwardRule],
-    allow_ports: &[u16],
+    allow_rules: &[FirewallAllowRule],
     prerouting_output: &str,
     input_output: &str,
     stale_chain: bool,
 ) -> HysteriaPortForwardToolStatus {
+    inspect_managed_specs_with_comment(
+        tool,
+        rules,
+        allow_rules,
+        prerouting_output,
+        input_output,
+        stale_chain,
+        HYSTERIA_PORT_FORWARD_COMMENT,
+    )
+}
+
+fn inspect_managed_specs_with_comment(
+    tool: &str,
+    rules: &[PortForwardRule],
+    allow_rules: &[FirewallAllowRule],
+    prerouting_output: &str,
+    input_output: &str,
+    stale_chain: bool,
+    comment: &str,
+) -> HysteriaPortForwardToolStatus {
     let mut current = list_port_forward_specs_from_output(prerouting_output);
-    current.extend(list_firewall_allow_specs_from_output(input_output));
-    let expected = expected_hysteria_managed_specs(rules, allow_ports);
+    if comment != HYSTERIA_PORT_FORWARD_COMMENT {
+        current = list_port_forward_specs_from_output_with_comment(prerouting_output, comment);
+    }
+    current.extend(if comment == HYSTERIA_PORT_FORWARD_COMMENT {
+        list_firewall_allow_specs_from_output(input_output)
+    } else {
+        list_firewall_allow_specs_from_output_with_comment(input_output, comment)
+    });
+    let expected = expected_hysteria_managed_specs(rules, allow_rules);
 
     let expected_keys = expected
         .iter()
@@ -507,7 +827,7 @@ pub fn reconcile_port_forward_commands(
 fn reconcile_port_forward_commands_with_allow_ports(
     tool: &str,
     rules: &[PortForwardRule],
-    allow_ports: &[u16],
+    allow_rules: &[FirewallAllowRule],
     prerouting_output: &str,
     input_output: &str,
     chain_exists: bool,
@@ -526,7 +846,7 @@ fn reconcile_port_forward_commands_with_allow_ports(
     }
 
     for rule in rules {
-        let mut args = vec!["-t", "nat", "-A", "PREROUTING", "-p", "udp"]
+        let mut args = vec!["-t", "nat", "-A", "PREROUTING", "-p", &rule.protocol]
             .into_iter()
             .map(str::to_string)
             .collect::<Vec<_>>();
@@ -536,7 +856,7 @@ fn reconcile_port_forward_commands_with_allow_ports(
                 "-m",
                 "comment",
                 "--comment",
-                HYSTERIA_PORT_FORWARD_COMMENT,
+                &rule.comment,
                 "-j",
                 "REDIRECT",
                 "--to-ports",
@@ -551,20 +871,84 @@ fn reconcile_port_forward_commands_with_allow_ports(
         });
     }
 
-    for port in allow_ports {
+    for rule in allow_rules {
         commands.push(PortForwardCommand {
             tool: tool.to_string(),
             args: vec![
                 "-I".to_string(),
                 "INPUT".to_string(),
                 "-p".to_string(),
-                "udp".to_string(),
+                rule.protocol.clone(),
                 "--dport".to_string(),
-                port.to_string(),
+                rule.port.to_string(),
                 "-m".to_string(),
                 "comment".to_string(),
                 "--comment".to_string(),
-                HYSTERIA_PORT_FORWARD_COMMENT.to_string(),
+                rule.comment.clone(),
+                "-j".to_string(),
+                "ACCEPT".to_string(),
+            ],
+        });
+    }
+
+    commands
+}
+
+fn reconcile_port_forward_commands_for_comment(
+    tool: &str,
+    rules: &[PortForwardRule],
+    allow_rules: &[FirewallAllowRule],
+    prerouting_output: &str,
+    input_output: &str,
+    comment: &str,
+) -> Vec<PortForwardCommand> {
+    let mut commands = delete_port_forward_commands_with_comment(tool, prerouting_output, comment);
+    commands.extend(delete_firewall_allow_commands_with_comment(
+        tool,
+        input_output,
+        comment,
+    ));
+
+    for rule in rules {
+        let mut args = vec!["-t", "nat", "-A", "PREROUTING", "-p", &rule.protocol]
+            .into_iter()
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        args.extend(rule.matcher.args.clone());
+        args.extend(
+            [
+                "-m",
+                "comment",
+                "--comment",
+                &rule.comment,
+                "-j",
+                "REDIRECT",
+                "--to-ports",
+            ]
+            .into_iter()
+            .map(str::to_string),
+        );
+        args.push(rule.target_port.to_string());
+        commands.push(PortForwardCommand {
+            tool: tool.to_string(),
+            args,
+        });
+    }
+
+    for rule in allow_rules {
+        commands.push(PortForwardCommand {
+            tool: tool.to_string(),
+            args: vec![
+                "-I".to_string(),
+                "INPUT".to_string(),
+                "-p".to_string(),
+                rule.protocol.clone(),
+                "--dport".to_string(),
+                rule.port.to_string(),
+                "-m".to_string(),
+                "comment".to_string(),
+                "--comment".to_string(),
+                rule.comment.clone(),
                 "-j".to_string(),
                 "ACCEPT".to_string(),
             ],
@@ -603,11 +987,11 @@ fn cleanup_port_forward_commands_with_filter(
     commands
 }
 
-pub fn execute_reconcile_port_forward_tool<E: PortForwardExecutor>(
+fn execute_reconcile_port_forward_tool<E: PortForwardExecutor>(
     executor: &mut E,
     tool: &str,
     rules: &[PortForwardRule],
-    allow_ports: &[u16],
+    allow_rules: &[FirewallAllowRule],
 ) -> Result<(), String> {
     let prerouting_output = executor
         .command_output(&command(tool, vec!["-t", "nat", "-S", "PREROUTING"]))
@@ -626,7 +1010,7 @@ pub fn execute_reconcile_port_forward_tool<E: PortForwardExecutor>(
         &reconcile_port_forward_commands_with_allow_ports(
             tool,
             rules,
-            allow_ports,
+            allow_rules,
             &prerouting_output,
             &input_output,
             chain_exists,
@@ -661,6 +1045,31 @@ pub fn execute_cleanup_port_forward_tool<E: PortForwardExecutor>(
     )
 }
 
+fn execute_mieru_port_forward_tool<E: PortForwardExecutor>(
+    executor: &mut E,
+    tool: &str,
+    rules: &[PortForwardRule],
+    allow_rules: &[FirewallAllowRule],
+) -> Result<(), String> {
+    let prerouting_output = executor
+        .command_output(&command(tool, vec!["-t", "nat", "-S", "PREROUTING"]))
+        .unwrap_or_default();
+    let input_output = executor
+        .command_output(&command(tool, vec!["-S", "INPUT"]))
+        .unwrap_or_default();
+    execute_port_forward_commands(
+        executor,
+        &reconcile_port_forward_commands_for_comment(
+            tool,
+            rules,
+            allow_rules,
+            &prerouting_output,
+            &input_output,
+            MIERU_PORT_FORWARD_COMMENT,
+        ),
+    )
+}
+
 pub fn execute_port_forward_commands<E: PortForwardExecutor>(
     executor: &mut E,
     commands: &[PortForwardCommand],
@@ -675,11 +1084,23 @@ pub fn delete_port_forward_commands(
     tool: &str,
     prerouting_output: &str,
 ) -> Vec<PortForwardCommand> {
+    delete_port_forward_commands_with_comment(
+        tool,
+        prerouting_output,
+        HYSTERIA_PORT_FORWARD_COMMENT,
+    )
+}
+
+fn delete_port_forward_commands_with_comment(
+    tool: &str,
+    prerouting_output: &str,
+    comment: &str,
+) -> Vec<PortForwardCommand> {
     prerouting_output
         .lines()
         .filter_map(|line| {
             let mut fields = parse_iptables_spec(line.trim());
-            if !is_port_forward_rule_spec(&fields) {
+            if !is_port_forward_rule_spec_with_comment(&fields, comment) {
                 return None;
             }
             fields[0] = "-D".to_string();
@@ -694,11 +1115,19 @@ pub fn delete_port_forward_commands(
 }
 
 fn delete_firewall_allow_commands(tool: &str, input_output: &str) -> Vec<PortForwardCommand> {
+    delete_firewall_allow_commands_with_comment(tool, input_output, HYSTERIA_PORT_FORWARD_COMMENT)
+}
+
+fn delete_firewall_allow_commands_with_comment(
+    tool: &str,
+    input_output: &str,
+    comment: &str,
+) -> Vec<PortForwardCommand> {
     input_output
         .lines()
         .filter_map(|line| {
             let mut fields = parse_iptables_spec(line.trim());
-            if !is_firewall_allow_rule_spec(&fields) {
+            if !is_firewall_allow_rule_spec_with_comment(&fields, comment) {
                 return None;
             }
             fields[0] = "-D".to_string();
@@ -719,13 +1148,13 @@ pub fn expected_port_forward_specs(rules: &[PortForwardRule]) -> Vec<String> {
 
 fn expected_hysteria_managed_specs(
     nat_rules: &[PortForwardRule],
-    allow_ports: &[u16],
+    allow_rules: &[FirewallAllowRule],
 ) -> Vec<String> {
     let mut specs = expected_port_forward_specs(nat_rules);
     specs.extend(
-        allow_ports
+        allow_rules
             .iter()
-            .map(|port| expected_firewall_allow_spec_fields(*port).join(" ")),
+            .map(|rule| expected_firewall_allow_spec_fields(rule).join(" ")),
     );
     specs
 }
@@ -735,14 +1164,14 @@ pub fn expected_port_forward_spec_fields(rule: &PortForwardRule) -> Vec<String> 
         "-A".to_string(),
         "PREROUTING".to_string(),
         "-p".to_string(),
-        "udp".to_string(),
+        rule.protocol.clone(),
     ];
     fields.extend(rule.matcher.args.clone());
     fields.extend([
         "-m".to_string(),
         "comment".to_string(),
         "--comment".to_string(),
-        HYSTERIA_PORT_FORWARD_COMMENT.to_string(),
+        rule.comment.clone(),
         "-j".to_string(),
         "REDIRECT".to_string(),
         "--to-ports".to_string(),
@@ -751,29 +1180,33 @@ pub fn expected_port_forward_spec_fields(rule: &PortForwardRule) -> Vec<String> 
     normalize_port_forward_spec_fields(&fields)
 }
 
-fn expected_firewall_allow_spec_fields(port: u16) -> Vec<String> {
+fn expected_firewall_allow_spec_fields(rule: &FirewallAllowRule) -> Vec<String> {
     normalize_port_forward_spec_fields(&[
         "-A".to_string(),
         "INPUT".to_string(),
         "-p".to_string(),
-        "udp".to_string(),
+        rule.protocol.clone(),
         "--dport".to_string(),
-        port.to_string(),
+        rule.port.to_string(),
         "-m".to_string(),
         "comment".to_string(),
         "--comment".to_string(),
-        HYSTERIA_PORT_FORWARD_COMMENT.to_string(),
+        rule.comment.clone(),
         "-j".to_string(),
         "ACCEPT".to_string(),
     ])
 }
 
 pub fn list_port_forward_specs_from_output(output: &str) -> Vec<String> {
+    list_port_forward_specs_from_output_with_comment(output, HYSTERIA_PORT_FORWARD_COMMENT)
+}
+
+fn list_port_forward_specs_from_output_with_comment(output: &str, comment: &str) -> Vec<String> {
     output
         .lines()
         .filter_map(|line| {
             let fields = parse_iptables_spec(line.trim());
-            if is_port_forward_rule_spec(&fields) {
+            if is_port_forward_rule_spec_with_comment(&fields, comment) {
                 Some(normalize_port_forward_spec_fields(&fields).join(" "))
             } else {
                 None
@@ -783,11 +1216,15 @@ pub fn list_port_forward_specs_from_output(output: &str) -> Vec<String> {
 }
 
 fn list_firewall_allow_specs_from_output(output: &str) -> Vec<String> {
+    list_firewall_allow_specs_from_output_with_comment(output, HYSTERIA_PORT_FORWARD_COMMENT)
+}
+
+fn list_firewall_allow_specs_from_output_with_comment(output: &str, comment: &str) -> Vec<String> {
     output
         .lines()
         .filter_map(|line| {
             let fields = parse_iptables_spec(line.trim());
-            if is_firewall_allow_rule_spec(&fields) {
+            if is_firewall_allow_rule_spec_with_comment(&fields, comment) {
                 Some(normalize_port_forward_spec_fields(&fields).join(" "))
             } else {
                 None
@@ -797,16 +1234,22 @@ fn list_firewall_allow_specs_from_output(output: &str) -> Vec<String> {
 }
 
 pub fn is_port_forward_rule_spec(fields: &[String]) -> bool {
+    is_port_forward_rule_spec_with_comment(fields, HYSTERIA_PORT_FORWARD_COMMENT)
+}
+
+fn is_port_forward_rule_spec_with_comment(fields: &[String], comment: &str) -> bool {
     if fields.len() < 4 || fields[0] != "-A" || fields[1] != "PREROUTING" {
         return false;
     }
     for index in 2..fields.len().saturating_sub(1) {
-        if fields[index] == "-j" && fields[index + 1] == HYSTERIA_PORT_FORWARD_CHAIN {
+        if comment == HYSTERIA_PORT_FORWARD_COMMENT
+            && fields[index] == "-j"
+            && fields[index + 1] == HYSTERIA_PORT_FORWARD_CHAIN
+        {
             return true;
         }
         if fields[index] == "--comment"
-            && fields[index + 1].trim_matches(|value| value == '"' || value == '\'')
-                == HYSTERIA_PORT_FORWARD_COMMENT
+            && fields[index + 1].trim_matches(|value| value == '"' || value == '\'') == comment
         {
             return true;
         }
@@ -814,7 +1257,7 @@ pub fn is_port_forward_rule_spec(fields: &[String]) -> bool {
     false
 }
 
-fn is_firewall_allow_rule_spec(fields: &[String]) -> bool {
+fn is_firewall_allow_rule_spec_with_comment(fields: &[String], comment: &str) -> bool {
     if fields.len() < 4 || fields[0] != "-A" || fields[1] != "INPUT" {
         return false;
     }
@@ -822,8 +1265,7 @@ fn is_firewall_allow_rule_spec(fields: &[String]) -> bool {
     let mut accepts = false;
     for index in 2..fields.len().saturating_sub(1) {
         if fields[index] == "--comment"
-            && fields[index + 1].trim_matches(|value| value == '"' || value == '\'')
-                == HYSTERIA_PORT_FORWARD_COMMENT
+            && fields[index + 1].trim_matches(|value| value == '"' || value == '\'') == comment
         {
             has_comment = true;
         }
@@ -1179,6 +1621,36 @@ fn collect_hysteria_target_ports(infos: &[NodeInfo]) -> BTreeMap<u16, u32> {
         .collect()
 }
 
+fn collect_mieru_target_ports_by_protocol(
+    infos: &[NodeInfo],
+) -> BTreeMap<&'static str, BTreeMap<u16, u32>> {
+    let mut out: BTreeMap<&'static str, BTreeMap<u16, u32>> = BTreeMap::new();
+    for info in infos {
+        if !matches!(info.protocol, Protocol::Mieru) || info.common.server_port == 0 {
+            continue;
+        }
+        let Ok(protocol) = mieru_port_forward_protocol(&info.common.transport) else {
+            continue;
+        };
+        out.entry(protocol)
+            .or_default()
+            .insert(info.common.server_port, info.id);
+    }
+    out
+}
+
+fn mieru_port_forward_protocol(raw: &str) -> Result<&'static str, String> {
+    let value = raw.trim();
+    if value.is_empty() {
+        return Ok("tcp");
+    }
+    match value.to_ascii_uppercase().as_str() {
+        "TCP" => Ok("tcp"),
+        "UDP" => Ok("udp"),
+        other => Err(format!("unsupported transport {other}")),
+    }
+}
+
 fn trim_target_port_conflicts(
     mut ranges: Vec<PortForwardRange>,
     target_port: u16,
@@ -1196,10 +1668,11 @@ fn trim_target_port_conflicts(
 fn trim_allocated_range_conflicts(
     mut ranges: Vec<PortForwardRange>,
     target_port: u16,
+    protocol: &str,
     allocated: &[AllocatedPortForwardRange],
 ) -> Vec<PortForwardRange> {
     for existing in allocated {
-        if existing.target_port == target_port {
+        if existing.target_port == target_port || existing.protocol != protocol {
             continue;
         }
         ranges = subtract_range(ranges, existing.range);
@@ -1285,12 +1758,14 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        build_hysteria_port_forward_rules, cleanup_hysteria_port_forward,
-        expected_port_forward_specs, hysteria_port_forward_needs_repair,
-        inspect_hysteria_port_forward, inspect_port_forward_specs,
-        list_port_forward_specs_from_output, new_hysteria_port_forward_status, parse_iptables_spec,
-        parse_port_forward_matchers, reconcile_port_forward_commands, repair_hysteria_port_forward,
-        PortForwardCommand, PortForwardExecutor,
+        build_hysteria_port_forward_rules, build_mieru_port_forward_rules,
+        cleanup_hysteria_port_forward, expected_port_forward_specs,
+        hysteria_port_forward_needs_repair, inspect_hysteria_port_forward,
+        inspect_port_forward_specs, list_port_forward_specs_from_output,
+        list_port_forward_specs_from_output_with_comment, new_hysteria_port_forward_status,
+        parse_iptables_spec, parse_port_forward_matchers, reconcile_port_forward_commands,
+        repair_hysteria_port_forward, PortForwardCommand, PortForwardExecutor,
+        MIERU_PORT_FORWARD_COMMENT,
     };
     use crate::panel::types::{CommonNode, NodeInfo};
 
@@ -1332,6 +1807,44 @@ mod tests {
         ]);
 
         assert_eq!(got, want);
+    }
+
+    #[test]
+    fn builds_mieru_port_forward_rules_for_tcp_and_udp() {
+        let infos = vec![
+            mieru_node(11, 28870, "30000-30002", "", "tcp"),
+            mieru_node(12, 28871, "", "31000-31001", "udp"),
+        ];
+
+        let (rules, errors) = build_mieru_port_forward_rules(&infos);
+
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(
+            expected_port_forward_specs(&rules),
+            vec![
+                "-A PREROUTING -p tcp --dport 30000:30002 -m comment --comment V2NODE-MIERU -j REDIRECT --to-ports 28870",
+                "-A PREROUTING -p udp --dport 31000:31001 -m comment --comment V2NODE-MIERU -j REDIRECT --to-ports 28871",
+            ]
+        );
+    }
+
+    #[test]
+    fn allows_mieru_tcp_and_udp_to_share_external_port_range() {
+        let infos = vec![
+            mieru_node(11, 28870, "30000-30002", "", "tcp"),
+            mieru_node(12, 28871, "30000-30002", "", "udp"),
+        ];
+
+        let (rules, errors) = build_mieru_port_forward_rules(&infos);
+
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(
+            expected_port_forward_specs(&rules),
+            vec![
+                "-A PREROUTING -p tcp --dport 30000:30002 -m comment --comment V2NODE-MIERU -j REDIRECT --to-ports 28870",
+                "-A PREROUTING -p udp --dport 30000:30002 -m comment --comment V2NODE-MIERU -j REDIRECT --to-ports 28871",
+            ]
+        );
     }
 
     #[test]
@@ -1503,6 +2016,23 @@ mod tests {
             specs[1],
             "-A PREROUTING -p udp --dport 30000:30002 -m comment --comment V2NODE-HY2 -j REDIRECT --to-ports 443"
         );
+    }
+
+    #[test]
+    fn lists_only_mieru_port_forward_specs() {
+        let output = [
+            "-A PREROUTING -p udp -m udp --dport 10000:10002 -j V2NODE-HY2",
+            "-A PREROUTING -p tcp -m tcp --dport 30000:30002 -m comment --comment \"V2NODE-MIERU\" -j REDIRECT --to-ports 28870",
+            "-A PREROUTING -p udp --dport 31000:31002 -m comment --comment V2NODE-MIERU -j REDIRECT --to-ports 28871",
+        ]
+        .join("\n");
+
+        let specs =
+            list_port_forward_specs_from_output_with_comment(&output, MIERU_PORT_FORWARD_COMMENT);
+
+        assert_eq!(specs.len(), 2, "{specs:?}");
+        assert!(specs.iter().all(|spec| spec.contains("V2NODE-MIERU")));
+        assert!(specs.iter().all(|spec| !spec.contains("-j V2NODE-HY2")));
     }
 
     #[test]
@@ -1949,6 +2479,18 @@ mod tests {
             "server_port": server_port,
             "port": port,
             "ports": ports
+        }))
+        .unwrap();
+        NodeInfo::from_common("https://panel.example.test", id, common).unwrap()
+    }
+
+    fn mieru_node(id: u32, server_port: u16, port: &str, ports: &str, transport: &str) -> NodeInfo {
+        let common: CommonNode = serde_json::from_value(json!({
+            "protocol": "mieru",
+            "server_port": server_port,
+            "port": port,
+            "ports": ports,
+            "transport": transport
         }))
         .unwrap();
         NodeInfo::from_common("https://panel.example.test", id, common).unwrap()

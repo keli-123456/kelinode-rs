@@ -11,7 +11,8 @@ use crate::machine::{resolve_machine_profiles_from_panel, MachineResolveSummary}
 use crate::node::{users_by_node_tag, NodeFailure, NodeManager, NodeManagerOptions};
 use crate::panel::types::{NodeInfo, UserInfo};
 use crate::port_forward::{
-    build_hysteria_port_forward_rules, new_hysteria_port_forward_status, HysteriaPortForwardStatus,
+    build_hysteria_port_forward_rules, new_hysteria_port_forward_status,
+    new_mieru_port_forward_status, HysteriaPortForwardStatus,
 };
 use crate::realtime::{resolve_realtime_options, RealtimeOptions};
 
@@ -39,6 +40,7 @@ pub struct RuntimeBootstrapPlan {
     pub core_plan: Option<CorePlan>,
     pub realtime_options: Vec<RealtimeOptions>,
     pub hy2_port_forward: HysteriaPortForwardStatus,
+    pub mieru_port_forward: HysteriaPortForwardStatus,
     pub subscription_proxy_only: bool,
 }
 
@@ -155,6 +157,7 @@ pub fn build_runtime_bootstrap_plan_with_users(
         &mut core_bundle,
     )?;
     let (hy2_rules, hy2_errors) = build_hysteria_port_forward_rules(&node_infos);
+    let mieru_port_forward = new_mieru_port_forward_status(&node_infos, false);
     let realtime_options = resolve_realtime_options_for_nodes(&resolved, &node_infos);
     let bootstrap = Bootstrap::from_resolved(&resolved);
 
@@ -167,6 +170,7 @@ pub fn build_runtime_bootstrap_plan_with_users(
         core_plan: core_bundle.core,
         realtime_options,
         hy2_port_forward: new_hysteria_port_forward_status(&hy2_rules, &hy2_errors, false),
+        mieru_port_forward,
         subscription_proxy_only,
     })
 }

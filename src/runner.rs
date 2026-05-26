@@ -8,9 +8,7 @@ use crate::control::{
     report_runtime_apply_result_to_panels, run_runtime_tick, runtime_loop_signal,
     RuntimeControlOptions, RuntimeLoopSignal, RuntimeTickOptions,
 };
-use crate::core::{
-    effective_device_limit, node_device_limit_fallback, parse_keli_core_rs_port_range, CorePlan,
-};
+use crate::core::{effective_device_limit, node_device_limit_fallback, CorePlan};
 use crate::core_control::{KeliCoreUserDeltaApplyResult, KELI_CORE_APPLY_CONTROL_TIMEOUT};
 use crate::health::ResourceSnapshot;
 use crate::logging;
@@ -822,13 +820,7 @@ fn keli_core_user_delta_target_tags(
     let expanded_prefix = format!("{node_tag}|port:");
     for inbound in &core_plan.inbounds {
         if inbound.tag == node_tag {
-            if inbound.protocol == "mieru" && !inbound.port_range.trim().is_empty() {
-                for port in parse_keli_core_rs_port_range(&inbound.port_range)? {
-                    targets.push(format!("{node_tag}|port:{port}"));
-                }
-            } else {
-                targets.push(node_tag.to_string());
-            }
+            targets.push(node_tag.to_string());
         } else if inbound.tag.starts_with(&expanded_prefix) {
             expanded_targets.push(inbound.tag.clone());
         }
@@ -2374,8 +2366,8 @@ mod tests {
     }
 
     #[test]
-    fn keli_core_user_delta_fans_out_mieru_port_range_targets() {
-        let dir = temp_test_dir("user-delta-mieru-port-range-fanout");
+    fn keli_core_user_delta_targets_mieru_backend_listener_for_port_range() {
+        let dir = temp_test_dir("user-delta-mieru-port-range-backend");
         let mut resolved = ResolvedConfig {
             kernel: Default::default(),
             realtime: Default::default(),
@@ -2450,12 +2442,12 @@ mod tests {
         let control_addr = keli_core_rs_control_addr(&config_path);
         let listener = TcpListener::bind(&control_addr).unwrap();
         listener.set_nonblocking(true).unwrap();
-        let expected_tags = [format!("{tag}|port:2100"), format!("{tag}|port:2101")];
+        let expected_tags = [tag.clone()];
         let expected_tags_for_thread = expected_tags.clone();
         let new_uuid_for_thread = new_user.uuid.clone();
         let control_thread = thread::spawn(move || {
             let mut received = Vec::new();
-            for index in 0..2 {
+            for index in 0..1 {
                 let deadline = Instant::now() + Duration::from_secs(2);
                 let (mut stream, _) = loop {
                     match listener.accept() {
@@ -2509,7 +2501,7 @@ mod tests {
 
         assert_eq!(metrics.kelinode_user_delta_skipped_port_range_total, 0);
         assert_eq!(metrics.kelinode_user_delta_full_rebuild_total, 0);
-        assert_eq!(metrics.kelinode_user_delta_native_apply_success_total, 2);
+        assert_eq!(metrics.kelinode_user_delta_native_apply_success_total, 1);
         let status = metrics.status_value();
         assert_eq!(
             status["kelinode_user_delta_skipped_port_range_total"],
@@ -2574,8 +2566,8 @@ mod tests {
     }
 
     #[test]
-    fn revision_baseline_fans_out_mieru_port_range_targets() {
-        let dir = temp_test_dir("revision-baseline-mieru-port-range-fanout");
+    fn revision_baseline_targets_mieru_backend_listener_for_port_range() {
+        let dir = temp_test_dir("revision-baseline-mieru-port-range-backend");
         let mut resolved = ResolvedConfig {
             kernel: Default::default(),
             realtime: Default::default(),
@@ -2631,12 +2623,12 @@ mod tests {
         let control_addr = keli_core_rs_control_addr(&config_path);
         let listener = TcpListener::bind(&control_addr).unwrap();
         listener.set_nonblocking(true).unwrap();
-        let expected_tags = [format!("{tag}|port:2200"), format!("{tag}|port:2201")];
+        let expected_tags = [tag.clone()];
         let expected_tags_for_thread = expected_tags.clone();
         let user_uuid_for_thread = user.uuid.clone();
         let control_thread = thread::spawn(move || {
             let mut received = Vec::new();
-            for index in 0..2 {
+            for index in 0..1 {
                 let deadline = Instant::now() + Duration::from_secs(2);
                 let (mut stream, _) = loop {
                     match listener.accept() {
