@@ -40,7 +40,7 @@ pub struct RuntimeControlOptions {
     pub health: HealthReportInput,
 }
 
-const CLEAN_PORT_FORWARD_LOG_INTERVAL_SECS: i64 = 60;
+const CLEAN_PORT_FORWARD_LOG_INTERVAL_SECS: i64 = 300;
 
 #[derive(Debug, Default)]
 struct CleanPortForwardLogState {
@@ -1160,13 +1160,16 @@ mod tests {
         assert!(!should_log_clean_port_forward_status_at(
             &mut state, &summary, 1_030
         ));
+        assert!(!should_log_clean_port_forward_status_at(
+            &mut state, &summary, 1_299
+        ));
         assert!(should_log_clean_port_forward_status_at(
-            &mut state, &summary, 1_060
+            &mut state, &summary, 1_300
         ));
         assert!(should_log_clean_port_forward_status_at(
             &mut state,
             &format!("{summary} changed"),
-            1_061
+            1_301
         ));
     }
 
