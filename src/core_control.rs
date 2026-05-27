@@ -65,6 +65,7 @@ enum KeliCoreCommand {
     },
     Status,
     Metrics,
+    TrimMemory,
     Stop,
 }
 
@@ -102,6 +103,7 @@ pub enum KeliCoreResponse {
     Metrics {
         metrics: Value,
     },
+    MemoryTrimmed,
     Stopped,
     Error {
         message: String,
@@ -202,6 +204,16 @@ impl KeliCoreControlClient {
             KeliCoreResponse::Error { message } => Err(KeliCoreControlError::new(message)),
             response => Err(KeliCoreControlError::new(format!(
                 "unexpected keli-core-rs metrics response: {response:?}"
+            ))),
+        }
+    }
+
+    pub fn trim_memory(&self) -> Result<(), KeliCoreControlError> {
+        match self.send(&KeliCoreCommand::TrimMemory)? {
+            KeliCoreResponse::MemoryTrimmed => Ok(()),
+            KeliCoreResponse::Error { message } => Err(KeliCoreControlError::new(message)),
+            response => Err(KeliCoreControlError::new(format!(
+                "unexpected keli-core-rs trim memory response: {response:?}"
             ))),
         }
     }
@@ -545,6 +557,30 @@ mod tests {
             metrics["keli_core_user_delta_full_snapshot_total"],
             json!(1)
         );
+        join.join().unwrap();
+    }
+
+    #[test]
+    fn sends_trim_memory_command() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let join = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut command = String::new();
+            BufReader::new(stream.try_clone().unwrap())
+                .read_line(&mut command)
+                .unwrap();
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(command.trim()).unwrap(),
+                json!({ "type": "trim_memory" })
+            );
+            writeln!(stream, "{}", json!({ "type": "memory_trimmed" })).unwrap();
+        });
+
+        KeliCoreControlClient::new(addr.to_string())
+            .trim_memory()
+            .unwrap();
+
         join.join().unwrap();
     }
 

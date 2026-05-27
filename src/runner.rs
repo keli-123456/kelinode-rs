@@ -10,7 +10,9 @@ use crate::control::{
     RuntimeControlOptions, RuntimeLoopSignal, RuntimeTickOptions,
 };
 use crate::core::{effective_device_limit, node_device_limit_fallback, CorePlan};
-use crate::core_control::{KeliCoreUserDeltaApplyResult, KELI_CORE_APPLY_CONTROL_TIMEOUT};
+use crate::core_control::{
+    KeliCoreControlClient, KeliCoreUserDeltaApplyResult, KELI_CORE_APPLY_CONTROL_TIMEOUT,
+};
 use crate::health::ResourceSnapshot;
 use crate::logging;
 use crate::panel::client::{PanelClient, PanelClientOptions};
@@ -965,6 +967,7 @@ fn try_apply_keli_core_rs_user_deltas(
                     match client.apply_user_delta(target_tag.clone(), full_delta) {
                         Ok(result) => {
                             metrics.record_success();
+                            nonfatal_keli_core_memory_trim(&client);
                             logging::info(
                                 "users",
                                 keli_core_user_full_snapshot_apply_log_message(
@@ -1003,8 +1006,19 @@ fn try_apply_keli_core_rs_user_deltas(
                 }
             }
         }
+        drop(delta);
+        nonfatal_keli_core_memory_trim(&client);
     }
     RuntimeUserDeltaApplyOutcome::Applied
+}
+
+fn nonfatal_keli_core_memory_trim(client: &KeliCoreControlClient) {
+    if let Err(error) = client.trim_memory() {
+        logging::warn(
+            "core",
+            format!("keli-core-rs memory trim skipped error={}", error.message),
+        );
+    }
 }
 
 fn keli_core_user_delta_target_tags(
@@ -4513,7 +4527,7 @@ mod tests {
         let tag_for_thread = tag.clone();
         let new_uuid_for_thread = new_user.uuid.clone();
         let control_thread = thread::spawn(move || {
-            for index in 0..3 {
+            for index in 0..4 {
                 let deadline = Instant::now() + Duration::from_secs(2);
                 let (mut stream, _) = loop {
                     match listener.accept() {
@@ -4557,6 +4571,10 @@ mod tests {
                             })
                         )
                         .unwrap();
+                    }
+                    2 => {
+                        assert_eq!(command["type"], "trim_memory");
+                        writeln!(stream, "{}", json!({ "type": "memory_trimmed" })).unwrap();
                     }
                     _ => {
                         assert_eq!(command["type"], "apply_user_delta");

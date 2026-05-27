@@ -8,7 +8,9 @@ use crate::core::{
     render_core_config, render_core_config_without_users, write_core_config, CoreConfigWriteResult,
     CoreKind, CorePlan,
 };
-use crate::core_control::{KeliCoreResponse, KELI_CORE_APPLY_CONTROL_TIMEOUT};
+use crate::core_control::{
+    KeliCoreControlClient, KeliCoreResponse, KELI_CORE_APPLY_CONTROL_TIMEOUT,
+};
 use crate::health::{build_machine_status_payload, HealthReportInput};
 use crate::logging;
 use crate::machine::{MachineStatusPayload, MachineStatusResponse, MachineUpgradeCommand};
@@ -127,6 +129,7 @@ where
 
     if let Some(core_plan) = report_plan.core_plan.as_ref() {
         let write_result = write_core_config(core_plan).map_err(|err| err.message)?;
+        trim_embedded_core_process_memory_after_local_work();
         if options.start_core {
             let status =
                 apply_core_process(core_plan, &write_result, process_supervisor, &options)?;
@@ -676,6 +679,7 @@ where
             Ok(KeliCoreResponse::Applied { decision, .. }) => {
                 let mut status = current;
                 status.message = format!("hot applied keli-core-rs routes ({decision})");
+                trim_keli_core_rs_memory(&client);
                 return Ok(Some(status));
             }
             Ok(KeliCoreResponse::Error { .. }) | Err(_) => {}
@@ -692,6 +696,7 @@ where
         Ok(KeliCoreResponse::Applied { decision, .. }) => {
             let mut status = current;
             status.message = format!("hot applied keli-core-rs config ({decision})");
+            trim_keli_core_rs_memory(&client);
             Ok(Some(status))
         }
         Ok(KeliCoreResponse::Error { message }) => Err(HotApplyError::fatal(format!(
@@ -702,6 +707,20 @@ where
         ))),
         Err(error) => Err(HotApplyError::fallback(error.message)),
     }
+}
+
+fn trim_keli_core_rs_memory(client: &KeliCoreControlClient) {
+    if let Err(error) = client.trim_memory() {
+        logging::warn(
+            "core",
+            format!("keli-core-rs memory trim skipped error={}", error.message),
+        );
+    }
+}
+
+fn trim_embedded_core_process_memory_after_local_work() {
+    #[cfg(feature = "embedded-core")]
+    keli_core_rs::trim_process_memory();
 }
 
 impl HotApplyError {
