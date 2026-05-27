@@ -209,6 +209,8 @@ struct RuntimeUserSyncEntry {
 
 const UNCHANGED_PANEL_USER_LOG_INTERVAL_SECS: i64 = 60;
 const UNCHANGED_PANEL_USER_SUMMARY_LOG_KEY: &str = "panel-user-sync-unchanged-summary";
+const KELI_CORE_RELAY_METRICS_LOG_INTERVAL_SECS: i64 = 60;
+const KELI_CORE_RELAY_METRICS_LOG_KEY: &str = "keli-core-relay-metrics";
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct RuntimeUserDeltaChange {
@@ -504,6 +506,11 @@ where
             });
             match keli_core_rs_metrics_snapshot(&self.plan) {
                 Ok(Some(core_metrics)) => {
+                    if let Some(message) = keli_core_relay_metrics_log_message(&core_metrics) {
+                        if should_log_keli_core_relay_metrics() {
+                            logging::info("core", message);
+                        }
+                    }
                     metrics["keli_core_rs"] = core_metrics;
                 }
                 Ok(None) => {}
@@ -705,6 +712,77 @@ fn should_log_panel_user_sync_unchanged_at(
         Some(last) if now >= last && now - last < UNCHANGED_PANEL_USER_LOG_INTERVAL_SECS => false,
         _ => {
             logs.insert(key, now);
+            true
+        }
+    }
+}
+
+fn keli_core_relay_metrics_log_message(metrics: &Value) -> Option<String> {
+    let native_workers = metric_u64(metrics, "keli_core_native_relay_workers");
+    let native_idle = metric_u64(metrics, "keli_core_native_relay_idle");
+    let native_pending = metric_u64(metrics, "keli_core_native_relay_pending");
+    let active_native = metric_top_counts(metrics, "keli_core_native_relay_active", 5);
+    let active_async = metric_top_counts(metrics, "keli_core_async_relay_active", 5);
+    let active_blocking = metric_top_counts(metrics, "keli_core_detached_blocking_relay_active", 5);
+    if native_workers == 0
+        && native_idle == 0
+        && native_pending == 0
+        && active_native == "-"
+        && active_async == "-"
+        && active_blocking == "-"
+    {
+        return None;
+    }
+    Some(format!(
+        "relay scheduler native_workers={native_workers} native_idle={native_idle} native_pending={native_pending} active_native={active_native} active_async={active_async} active_blocking={active_blocking}"
+    ))
+}
+
+fn metric_u64(metrics: &Value, key: &str) -> u64 {
+    metrics.get(key).and_then(Value::as_u64).unwrap_or_default()
+}
+
+fn metric_top_counts(metrics: &Value, key: &str, limit: usize) -> String {
+    let Some(values) = metrics.get(key).and_then(Value::as_object) else {
+        return "-".to_string();
+    };
+    let mut counts = values
+        .iter()
+        .filter_map(|(name, value)| value.as_u64().map(|count| (name.as_str(), count)))
+        .filter(|(_, count)| *count > 0)
+        .collect::<Vec<_>>();
+    if counts.is_empty() {
+        return "-".to_string();
+    }
+    counts.sort_by(|(left_name, left_count), (right_name, right_count)| {
+        right_count
+            .cmp(left_count)
+            .then_with(|| left_name.cmp(right_name))
+    });
+    counts
+        .into_iter()
+        .take(limit)
+        .map(|(name, count)| format!("{name}:{count}"))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+fn should_log_keli_core_relay_metrics() -> bool {
+    static LAST_METRICS_LOGS: OnceLock<Mutex<BTreeMap<String, i64>>> = OnceLock::new();
+    let mut logs = LAST_METRICS_LOGS
+        .get_or_init(|| Mutex::new(BTreeMap::new()))
+        .lock()
+        .expect("keli-core relay metrics log state poisoned");
+    should_log_keli_core_relay_metrics_at(&mut logs, unix_now())
+}
+
+fn should_log_keli_core_relay_metrics_at(logs: &mut BTreeMap<String, i64>, now: i64) -> bool {
+    match logs.get(KELI_CORE_RELAY_METRICS_LOG_KEY).copied() {
+        Some(last) if now >= last && now - last < KELI_CORE_RELAY_METRICS_LOG_INTERVAL_SECS => {
+            false
+        }
+        _ => {
+            logs.insert(KELI_CORE_RELAY_METRICS_LOG_KEY.to_string(), now);
             true
         }
     }
@@ -1891,9 +1969,9 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::{
-        handle_runtime_loop_event, keli_core_rs_metrics_snapshot,
-        keli_core_user_delta_apply_log_message, keli_core_user_delta_payload,
-        keli_core_user_delta_requires_full_snapshot,
+        handle_runtime_loop_event, keli_core_relay_metrics_log_message,
+        keli_core_rs_metrics_snapshot, keli_core_user_delta_apply_log_message,
+        keli_core_user_delta_payload, keli_core_user_delta_requires_full_snapshot,
         keli_core_user_full_snapshot_apply_log_message, keli_core_user_full_snapshot_payload,
         load_users_by_node_tag_from_panel_with_state, node_config_for_info,
         nonfatal_keli_core_activity_report, nonfatal_panel_status_report,
@@ -1901,13 +1979,14 @@ mod tests {
         refresh_runtime_health, refresh_subscription_proxy_health, run_runtime_loop,
         run_runtime_loop_async, run_runtime_loop_async_with_events, runtime_loop_event_for_task,
         runtime_plan_needs_cached_users, runtime_user_delta_change,
-        should_log_panel_user_sync_unchanged_at, should_run, try_apply_keli_core_rs_user_deltas,
-        try_establish_keli_core_rs_revision_baseline, user_delta_body_is_revision_only,
-        user_delta_not_supported, user_device_limit_counts, user_sync_users_for_runtime_rebuild,
-        AsyncRuntimeLoopCallbacks, PanelRuntimeLoop, PanelUserSyncUnchangedSummary,
-        RuntimeLoopCallbacks, RuntimeLoopEvent, RuntimeLoopEventKind, RuntimeLoopExit,
-        RuntimeLoopExitReason, RuntimeLoopFuture, RuntimeLoopOptions, RuntimeUserDeltaApplyOutcome,
-        RuntimeUserDeltaChange, RuntimeUserDeltaMetrics, RuntimeUserSyncEntry,
+        should_log_keli_core_relay_metrics_at, should_log_panel_user_sync_unchanged_at, should_run,
+        try_apply_keli_core_rs_user_deltas, try_establish_keli_core_rs_revision_baseline,
+        user_delta_body_is_revision_only, user_delta_not_supported, user_device_limit_counts,
+        user_sync_users_for_runtime_rebuild, AsyncRuntimeLoopCallbacks, PanelRuntimeLoop,
+        PanelUserSyncUnchangedSummary, RuntimeLoopCallbacks, RuntimeLoopEvent,
+        RuntimeLoopEventKind, RuntimeLoopExit, RuntimeLoopExitReason, RuntimeLoopFuture,
+        RuntimeLoopOptions, RuntimeUserDeltaApplyOutcome, RuntimeUserDeltaChange,
+        RuntimeUserDeltaMetrics, RuntimeUserSyncEntry,
     };
     use crate::config::{NodeConfig, ResolvedConfig, ResolvedMachineConfig};
     use crate::control::RuntimeControlOptions;
@@ -2287,6 +2366,55 @@ mod tests {
             "https://panel.example.test|13|panel|trojan|13".to_string(),
             1_061
         ));
+    }
+
+    #[test]
+    fn core_relay_metrics_log_message_reports_top_active_labels() {
+        let metrics = json!({
+            "keli_core_native_relay_workers": 256,
+            "keli_core_native_relay_idle": 8,
+            "keli_core_native_relay_pending": 3,
+            "keli_core_native_relay_active": {
+                "keli-core-mieru-stream-upload": 17,
+                "keli-core-trojan-ws-upload": 181,
+                "keli-core-vless-vision-relay": 4
+            },
+            "keli_core_async_relay_active": {
+                "keli-core-trojan-relay": 734,
+                "keli-core-vless-relay": 12
+            },
+            "keli_core_detached_blocking_relay_active": {
+                "keli-core-vmess-bridge": 2
+            }
+        });
+
+        assert_eq!(
+            keli_core_relay_metrics_log_message(&metrics).as_deref(),
+            Some("relay scheduler native_workers=256 native_idle=8 native_pending=3 active_native=keli-core-trojan-ws-upload:181,keli-core-mieru-stream-upload:17,keli-core-vless-vision-relay:4 active_async=keli-core-trojan-relay:734,keli-core-vless-relay:12 active_blocking=keli-core-vmess-bridge:2")
+        );
+    }
+
+    #[test]
+    fn core_relay_metrics_log_message_skips_empty_metrics() {
+        let metrics = json!({
+            "keli_core_native_relay_workers": 0,
+            "keli_core_native_relay_idle": 0,
+            "keli_core_native_relay_pending": 0,
+            "keli_core_native_relay_active": {},
+            "keli_core_async_relay_active": {},
+            "keli_core_detached_blocking_relay_active": {}
+        });
+
+        assert_eq!(keli_core_relay_metrics_log_message(&metrics), None);
+    }
+
+    #[test]
+    fn core_relay_metrics_log_is_rate_limited() {
+        let mut logs = BTreeMap::new();
+
+        assert!(should_log_keli_core_relay_metrics_at(&mut logs, 1_000));
+        assert!(!should_log_keli_core_relay_metrics_at(&mut logs, 1_030));
+        assert!(should_log_keli_core_relay_metrics_at(&mut logs, 1_060));
     }
 
     #[test]
