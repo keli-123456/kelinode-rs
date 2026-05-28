@@ -592,7 +592,7 @@ pub fn plan_subscription_proxy_request(
         );
     }
     if let Some(ip) = client_ip(&request.remote_addr) {
-        headers.insert("X-Forwarded-For".to_string(), ip);
+        append_forwarded_for(&mut headers, &ip);
     }
 
     Ok(SubscriptionProxyRoute::Upstream(
@@ -1887,6 +1887,29 @@ fn forwarded_headers(source: &BTreeMap<String, String>) -> BTreeMap<String, Stri
         .collect()
 }
 
+fn append_forwarded_for(headers: &mut BTreeMap<String, String>, ip: &str) {
+    let ip = ip.trim();
+    if ip.is_empty() {
+        return;
+    }
+
+    let existing_key = headers
+        .keys()
+        .find(|key| key.eq_ignore_ascii_case("X-Forwarded-For"))
+        .cloned()
+        .unwrap_or_else(|| "X-Forwarded-For".to_string());
+    let existing = headers
+        .get(&existing_key)
+        .map(|value| value.trim())
+        .unwrap_or("");
+    let value = if existing.is_empty() {
+        ip.to_string()
+    } else {
+        format!("{existing}, {ip}")
+    };
+    headers.insert(existing_key, value);
+}
+
 fn is_hop_by_hop_header(key: &str) -> bool {
     matches!(
         key.to_ascii_lowercase().as_str(),
@@ -2879,6 +2902,8 @@ mod tests {
         headers.insert("User-Agent".to_string(), "Hiddify".to_string());
         headers.insert("Connection".to_string(), "close".to_string());
         headers.insert("Host".to_string(), "proxy.example.test".to_string());
+        headers.insert("X-Forwarded-For".to_string(), "203.0.113.9".to_string());
+        headers.insert("CF-Connecting-IP".to_string(), "203.0.113.9".to_string());
         let route = plan_subscription_proxy_request(
             &[SubscriptionProxyProfile {
                 site_id: "site-a".to_string(),
@@ -2906,7 +2931,11 @@ mod tests {
         );
         assert_eq!(upstream.headers["User-Agent"], "Hiddify");
         assert_eq!(upstream.headers["X-Forwarded-Host"], "proxy.example.test");
-        assert_eq!(upstream.headers["X-Forwarded-For"], "198.51.100.8");
+        assert_eq!(
+            upstream.headers["X-Forwarded-For"],
+            "203.0.113.9, 198.51.100.8"
+        );
+        assert_eq!(upstream.headers["CF-Connecting-IP"], "203.0.113.9");
         assert!(!upstream.headers.contains_key("Connection"));
         assert!(!upstream.headers.contains_key("Host"));
     }
