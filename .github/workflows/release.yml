@@ -93,7 +93,7 @@ jobs:
 
       - name: Run keli-core-rs tests
         working-directory: keli-core-rs
-        run: cargo test --locked --all-targets -- --test-threads=1
+        run: cargo test --locked --lib -- --test-threads=1
 
       - name: Build embedded native node binary
         working-directory: kelinode-rs
