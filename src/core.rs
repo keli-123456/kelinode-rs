@@ -1460,6 +1460,11 @@ fn keli_core_rs_route_targets(
                         inbound.tag
                     )));
                 }
+            } else if normalized.starts_with("source_ip:") {
+                return Err(CoreError::new(format!(
+                    "keli-core-rs source_ip rule {rule} on inbound {} is supported only by block action",
+                    inbound.tag
+                )));
             }
             Ok(rule.to_string())
         })
@@ -1547,6 +1552,13 @@ fn keli_core_rs_block_route_targets(
                 }
             } else if let Some(value) = normalized.strip_prefix("protocol:") {
                 if value.trim().is_empty() {
+                    return Err(CoreError::new(format!(
+                        "keli-core-rs block rule {rule} on inbound {} is not supported yet",
+                        inbound.tag
+                    )));
+                }
+            } else if normalized.starts_with("source_ip:") {
+                if !is_keli_core_rs_source_ip_route_rule(rule) {
                     return Err(CoreError::new(format!(
                         "keli-core-rs block rule {rule} on inbound {} is not supported yet",
                         inbound.tag
@@ -1649,6 +1661,16 @@ fn is_keli_core_rs_ip_route_rule(rule: &str) -> bool {
         IpAddr::V4(_) => prefix <= 32,
         IpAddr::V6(_) => prefix <= 128,
     }
+}
+
+fn is_keli_core_rs_source_ip_route_rule(rule: &str) -> bool {
+    let rule = rule.trim();
+    if !rule.to_ascii_lowercase().starts_with("source_ip:") {
+        return false;
+    }
+    let value = rule["source_ip:".len()..].trim();
+    let value = value.strip_prefix("ip:").unwrap_or(value);
+    is_keli_core_rs_ip_route_rule(value)
 }
 
 fn is_keli_core_rs_port_route_rule(rule: &str) -> bool {
@@ -4318,6 +4340,7 @@ mod tests {
                     "domain:example.com".to_string(),
                     "keyword:tracker".to_string(),
                     "network:udp".to_string(),
+                    "source_ip:203.0.113.0/24".to_string(),
                 ],
                 action: "block".to_string(),
                 action_value: None,
@@ -4359,6 +4382,10 @@ mod tests {
         assert_eq!(
             config["inbounds"][0]["routes"][0]["targets"][3],
             "network:udp"
+        );
+        assert_eq!(
+            config["inbounds"][0]["routes"][0]["targets"][4],
+            "source_ip:203.0.113.0/24"
         );
         assert_eq!(config["inbounds"][0]["routes"][0]["action"], "block");
         assert_eq!(
@@ -6591,6 +6618,24 @@ mod tests {
         let err = render_core_config(&plan).unwrap_err();
 
         assert!(err.message.contains("block rule keyword:"));
+
+        let mut node = test_node("socks", 82, "");
+        node.common.routes = vec![Route {
+            id: 1,
+            match_rules: vec!["source_ip:203.0.113.0/24".to_string()],
+            action: "route".to_string(),
+            action_value: Some(r#"{"tag":"direct-out","protocol":"freedom"}"#.to_string()),
+        }];
+        let plan = CorePlan::from_nodes(
+            CoreKind::KeliCoreRs,
+            PathBuf::from("/srv/v2node/keli-core-rs.json"),
+            &[node],
+        )
+        .unwrap();
+
+        let err = render_core_config(&plan).unwrap_err();
+
+        assert!(err.message.contains("source_ip rule"));
     }
 
     #[test]
