@@ -1777,7 +1777,7 @@ async fn load_users_by_node_tag_from_panel_with_state_and_mode(
         let entry = sync_state
             .entry(node.tag.clone())
             .or_insert_with(|| load_runtime_user_sync_entry(config));
-        match load_users_for_node(config, entry, &mut client).await {
+        match load_users_for_node(config, entry, &mut client, plan.core_plan.is_some()).await {
             Ok(()) => {}
             Err(error) if plan.resolved.machine.continue_on_error => {
                 logging::warn(
@@ -1846,14 +1846,19 @@ async fn load_users_for_node(
     config: &NodeConfig,
     entry: &mut RuntimeUserSyncEntry,
     client: &mut PanelClient,
+    native_core_delta_enabled: bool,
 ) -> Result<(), String> {
     if entry.delta_supported {
         let base_revision = entry.state.revision;
         match client.get_user_delta(entry.state.revision).await {
             Ok(delta) => {
                 if user_delta_body_is_revision_only(&delta) && !entry.state.users.is_empty() {
-                    entry.state.revision = delta.revision;
-                    entry.last_change = None;
+                    apply_revision_only_user_delta(
+                        entry,
+                        base_revision,
+                        delta.revision,
+                        native_core_delta_enabled,
+                    );
                     return Ok(());
                 }
                 let diff = user_delta_body_diff(&entry.state, &delta);
@@ -1910,6 +1915,23 @@ async fn load_users_for_node(
     }
     save_runtime_user_sync_entry(entry);
     Ok(())
+}
+
+fn apply_revision_only_user_delta(
+    entry: &mut RuntimeUserSyncEntry,
+    base_revision: i64,
+    revision: i64,
+    native_core_delta_enabled: bool,
+) {
+    entry.state.revision = revision;
+    entry.last_change = if native_core_delta_enabled {
+        runtime_user_delta_change(false, base_revision, revision, UserListDiff::default())
+    } else {
+        None
+    };
+    if entry.last_change.is_some() {
+        save_runtime_user_sync_entry(entry);
+    }
 }
 
 fn runtime_user_delta_change(
@@ -2102,9 +2124,10 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::{
-        handle_runtime_loop_event, keli_core_relay_metrics_log_message,
-        keli_core_rs_metrics_snapshot, keli_core_user_delta_apply_log_message,
-        keli_core_user_delta_payload, keli_core_user_delta_requires_full_snapshot,
+        apply_revision_only_user_delta, handle_runtime_loop_event,
+        keli_core_relay_metrics_log_message, keli_core_rs_metrics_snapshot,
+        keli_core_user_delta_apply_log_message, keli_core_user_delta_payload,
+        keli_core_user_delta_requires_full_snapshot,
         keli_core_user_full_snapshot_apply_log_message, keli_core_user_full_snapshot_payload,
         load_users_by_node_tag_from_panel_with_state, node_config_for_info,
         nonfatal_keli_core_activity_report, nonfatal_panel_status_report,
@@ -2384,6 +2407,51 @@ mod tests {
                 upsert: Vec::new(),
             }
         ));
+    }
+
+    #[test]
+    fn revision_only_user_delta_is_marked_only_for_native_core() {
+        let user = UserInfo {
+            id: 7,
+            uuid: "77777777-7777-7777-7777-777777777777".to_string(),
+            speed_limit: 0,
+            device_limit: 0,
+        };
+        let mut native_entry = RuntimeUserSyncEntry {
+            state: UserSyncState {
+                revision: 42,
+                users: vec![user.clone()].into(),
+                updated_at: None,
+            },
+            delta_supported: true,
+            path: String::new(),
+            last_change: None,
+        };
+        apply_revision_only_user_delta(&mut native_entry, 42, 43, true);
+        let change = native_entry
+            .last_change
+            .as_ref()
+            .expect("native core should receive empty revision delta");
+        assert_eq!(native_entry.state.revision, 43);
+        assert_eq!(change.base_revision, 42);
+        assert_eq!(change.revision, 43);
+        assert!(change.diff.added.is_empty());
+        assert!(change.diff.updated.is_empty());
+        assert!(change.diff.deleted.is_empty());
+
+        let mut legacy_entry = RuntimeUserSyncEntry {
+            state: UserSyncState {
+                revision: 42,
+                users: vec![user].into(),
+                updated_at: None,
+            },
+            delta_supported: true,
+            path: String::new(),
+            last_change: None,
+        };
+        apply_revision_only_user_delta(&mut legacy_entry, 42, 43, false);
+        assert_eq!(legacy_entry.state.revision, 43);
+        assert!(legacy_entry.last_change.is_none());
     }
 
     #[test]
