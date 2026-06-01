@@ -1,8 +1,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
+use std::ops::Deref;
 use std::path::Path;
+use std::sync::Arc;
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use sha1::{Digest, Sha1};
 
 use crate::config::{normalize_config_dir, DEFAULT_CONFIG_DIR};
@@ -29,10 +31,60 @@ pub struct UserSyncStepResult {
     pub diff: UserListDiff,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct UserList(Arc<[UserInfo]>);
+
+impl UserList {
+    pub fn as_slice(&self) -> &[UserInfo] {
+        &self.0
+    }
+
+    pub fn to_vec(&self) -> Vec<UserInfo> {
+        self.0.iter().cloned().collect()
+    }
+
+    #[cfg(test)]
+    pub fn ptr_eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl From<Vec<UserInfo>> for UserList {
+    fn from(users: Vec<UserInfo>) -> Self {
+        Self(Arc::from(users.into_boxed_slice()))
+    }
+}
+
+impl Deref for UserList {
+    type Target = [UserInfo];
+
+    fn deref(&self) -> &Self::Target {
+        self.as_slice()
+    }
+}
+
+impl Serialize for UserList {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        self.as_slice().serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for UserList {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Vec::<UserInfo>::deserialize(deserializer).map(Self::from)
+    }
+}
+
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 pub struct UserSyncState {
     pub revision: i64,
-    pub users: Vec<UserInfo>,
+    pub users: UserList,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub updated_at: Option<String>,
 }
@@ -93,14 +145,14 @@ pub fn apply_user_delta_body(state: &UserSyncState, delta: &UserDeltaBody) -> Us
             UserListDiff::default()
         } else {
             let diff = compare_user_list(&state.users, &delta.users);
-            next_state.users = delta.users.clone();
+            next_state.users = delta.users.clone().into();
             diff
         }
     } else if delta.deleted.is_empty() && delta.upsert.is_empty() {
         UserListDiff::default()
     } else {
         let applied = apply_user_delta(&state.users, &delta.deleted, &delta.upsert);
-        next_state.users = applied.next;
+        next_state.users = applied.next.into();
         UserListDiff {
             deleted: applied.deleted_applied,
             added: applied.added,
@@ -134,7 +186,7 @@ pub fn apply_full_user_list(state: &UserSyncState, users: &[UserInfo]) -> UserSy
 
     UserSyncStepResult {
         state: UserSyncState {
-            users: users.to_vec(),
+            users: users.to_vec().into(),
             ..state.clone()
         },
         diff: compare_user_list(&state.users, users),
@@ -278,7 +330,7 @@ mod tests {
     fn delta_body_full_replaces_users_and_advances_revision() {
         let state = UserSyncState {
             revision: 1,
-            users: vec![user(1, "a", 0, 1), user(2, "b", 0, 1)],
+            users: vec![user(1, "a", 0, 1), user(2, "b", 0, 1)].into(),
             updated_at: None,
         };
         let delta = UserDeltaBody {
@@ -302,7 +354,7 @@ mod tests {
     fn empty_full_delta_keeps_existing_users_but_advances_revision() {
         let state = UserSyncState {
             revision: 1,
-            users: vec![user(1, "a", 0, 1)],
+            users: vec![user(1, "a", 0, 1)].into(),
             updated_at: None,
         };
         let delta = UserDeltaBody {
@@ -326,7 +378,7 @@ mod tests {
     fn incremental_delta_applies_deleted_and_upsert_users() {
         let state = UserSyncState {
             revision: 1,
-            users: vec![user(1, "a", 0, 1), user(2, "b", 0, 1)],
+            users: vec![user(1, "a", 0, 1), user(2, "b", 0, 1)].into(),
             updated_at: None,
         };
         let delta = UserDeltaBody {
@@ -349,7 +401,7 @@ mod tests {
     fn incremental_delta_ignores_unchanged_upsert_users() {
         let state = UserSyncState {
             revision: 1,
-            users: vec![user(1, "a", 0, 1), user(2, "b", 10, 2)],
+            users: vec![user(1, "a", 0, 1), user(2, "b", 10, 2)].into(),
             updated_at: None,
         };
         let delta = UserDeltaBody {
@@ -373,7 +425,7 @@ mod tests {
     fn user_delta_body_diff_detects_incremental_changes_without_state_rebuild() {
         let state = UserSyncState {
             revision: 1,
-            users: vec![user(1, "a", 0, 1), user(2, "b", 10, 2), user(3, "c", 0, 1)],
+            users: vec![user(1, "a", 0, 1), user(2, "b", 10, 2), user(3, "c", 0, 1)].into(),
             updated_at: None,
         };
         let delta = UserDeltaBody {
@@ -395,7 +447,7 @@ mod tests {
     fn empty_full_user_list_keeps_existing_state() {
         let state = UserSyncState {
             revision: 7,
-            users: vec![user(1, "a", 0, 1)],
+            users: vec![user(1, "a", 0, 1)].into(),
             updated_at: None,
         };
 
@@ -421,7 +473,7 @@ mod tests {
         let path = dir.join("state").join("user_sync.json");
         let state = UserSyncState {
             revision: 42,
-            users: vec![user(1, "a", 0, 1)],
+            users: vec![user(1, "a", 0, 1)].into(),
             updated_at: None,
         };
 

@@ -36,9 +36,10 @@ use crate::subscription_proxy::SubscriptionProxyRuntimeManager;
 use crate::system::{ResourceSampler, SystemPublicIpProbe};
 use crate::user::{
     apply_full_user_list, apply_user_delta_body, load_user_sync_state, save_user_sync_state,
-    user_delta_body_diff, user_sync_state_path, UserListDiff, UserSyncState,
+    user_delta_body_diff, user_sync_state_path, UserList, UserListDiff, UserSyncState,
 };
 use serde_json::{json, Value};
+use sha1::{Digest, Sha1};
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct RuntimeLoopOptions {
@@ -1265,7 +1266,7 @@ fn latest_users_by_node_tag_for_core_plan(
             let users = sync_state
                 .get(&inbound.tag)
                 .filter(|entry| !entry.state.users.is_empty())
-                .map(|entry| entry.state.users.clone())
+                .map(|entry| entry.state.users.to_vec())
                 .unwrap_or_else(|| {
                     inbound
                         .users
@@ -1779,9 +1780,10 @@ async fn load_users_by_node_tag_from_panel_with_state(
         if entry.last_change.is_some() {
             users_by_tag.insert(node.tag.clone(), users);
         } else if runtime_plan_needs_cached_users(plan, &node.tag, entry) {
-            users_by_tag.insert(node.tag.clone(), entry.state.users.clone());
+            users_by_tag.insert(node.tag.clone(), entry.state.users.to_vec());
         }
     }
+    share_user_sync_snapshots(sync_state);
     if should_log_panel_user_sync_unchanged_summary() {
         if let Some(message) = panel_user_sync_unchanged_summary_log_message(&unchanged_summary) {
             logging::info("users", message);
@@ -1837,7 +1839,7 @@ async fn load_users_for_node(
                 entry.state = result.state;
                 entry.last_change = change;
                 save_runtime_user_sync_entry(entry);
-                return Ok(entry.state.users.clone());
+                return Ok(entry.state.users.to_vec());
             }
             Err(err) if user_delta_not_supported(&err.to_string()) => {
                 entry.delta_supported = false;
@@ -1864,7 +1866,7 @@ async fn load_users_for_node(
                 err
             )
         })?
-        .unwrap_or_else(|| entry.state.users.clone());
+        .unwrap_or_else(|| entry.state.users.to_vec());
     let result = apply_full_user_list(&entry.state, &users);
     let change = runtime_user_delta_change(
         true,
@@ -1878,7 +1880,7 @@ async fn load_users_for_node(
         return Ok(Vec::new());
     }
     save_runtime_user_sync_entry(entry);
-    Ok(entry.state.users.clone())
+    Ok(entry.state.users.to_vec())
 }
 
 fn runtime_user_delta_change(
@@ -1914,7 +1916,7 @@ fn user_sync_users_for_tags(
     tags.iter()
         .filter_map(|tag| {
             if let Some(entry) = sync_state.get(tag) {
-                return Some((tag.clone(), entry.state.users.clone()));
+                return Some((tag.clone(), entry.state.users.to_vec()));
             }
             fallback.get(tag).map(|users| (tag.clone(), users.clone()))
         })
@@ -1930,6 +1932,43 @@ fn user_sync_users_for_runtime_rebuild(
     let mut users = latest_users_by_node_tag_for_core_plan(plan, sync_state);
     users.extend(user_sync_users_for_tags(sync_state, tags, fallback));
     users
+}
+
+fn share_user_sync_snapshots(sync_state: &mut BTreeMap<String, RuntimeUserSyncEntry>) {
+    let mut pool: BTreeMap<String, Vec<UserList>> = BTreeMap::new();
+    for entry in sync_state.values_mut() {
+        if entry.state.users.is_empty() {
+            continue;
+        }
+        let fingerprint = user_snapshot_fingerprint(&entry.state.users);
+        let bucket = pool.entry(fingerprint).or_default();
+        if let Some(existing) = bucket
+            .iter()
+            .find(|candidate| candidate.as_slice() == entry.state.users.as_slice())
+        {
+            entry.state.users = existing.clone();
+        } else {
+            bucket.push(entry.state.users.clone());
+        }
+    }
+}
+
+fn user_snapshot_fingerprint(users: &[UserInfo]) -> String {
+    let mut hasher = Sha1::new();
+    hasher.update(users.len().to_le_bytes());
+    for user in users {
+        hasher.update(user.id.to_le_bytes());
+        hasher.update((user.uuid.len() as u64).to_le_bytes());
+        hasher.update(user.uuid.as_bytes());
+        hasher.update(user.speed_limit.to_le_bytes());
+        hasher.update(user.device_limit.to_le_bytes());
+    }
+    let digest = hasher.finalize();
+    let mut output = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        output.push_str(&format!("{byte:02x}"));
+    }
+    output
 }
 
 fn load_runtime_user_sync_entry(config: &NodeConfig) -> RuntimeUserSyncEntry {
@@ -1997,7 +2036,7 @@ mod tests {
         panel_user_sync_log_message, panel_user_sync_unchanged_summary_log_message,
         refresh_runtime_health, refresh_subscription_proxy_health, run_runtime_loop,
         run_runtime_loop_async, run_runtime_loop_async_with_events, runtime_loop_event_for_task,
-        runtime_plan_needs_cached_users, runtime_user_delta_change,
+        runtime_plan_needs_cached_users, runtime_user_delta_change, share_user_sync_snapshots,
         should_log_keli_core_relay_metrics_at, should_log_panel_user_sync_unchanged_at, should_run,
         try_apply_keli_core_rs_user_deltas, try_establish_keli_core_rs_revision_baseline,
         user_delta_body_is_revision_only, user_delta_not_supported, user_device_limit_counts,
@@ -2041,6 +2080,57 @@ mod tests {
         assert!(!should_run(1, 2));
         assert!(should_run(2, 2));
         assert!(!should_run(2, 0));
+    }
+
+    #[test]
+    fn shares_identical_user_snapshots_between_node_entries() {
+        let users = vec![
+            UserInfo {
+                id: 1,
+                uuid: "uuid-a".to_string(),
+                speed_limit: 1024,
+                device_limit: 2,
+            },
+            UserInfo {
+                id: 2,
+                uuid: "uuid-b".to_string(),
+                speed_limit: 2048,
+                device_limit: 3,
+            },
+        ];
+        let mut sync_state = BTreeMap::new();
+        sync_state.insert(
+            "panel|vless|1".to_string(),
+            RuntimeUserSyncEntry {
+                state: UserSyncState {
+                    revision: 7,
+                    users: users.clone().into(),
+                    updated_at: None,
+                },
+                delta_supported: true,
+                path: String::new(),
+                last_change: None,
+            },
+        );
+        sync_state.insert(
+            "panel|trojan|2".to_string(),
+            RuntimeUserSyncEntry {
+                state: UserSyncState {
+                    revision: 7,
+                    users: users.into(),
+                    updated_at: None,
+                },
+                delta_supported: true,
+                path: String::new(),
+                last_change: None,
+            },
+        );
+
+        share_user_sync_snapshots(&mut sync_state);
+
+        let left = &sync_state["panel|vless|1"].state.users;
+        let right = &sync_state["panel|trojan|2"].state.users;
+        assert!(left.ptr_eq(right));
     }
 
     #[test]
@@ -2261,7 +2351,7 @@ mod tests {
         let changed = RuntimeUserSyncEntry {
             state: UserSyncState {
                 revision: 10,
-                users: users.clone(),
+                users: users.clone().into(),
                 updated_at: None,
             },
             delta_supported: true,
@@ -2327,7 +2417,8 @@ mod tests {
                         speed_limit: 0,
                         device_limit: 0,
                     },
-                ],
+                ]
+                .into(),
                 updated_at: None,
             },
             delta_supported: true,
@@ -2342,7 +2433,8 @@ mod tests {
                     uuid: "panel-b-one".to_string(),
                     speed_limit: 0,
                     device_limit: 0,
-                }],
+                }]
+                .into(),
                 updated_at: None,
             },
             delta_supported: true,
@@ -2514,7 +2606,8 @@ mod tests {
                         speed_limit: 2048,
                         device_limit: 3,
                     },
-                ],
+                ]
+                .into(),
                 updated_at: None,
             },
             delta_supported: true,
@@ -2573,7 +2666,8 @@ mod tests {
                     uuid: "11111111-1111-1111-1111-111111111111".to_string(),
                     speed_limit: 1024,
                     device_limit: 3,
-                }],
+                }]
+                .into(),
                 updated_at: None,
             },
             delta_supported: true,
@@ -2641,7 +2735,7 @@ mod tests {
             RuntimeUserSyncEntry {
                 state: UserSyncState {
                     revision: 43,
-                    users: vec![old_user.clone(), new_user.clone()],
+                    users: vec![old_user.clone(), new_user.clone()].into(),
                     updated_at: None,
                 },
                 delta_supported: true,
@@ -2795,7 +2889,7 @@ mod tests {
             RuntimeUserSyncEntry {
                 state: UserSyncState {
                     revision: 2,
-                    users: vec![new_user.clone()],
+                    users: vec![new_user.clone()].into(),
                     updated_at: None,
                 },
                 delta_supported: true,
@@ -2985,7 +3079,7 @@ mod tests {
             RuntimeUserSyncEntry {
                 state: UserSyncState {
                     revision: 9,
-                    users: vec![user.clone()],
+                    users: vec![user.clone()].into(),
                     updated_at: None,
                 },
                 delta_supported: true,
@@ -3116,7 +3210,7 @@ mod tests {
             RuntimeUserSyncEntry {
                 state: UserSyncState {
                     revision: 2,
-                    users: vec![vless_user],
+                    users: vec![vless_user].into(),
                     updated_at: None,
                 },
                 delta_supported: true,
@@ -3129,7 +3223,7 @@ mod tests {
             RuntimeUserSyncEntry {
                 state: UserSyncState {
                     revision: 2,
-                    users: vec![anytls_user],
+                    users: vec![anytls_user].into(),
                     updated_at: None,
                 },
                 delta_supported: true,
@@ -3701,7 +3795,8 @@ mod tests {
                     uuid: "mieru-secret".to_string(),
                     speed_limit: 0,
                     device_limit: 0,
-                }],
+                }]
+                .into(),
                 updated_at: None,
             },
             delta_supported: true,
@@ -3890,7 +3985,7 @@ mod tests {
             RuntimeUserSyncEntry {
                 state: UserSyncState {
                     revision: 77,
-                    users: vec![user.clone()],
+                    users: vec![user.clone()].into(),
                     updated_at: None,
                 },
                 delta_supported: true,
@@ -4089,7 +4184,7 @@ mod tests {
             RuntimeUserSyncEntry {
                 state: UserSyncState {
                     revision: 43,
-                    users: vec![old_user.clone(), new_user.clone()],
+                    users: vec![old_user.clone(), new_user.clone()].into(),
                     updated_at: None,
                 },
                 delta_supported: true,
@@ -4261,7 +4356,7 @@ mod tests {
             RuntimeUserSyncEntry {
                 state: UserSyncState {
                     revision: 43,
-                    users: vec![old_user, new_user.clone()],
+                    users: vec![old_user, new_user.clone()].into(),
                     updated_at: None,
                 },
                 delta_supported: true,
@@ -4360,7 +4455,7 @@ mod tests {
             RuntimeUserSyncEntry {
                 state: UserSyncState {
                     revision: 43,
-                    users: vec![user.clone()],
+                    users: vec![user.clone()].into(),
                     updated_at: None,
                 },
                 delta_supported: true,
@@ -4518,7 +4613,7 @@ mod tests {
             RuntimeUserSyncEntry {
                 state: UserSyncState {
                     revision: 44,
-                    users: vec![old_user.clone(), new_user.clone()],
+                    users: vec![old_user.clone(), new_user.clone()].into(),
                     updated_at: None,
                 },
                 delta_supported: true,
@@ -4711,7 +4806,7 @@ mod tests {
             RuntimeUserSyncEntry {
                 state: UserSyncState {
                     revision: 43,
-                    users: vec![old_user.clone(), new_user.clone()],
+                    users: vec![old_user.clone(), new_user.clone()].into(),
                     updated_at: None,
                 },
                 delta_supported: true,
@@ -4865,7 +4960,7 @@ mod tests {
             RuntimeUserSyncEntry {
                 state: UserSyncState {
                     revision: 43,
-                    users: vec![old_user.clone(), new_user.clone()],
+                    users: vec![old_user.clone(), new_user.clone()].into(),
                     updated_at: None,
                 },
                 delta_supported: true,
