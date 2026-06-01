@@ -505,7 +505,8 @@ where
                 refresh_subscription_proxy_health(&mut options, manager);
             }
             let mut metrics = json!({
-                "user_delta": self.user_delta_metrics.status_value()
+                "user_delta": self.user_delta_metrics.status_value(),
+                "user_sync": user_sync_snapshot_status_value(&self.user_sync)
             });
             match keli_core_rs_metrics_snapshot(&self.plan) {
                 Ok(Some(core_metrics)) => {
@@ -1734,12 +1735,36 @@ pub async fn load_users_by_node_tag_from_panel(
     plan: &RuntimeBootstrapPlan,
 ) -> Result<BTreeMap<String, Vec<UserInfo>>, String> {
     let mut state = BTreeMap::new();
-    load_users_by_node_tag_from_panel_with_state(plan, &mut state).await
+    load_users_by_node_tag_from_panel_with_state_and_mode(
+        plan,
+        &mut state,
+        UserRefreshPayloadMode::FullSnapshots,
+    )
+    .await
 }
 
 async fn load_users_by_node_tag_from_panel_with_state(
     plan: &RuntimeBootstrapPlan,
     sync_state: &mut BTreeMap<String, RuntimeUserSyncEntry>,
+) -> Result<BTreeMap<String, Vec<UserInfo>>, String> {
+    load_users_by_node_tag_from_panel_with_state_and_mode(
+        plan,
+        sync_state,
+        UserRefreshPayloadMode::TagMarkers,
+    )
+    .await
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum UserRefreshPayloadMode {
+    FullSnapshots,
+    TagMarkers,
+}
+
+async fn load_users_by_node_tag_from_panel_with_state_and_mode(
+    plan: &RuntimeBootstrapPlan,
+    sync_state: &mut BTreeMap<String, RuntimeUserSyncEntry>,
+    payload_mode: UserRefreshPayloadMode,
 ) -> Result<BTreeMap<String, Vec<UserInfo>>, String> {
     let mut users_by_tag = BTreeMap::new();
     let mut unchanged_summary = PanelUserSyncUnchangedSummary::default();
@@ -1752,8 +1777,8 @@ async fn load_users_by_node_tag_from_panel_with_state(
         let entry = sync_state
             .entry(node.tag.clone())
             .or_insert_with(|| load_runtime_user_sync_entry(config));
-        let users = match load_users_for_node(config, entry, &mut client).await {
-            Ok(users) => users,
+        match load_users_for_node(config, entry, &mut client).await {
+            Ok(()) => {}
             Err(error) if plan.resolved.machine.continue_on_error => {
                 logging::warn(
                     "users",
@@ -1768,7 +1793,7 @@ async fn load_users_by_node_tag_from_panel_with_state(
                 continue;
             }
             Err(error) => return Err(error),
-        };
+        }
         if entry.last_change.is_some() {
             logging::info(
                 "users",
@@ -1778,6 +1803,10 @@ async fn load_users_by_node_tag_from_panel_with_state(
             unchanged_summary.record(config, entry);
         }
         if entry.last_change.is_some() {
+            let users = match payload_mode {
+                UserRefreshPayloadMode::FullSnapshots => entry.state.users.to_vec(),
+                UserRefreshPayloadMode::TagMarkers => Vec::new(),
+            };
             users_by_tag.insert(node.tag.clone(), users);
         } else if runtime_plan_needs_cached_users(plan, &node.tag, entry) {
             users_by_tag.insert(node.tag.clone(), entry.state.users.to_vec());
@@ -1817,7 +1846,7 @@ async fn load_users_for_node(
     config: &NodeConfig,
     entry: &mut RuntimeUserSyncEntry,
     client: &mut PanelClient,
-) -> Result<Vec<UserInfo>, String> {
+) -> Result<(), String> {
     if entry.delta_supported {
         let base_revision = entry.state.revision;
         match client.get_user_delta(entry.state.revision).await {
@@ -1825,7 +1854,7 @@ async fn load_users_for_node(
                 if user_delta_body_is_revision_only(&delta) && !entry.state.users.is_empty() {
                     entry.state.revision = delta.revision;
                     entry.last_change = None;
-                    return Ok(Vec::new());
+                    return Ok(());
                 }
                 let diff = user_delta_body_diff(&entry.state, &delta);
                 let change =
@@ -1833,13 +1862,13 @@ async fn load_users_for_node(
                 if change.is_none() {
                     entry.state.revision = delta.revision;
                     entry.last_change = None;
-                    return Ok(Vec::new());
+                    return Ok(());
                 }
                 let result = apply_user_delta_body(&entry.state, &delta);
                 entry.state = result.state;
                 entry.last_change = change;
                 save_runtime_user_sync_entry(entry);
-                return Ok(entry.state.users.to_vec());
+                return Ok(());
             }
             Err(err) if user_delta_not_supported(&err.to_string()) => {
                 entry.delta_supported = false;
@@ -1877,10 +1906,10 @@ async fn load_users_for_node(
     entry.state = result.state;
     entry.last_change = change;
     if entry.last_change.is_none() {
-        return Ok(Vec::new());
+        return Ok(());
     }
     save_runtime_user_sync_entry(entry);
-    Ok(entry.state.users.to_vec())
+    Ok(())
 }
 
 fn runtime_user_delta_change(
@@ -1932,6 +1961,52 @@ fn user_sync_users_for_runtime_rebuild(
     let mut users = latest_users_by_node_tag_for_core_plan(plan, sync_state);
     users.extend(user_sync_users_for_tags(sync_state, tags, fallback));
     users
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct UserSyncSnapshotStats {
+    entries: usize,
+    cached_users: usize,
+    unique_snapshots: usize,
+    shared_entries: usize,
+}
+
+fn user_sync_snapshot_status_value(sync_state: &BTreeMap<String, RuntimeUserSyncEntry>) -> Value {
+    let stats = user_sync_snapshot_stats(sync_state);
+    json!({
+        "entries": stats.entries,
+        "cached_users": stats.cached_users,
+        "unique_snapshots": stats.unique_snapshots,
+        "shared_entries": stats.shared_entries
+    })
+}
+
+fn user_sync_snapshot_stats(
+    sync_state: &BTreeMap<String, RuntimeUserSyncEntry>,
+) -> UserSyncSnapshotStats {
+    let mut stats = UserSyncSnapshotStats {
+        entries: sync_state.len(),
+        ..UserSyncSnapshotStats::default()
+    };
+    let mut unique: BTreeMap<String, Vec<UserList>> = BTreeMap::new();
+    for entry in sync_state.values() {
+        if entry.state.users.is_empty() {
+            continue;
+        }
+        stats.cached_users = stats.cached_users.saturating_add(entry.state.users.len());
+        let fingerprint = user_snapshot_fingerprint(&entry.state.users);
+        let bucket = unique.entry(fingerprint).or_default();
+        if bucket
+            .iter()
+            .any(|candidate| candidate.as_slice() == entry.state.users.as_slice())
+        {
+            stats.shared_entries = stats.shared_entries.saturating_add(1);
+        } else {
+            stats.unique_snapshots = stats.unique_snapshots.saturating_add(1);
+            bucket.push(entry.state.users.clone());
+        }
+    }
+    stats
 }
 
 fn share_user_sync_snapshots(sync_state: &mut BTreeMap<String, RuntimeUserSyncEntry>) {
@@ -2040,11 +2115,11 @@ mod tests {
         should_log_keli_core_relay_metrics_at, should_log_panel_user_sync_unchanged_at, should_run,
         try_apply_keli_core_rs_user_deltas, try_establish_keli_core_rs_revision_baseline,
         user_delta_body_is_revision_only, user_delta_not_supported, user_device_limit_counts,
-        user_sync_users_for_runtime_rebuild, AsyncRuntimeLoopCallbacks, PanelRuntimeLoop,
-        PanelUserSyncUnchangedSummary, RuntimeLoopCallbacks, RuntimeLoopEvent,
-        RuntimeLoopEventKind, RuntimeLoopExit, RuntimeLoopExitReason, RuntimeLoopFuture,
-        RuntimeLoopOptions, RuntimeUserDeltaApplyOutcome, RuntimeUserDeltaChange,
-        RuntimeUserDeltaMetrics, RuntimeUserSyncEntry,
+        user_sync_snapshot_status_value, user_sync_users_for_runtime_rebuild,
+        AsyncRuntimeLoopCallbacks, PanelRuntimeLoop, PanelUserSyncUnchangedSummary,
+        RuntimeLoopCallbacks, RuntimeLoopEvent, RuntimeLoopEventKind, RuntimeLoopExit,
+        RuntimeLoopExitReason, RuntimeLoopFuture, RuntimeLoopOptions, RuntimeUserDeltaApplyOutcome,
+        RuntimeUserDeltaChange, RuntimeUserDeltaMetrics, RuntimeUserSyncEntry,
     };
     use crate::config::{NodeConfig, ResolvedConfig, ResolvedMachineConfig};
     use crate::control::RuntimeControlOptions;
@@ -2131,6 +2206,81 @@ mod tests {
         let left = &sync_state["panel|vless|1"].state.users;
         let right = &sync_state["panel|trojan|2"].state.users;
         assert!(left.ptr_eq(right));
+    }
+
+    #[test]
+    fn user_sync_snapshot_status_reports_deduplicated_snapshot_counts() {
+        let shared_users = vec![
+            UserInfo {
+                id: 1,
+                uuid: "uuid-a".to_string(),
+                speed_limit: 1024,
+                device_limit: 2,
+            },
+            UserInfo {
+                id: 2,
+                uuid: "uuid-b".to_string(),
+                speed_limit: 2048,
+                device_limit: 3,
+            },
+        ];
+        let mut sync_state = BTreeMap::new();
+        sync_state.insert(
+            "panel|vless|1".to_string(),
+            RuntimeUserSyncEntry {
+                state: UserSyncState {
+                    revision: 7,
+                    users: shared_users.clone().into(),
+                    updated_at: None,
+                },
+                delta_supported: true,
+                path: String::new(),
+                last_change: None,
+            },
+        );
+        sync_state.insert(
+            "panel|trojan|2".to_string(),
+            RuntimeUserSyncEntry {
+                state: UserSyncState {
+                    revision: 7,
+                    users: shared_users.into(),
+                    updated_at: None,
+                },
+                delta_supported: true,
+                path: String::new(),
+                last_change: None,
+            },
+        );
+        sync_state.insert(
+            "panel|hy2|3".to_string(),
+            RuntimeUserSyncEntry {
+                state: UserSyncState {
+                    revision: 9,
+                    users: vec![UserInfo {
+                        id: 3,
+                        uuid: "uuid-c".to_string(),
+                        speed_limit: 0,
+                        device_limit: 0,
+                    }]
+                    .into(),
+                    updated_at: None,
+                },
+                delta_supported: true,
+                path: String::new(),
+                last_change: None,
+            },
+        );
+        share_user_sync_snapshots(&mut sync_state);
+
+        assert_eq!(
+            user_sync_snapshot_status_value(&sync_state),
+            json!({
+                "entries": 3,
+                "cached_users": 5,
+                "unique_snapshots": 2,
+                "shared_entries": 1
+            })
+        );
     }
 
     #[test]
@@ -3765,6 +3915,77 @@ mod tests {
         assert!(users.is_empty());
     }
 
+    #[tokio::test]
+    async fn changed_user_refresh_returns_tag_marker_without_cloning_snapshot() {
+        let body = serde_json::to_string(&crate::panel::types::UserDeltaBody {
+            full: false,
+            revision: 2,
+            users: Vec::new(),
+            deleted: Vec::new(),
+            upsert: vec![UserInfo {
+                id: 2,
+                uuid: "uuid-b".to_string(),
+                speed_limit: 2048,
+                device_limit: 3,
+            }],
+        })
+        .unwrap();
+        let api_host = spawn_json_response_server(body);
+        let resolved = ResolvedConfig {
+            kernel: Default::default(),
+            realtime: Default::default(),
+            machine: ResolvedMachineConfig {
+                enabled: true,
+                continue_on_error: true,
+                profiles: Vec::new(),
+            },
+            agent: Default::default(),
+            nodes: vec![NodeConfig {
+                url: api_host.clone(),
+                token: "token".to_string(),
+                node_id: 77,
+                machine_id: 77,
+                timeout: 5,
+                ..NodeConfig::default()
+            }],
+        };
+        let node = test_node_with_host(&api_host, "vless", 77);
+        let tag = node.tag.clone();
+        let plan = build_runtime_bootstrap_plan(resolved, vec![node], Vec::new()).unwrap();
+        let mut sync_state = BTreeMap::new();
+        sync_state.insert(
+            tag.clone(),
+            RuntimeUserSyncEntry {
+                state: UserSyncState {
+                    revision: 1,
+                    users: vec![UserInfo {
+                        id: 1,
+                        uuid: "uuid-a".to_string(),
+                        speed_limit: 1024,
+                        device_limit: 2,
+                    }]
+                    .into(),
+                    updated_at: None,
+                },
+                delta_supported: true,
+                path: String::new(),
+                last_change: None,
+            },
+        );
+
+        let users = load_users_by_node_tag_from_panel_with_state(&plan, &mut sync_state)
+            .await
+            .unwrap();
+
+        assert_eq!(users.keys().collect::<Vec<_>>(), vec![&tag]);
+        assert!(
+            users[&tag].is_empty(),
+            "changed refresh should signal the tag without cloning the full user snapshot"
+        );
+        assert_eq!(sync_state[&tag].state.users.len(), 2);
+        assert_eq!(sync_state[&tag].state.users[1].uuid, "uuid-b");
+    }
+
     #[test]
     fn skipped_user_required_native_inbound_requests_cached_users() {
         let resolved = ResolvedConfig {
@@ -5190,6 +5411,31 @@ mod tests {
         .unwrap();
 
         NodeInfo::from_common(api_host, node_id, common).unwrap()
+    }
+
+    fn spawn_json_response_server(body: String) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let reader_stream = stream.try_clone().unwrap();
+            let mut reader = BufReader::new(reader_stream);
+            loop {
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                if line == "\r\n" || line.is_empty() {
+                    break;
+                }
+            }
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            )
+            .unwrap();
+        });
+        format!("http://{addr}")
     }
 
     fn temp_test_dir(label: &str) -> std::path::PathBuf {
