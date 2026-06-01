@@ -369,6 +369,15 @@ fn native_core_gray_health_value(metrics: &Map<String, Value>) -> Value {
         || vless_tcp_upstream_connect_failed_total > 0
         || vless_tcp_dns_private_blocked_total > 0;
     let metrics_failure = metrics.get("keli_core_rs_error").is_some();
+    let core_apply_successes = core_incremental.saturating_add(core_full_snapshot);
+    let native_apply_recovered = native_failed > 0 && native_success > native_failed;
+    let core_apply_recovered = core_apply_errors > 0 && core_apply_successes > core_apply_errors;
+    let full_rebuild_recovered =
+        full_rebuild > 0 && (native_success > 0 || core_apply_successes > 0);
+    let apply_error_recovered =
+        native_apply_recovered || core_apply_recovered || full_rebuild_recovered;
+    let native_apply_unhealthy = native_failed > 0 && !native_apply_recovered;
+    let core_apply_unhealthy = core_apply_errors > 0 && !core_apply_recovered;
 
     if native_success == 0
         && native_failed == 0
@@ -450,11 +459,15 @@ fn native_core_gray_health_value(metrics: &Map<String, Value>) -> Value {
         reasons.push("vless_dns_private_block");
     }
 
-    let mode = if metrics_failure || native_failed > 0 || core_apply_errors > 0 {
+    let mode = if metrics_failure || native_apply_unhealthy || core_apply_unhealthy {
         "degraded"
-    } else if full_rebuild > 0 {
+    } else if full_rebuild > 0 && !full_rebuild_recovered {
         "full_rebuild"
-    } else if full_snapshot_fallback > 0 || revision_mismatch > 0 || current_revision_missing > 0 {
+    } else if full_snapshot_fallback > 0
+        || revision_mismatch > 0
+        || current_revision_missing > 0
+        || apply_error_recovered
+    {
         "fallback_repaired"
     } else if native_success > 0 {
         "native_delta"
@@ -523,6 +536,10 @@ fn native_core_gray_health_value(metrics: &Map<String, Value>) -> Value {
         current_revision_missing,
     );
     insert_u64(&mut summary, "core_apply_error_total", core_apply_errors);
+    summary.insert(
+        "apply_error_recovered".to_string(),
+        json!(apply_error_recovered),
+    );
     insert_u64(
         &mut summary,
         "core_apply_duration_count",
@@ -1255,7 +1272,6 @@ mod tests {
     fn native_core_metrics_summary_marks_apply_errors_as_degraded() {
         let metrics = json!({
             "user_delta": {
-                "kelinode_user_delta_native_apply_success_total": 10,
                 "kelinode_user_delta_native_apply_failed_total": 2
             },
             "keli_core_rs": {
@@ -1281,6 +1297,58 @@ mod tests {
             json!(["native_apply_failed", "core_apply_error"])
         );
         assert!(!summary.to_string().contains("KELI_CORE_CONTROL_TOKEN"));
+    }
+
+    #[test]
+    fn native_core_metrics_summary_treats_recovered_apply_errors_as_repaired() {
+        let metrics = json!({
+            "user_delta": {
+                "kelinode_user_delta_native_apply_success_total": 8,
+                "kelinode_user_delta_native_apply_failed_total": 1,
+                "kelinode_user_delta_full_snapshot_fallback_total": 1,
+                "kelinode_user_delta_full_rebuild_total": 1
+            },
+            "keli_core_rs": {
+                "keli_core_user_delta_apply_total": 22,
+                "keli_core_user_delta_incremental_total": 8,
+                "keli_core_user_delta_full_snapshot_total": 14,
+                "keli_core_user_delta_apply_error_total": 1,
+                "keli_core_user_delta_revision_mismatch_total": 1,
+                "keli_core_dns": {
+                    "keli_core_dns_resolve_error_total": 658,
+                    "keli_core_dns_private_ip_filter_total": 97,
+                    "keli_core_dns_private_ip_block_total": 97
+                }
+            }
+        });
+
+        let summary = metrics_value(metrics)["native_core_gray_health"].clone();
+
+        assert_eq!(summary["mode"], json!("fallback_repaired"));
+        assert_eq!(summary["gate"], json!("hold_monitor"));
+        assert_eq!(summary["can_widen"], json!(false));
+        assert_eq!(summary["rollback_recommended"], json!(false));
+        assert_eq!(summary["native_apply_failed_total"], json!(1));
+        assert_eq!(summary["core_apply_error_total"], json!(1));
+        assert_eq!(summary["apply_error_recovered"], json!(true));
+        assert_eq!(
+            summary["warning"],
+            json!(
+                "DNS guard or resolve errors observed; verify route rules and upstream DNS before widening"
+            )
+        );
+        assert_eq!(
+            summary["reasons"],
+            json!([
+                "native_apply_failed",
+                "core_apply_error",
+                "full_rebuild",
+                "full_snapshot_fallback",
+                "revision_mismatch",
+                "dns_resolve_error",
+                "dns_private_ip_block"
+            ])
+        );
     }
 
     #[test]
