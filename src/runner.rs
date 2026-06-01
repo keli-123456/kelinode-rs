@@ -1273,7 +1273,7 @@ fn latest_users_by_node_tag_for_core_plan(
                         .iter()
                         .map(|user| UserInfo {
                             id: user.id,
-                            uuid: user.uuid.clone(),
+                            uuid: user.uuid.to_string(),
                             speed_limit: user.speed_limit,
                             device_limit: user.device_limit,
                         })
@@ -1298,7 +1298,7 @@ fn runtime_user_id_lookup_from_plan(plan: &RuntimeBootstrapPlan) -> KeliCoreUser
                 inbound
                     .users
                     .iter()
-                    .map(|user| (user.uuid.clone(), user.id))
+                    .map(|user| (user.uuid.to_string(), user.id))
                     .collect(),
             )
         })
@@ -1320,7 +1320,7 @@ fn sync_runtime_user_id_lookup_from_state(
                 .state
                 .users
                 .iter()
-                .map(|user| (user.uuid.clone(), user.id))
+                .map(|user| (user.uuid.to_string(), user.id))
                 .collect(),
         );
     }
@@ -4284,7 +4284,7 @@ mod tests {
             .inbounds
             .iter()
             .flat_map(|inbound| inbound.users.iter())
-            .all(|user| user.uuid != new_user.uuid));
+            .all(|user| user.uuid.as_ref() != new_user.uuid));
 
         let _ = fs::remove_dir_all(dir);
     }
@@ -4885,7 +4885,7 @@ mod tests {
             .inbounds
             .iter()
             .flat_map(|inbound| inbound.users.iter())
-            .any(|user| user.uuid == new_user.uuid));
+            .any(|user| user.uuid.as_ref() == new_user.uuid));
         assert!(runner.process_supervisor.stops.len() > stops_before);
 
         let _ = fs::remove_dir_all(dir);

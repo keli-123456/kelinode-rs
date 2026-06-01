@@ -189,7 +189,7 @@ fn keli_core_record_report_target<'a>(
                 inbound
                     .users
                     .iter()
-                    .find(|user| user.uuid == record.user_uuid)
+                    .find(|user| user.uuid.as_ref() == record.user_uuid)
                     .map(|user| user.id)
             })?;
         Some((node_tag, uid))
@@ -1245,7 +1245,7 @@ mod tests {
     fn user(id: u32, uuid: &str) -> InboundUserPlan {
         InboundUserPlan {
             id,
-            uuid: uuid.to_string(),
+            uuid: std::sync::Arc::<str>::from(uuid),
             email: format!("node-a|{uuid}"),
             speed_limit: 0,
             device_limit: 0,

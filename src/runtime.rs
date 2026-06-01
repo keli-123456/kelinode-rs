@@ -696,7 +696,9 @@ mod tests {
                 .unwrap();
 
         assert_eq!(
-            plan.core_plan.as_ref().unwrap().inbounds[0].users[0].uuid,
+            plan.core_plan.as_ref().unwrap().inbounds[0].users[0]
+                .uuid
+                .as_ref(),
             "uuid-a"
         );
     }

@@ -86,10 +86,17 @@ pub struct InboundPlan {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct InboundUserPlan {
     pub id: u32,
-    pub uuid: String,
+    pub uuid: Arc<str>,
     pub email: String,
     pub speed_limit: u32,
     pub device_limit: u32,
+}
+
+impl InboundUserPlan {
+    #[cfg(test)]
+    fn uuid_ptr_eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.uuid, &other.uuid)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -136,6 +143,22 @@ impl<'a> IntoIterator for &'a InboundUserList {
 
     fn into_iter(self) -> Self::IntoIter {
         self.as_slice().iter()
+    }
+}
+
+#[derive(Default)]
+struct InboundUserStringPool {
+    uuids: BTreeMap<String, Arc<str>>,
+}
+
+impl InboundUserStringPool {
+    fn intern_uuid(&mut self, value: &str) -> Arc<str> {
+        if let Some(existing) = self.uuids.get(value) {
+            return existing.clone();
+        }
+        let shared = Arc::<str>::from(value);
+        self.uuids.insert(value.to_string(), shared.clone());
+        shared
     }
 }
 
@@ -202,6 +225,7 @@ impl CorePlan {
         nodes: &[NodeInfo],
         users_by_node_tag: &BTreeMap<String, Vec<UserInfo>>,
     ) -> Result<Self, CoreError> {
+        let mut user_strings = InboundUserStringPool::default();
         let mut inbounds = nodes
             .iter()
             .map(|node| {
@@ -209,7 +233,7 @@ impl CorePlan {
                     .get(&node.tag)
                     .map(Vec::as_slice)
                     .unwrap_or(&[]);
-                build_inbound_plan_with_users(node, users)
+                build_inbound_plan_with_users_and_pool(node, users, &mut user_strings)
             })
             .collect::<Result<Vec<_>, _>>()?;
         strip_native_user_emails(&mut inbounds);
@@ -2267,7 +2291,11 @@ fn validate_keli_core_rs_tuic_inbound(inbound: &InboundPlan) -> Result<(), CoreE
             inbound.tag
         )));
     }
-    if inbound.users.iter().any(|user| !is_uuid_like(&user.uuid)) {
+    if inbound
+        .users
+        .iter()
+        .any(|user| !is_uuid_like(user.uuid.as_ref()))
+    {
         return Err(CoreError::new(format!(
             "keli-core-rs tuic currently requires UUID users on inbound {}",
             inbound.tag
@@ -2699,7 +2727,7 @@ fn network_setting_string(settings: &Value, keys: &[&str]) -> Option<String> {
 fn render_keli_core_rs_user(user: &InboundUserPlan) -> Value {
     json!({
         "id": user.id,
-        "uuid": &user.uuid,
+        "uuid": user.uuid.as_ref(),
         "password": null,
         "email": null,
         "speed_limit": user.speed_limit,
@@ -2826,7 +2854,7 @@ fn write_keli_core_rs_inbound<W: Write>(
             }
             let user = KeliCoreRsUserRef {
                 id: user.id,
-                uuid: &user.uuid,
+                uuid: user.uuid.as_ref(),
                 password: None,
                 email: None,
                 speed_limit: user.speed_limit,
@@ -3129,6 +3157,15 @@ pub fn build_inbound_plan_with_users(
     node: &NodeInfo,
     users: &[UserInfo],
 ) -> Result<InboundPlan, CoreError> {
+    let mut user_strings = InboundUserStringPool::default();
+    build_inbound_plan_with_users_and_pool(node, users, &mut user_strings)
+}
+
+fn build_inbound_plan_with_users_and_pool(
+    node: &NodeInfo,
+    users: &[UserInfo],
+    user_strings: &mut InboundUserStringPool,
+) -> Result<InboundPlan, CoreError> {
     if node.common.server_port == 0 {
         return Err(CoreError::new(format!(
             "node {} has empty server port",
@@ -3185,7 +3222,14 @@ pub fn build_inbound_plan_with_users(
         users: users
             .iter()
             .filter(|user| !user.uuid.trim().is_empty())
-            .map(|user| inbound_user_plan(&node.tag, user, node_device_limit_fallback(node)))
+            .map(|user| {
+                inbound_user_plan(
+                    &node.tag,
+                    user,
+                    node_device_limit_fallback(node),
+                    user_strings,
+                )
+            })
             .collect::<Vec<_>>()
             .into(),
         routes: node
@@ -3423,11 +3467,16 @@ pub(crate) fn effective_device_limit(device_limit: u32, fallback: u32) -> u32 {
     }
 }
 
-fn inbound_user_plan(tag: &str, user: &UserInfo, fallback: u32) -> InboundUserPlan {
-    let uuid = user.uuid.trim().to_string();
+fn inbound_user_plan(
+    tag: &str,
+    user: &UserInfo,
+    fallback: u32,
+    user_strings: &mut InboundUserStringPool,
+) -> InboundUserPlan {
+    let uuid = user_strings.intern_uuid(user.uuid.trim());
     InboundUserPlan {
         id: user.id,
-        email: user_tag(tag, &uuid),
+        email: user_tag(tag, uuid.as_ref()),
         uuid,
         speed_limit: user.speed_limit,
         device_limit: effective_device_limit(user.device_limit, fallback),
@@ -3837,6 +3886,53 @@ mod tests {
         assert!(plan.inbounds[0].users.ptr_eq(&plan.inbounds[1].users));
         assert_eq!(plan.inbounds[0].users[0].email, "");
         assert_eq!(plan.inbounds[1].users[0].email, "");
+    }
+
+    #[test]
+    fn core_plan_shares_repeated_user_uuid_strings_between_near_identical_lists() {
+        let node_a = test_node("socks", 122, "127.0.0.1");
+        let node_b = test_node("socks", 123, "127.0.0.1");
+        let shared_user = UserInfo {
+            id: 7,
+            uuid: "shared-user-secret".to_string(),
+            speed_limit: 0,
+            device_limit: 0,
+        };
+        let plan = CorePlan::from_nodes_with_users(
+            CoreKind::KeliCoreRs,
+            temp_test_dir("shared-user-uuid"),
+            &[node_a.clone(), node_b.clone()],
+            &BTreeMap::from([
+                (
+                    node_a.tag.clone(),
+                    vec![
+                        shared_user.clone(),
+                        UserInfo {
+                            id: 8,
+                            uuid: "only-node-a".to_string(),
+                            speed_limit: 0,
+                            device_limit: 0,
+                        },
+                    ],
+                ),
+                (
+                    node_b.tag.clone(),
+                    vec![
+                        shared_user,
+                        UserInfo {
+                            id: 9,
+                            uuid: "only-node-b".to_string(),
+                            speed_limit: 0,
+                            device_limit: 0,
+                        },
+                    ],
+                ),
+            ]),
+        )
+        .unwrap();
+
+        assert!(!plan.inbounds[0].users.ptr_eq(&plan.inbounds[1].users));
+        assert!(plan.inbounds[0].users[0].uuid_ptr_eq(&plan.inbounds[1].users[0]));
     }
 
     #[test]
