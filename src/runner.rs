@@ -723,6 +723,11 @@ fn keli_core_relay_metrics_log_message(metrics: &Value) -> Option<String> {
     let native_workers = metric_u64(metrics, "keli_core_native_relay_workers");
     let native_idle = metric_u64(metrics, "keli_core_native_relay_idle");
     let native_pending = metric_u64(metrics, "keli_core_native_relay_pending");
+    let native_label_soft_limit = metric_u64(metrics, "keli_core_native_relay_label_soft_limit");
+    let native_pending_by_label =
+        metric_top_counts(metrics, "keli_core_native_relay_pending_by_label", 5);
+    let native_queue_wait_ms_by_label =
+        metric_top_counts(metrics, "keli_core_native_relay_queue_wait_ms_by_label", 5);
     let active_native = metric_top_counts(metrics, "keli_core_native_relay_active", 5);
     let active_async = metric_top_counts(metrics, "keli_core_async_relay_active", 5);
     let active_blocking = metric_top_counts(metrics, "keli_core_detached_blocking_relay_active", 5);
@@ -736,7 +741,7 @@ fn keli_core_relay_metrics_log_message(metrics: &Value) -> Option<String> {
         return None;
     }
     Some(format!(
-        "relay scheduler native_workers={native_workers} native_idle={native_idle} native_pending={native_pending} active_native={active_native} active_async={active_async} active_blocking={active_blocking}"
+        "relay scheduler native_workers={native_workers} native_idle={native_idle} native_pending={native_pending} native_label_soft_limit={native_label_soft_limit} native_pending_by_label={native_pending_by_label} native_queue_wait_ms_by_label={native_queue_wait_ms_by_label} active_native={active_native} active_async={active_async} active_blocking={active_blocking}"
     ))
 }
 
@@ -2388,6 +2393,15 @@ mod tests {
             "keli_core_native_relay_workers": 256,
             "keli_core_native_relay_idle": 8,
             "keli_core_native_relay_pending": 3,
+            "keli_core_native_relay_label_soft_limit": 128,
+            "keli_core_native_relay_pending_by_label": {
+                "keli-core-trojan-relay": 3,
+                "keli-core-vless-ws-relay": 1
+            },
+            "keli_core_native_relay_queue_wait_ms_by_label": {
+                "keli-core-trojan-relay": 412,
+                "keli-core-vless-ws-relay": 15
+            },
             "keli_core_native_relay_active": {
                 "keli-core-mieru-stream-upload": 17,
                 "keli-core-trojan-ws-upload": 181,
@@ -2404,7 +2418,7 @@ mod tests {
 
         assert_eq!(
             keli_core_relay_metrics_log_message(&metrics).as_deref(),
-            Some("relay scheduler native_workers=256 native_idle=8 native_pending=3 active_native=keli-core-trojan-ws-upload:181,keli-core-mieru-stream-upload:17,keli-core-vless-vision-relay:4 active_async=keli-core-trojan-relay:734,keli-core-vless-relay:12 active_blocking=keli-core-vmess-bridge:2")
+            Some("relay scheduler native_workers=256 native_idle=8 native_pending=3 native_label_soft_limit=128 native_pending_by_label=keli-core-trojan-relay:3,keli-core-vless-ws-relay:1 native_queue_wait_ms_by_label=keli-core-trojan-relay:412,keli-core-vless-ws-relay:15 active_native=keli-core-trojan-ws-upload:181,keli-core-mieru-stream-upload:17,keli-core-vless-vision-relay:4 active_async=keli-core-trojan-relay:734,keli-core-vless-relay:12 active_blocking=keli-core-vmess-bridge:2")
         );
     }
 
