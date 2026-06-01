@@ -3,6 +3,7 @@ use std::fs;
 use std::io::Write;
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use rcgen::{generate_simple_self_signed, CertifiedKey};
 use serde::Serialize;
@@ -78,7 +79,7 @@ pub struct InboundPlan {
     pub reality_private_key: String,
     pub reality_short_id: String,
     pub reality_mldsa65_seed: String,
-    pub users: Vec<InboundUserPlan>,
+    pub users: InboundUserList,
     pub routes: Vec<RoutePlan>,
 }
 
@@ -89,6 +90,53 @@ pub struct InboundUserPlan {
     pub email: String,
     pub speed_limit: u32,
     pub device_limit: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InboundUserList(Arc<[InboundUserPlan]>);
+
+impl InboundUserList {
+    pub fn as_slice(&self) -> &[InboundUserPlan] {
+        &self.0
+    }
+
+    fn make_mut(&mut self) -> &mut [InboundUserPlan] {
+        Arc::make_mut(&mut self.0)
+    }
+
+    #[cfg(test)]
+    fn ptr_eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl Default for InboundUserList {
+    fn default() -> Self {
+        Vec::new().into()
+    }
+}
+
+impl From<Vec<InboundUserPlan>> for InboundUserList {
+    fn from(users: Vec<InboundUserPlan>) -> Self {
+        Self(Arc::from(users))
+    }
+}
+
+impl std::ops::Deref for InboundUserList {
+    type Target = [InboundUserPlan];
+
+    fn deref(&self) -> &Self::Target {
+        self.as_slice()
+    }
+}
+
+impl<'a> IntoIterator for &'a InboundUserList {
+    type Item = &'a InboundUserPlan;
+    type IntoIter = std::slice::Iter<'a, InboundUserPlan>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.as_slice().iter()
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -165,6 +213,7 @@ impl CorePlan {
             })
             .collect::<Result<Vec<_>, _>>()?;
         strip_native_user_emails(&mut inbounds);
+        share_identical_inbound_user_lists(&mut inbounds);
         let listen_tags = inbounds.iter().map(|inbound| inbound.tag.clone()).collect();
 
         Ok(Self {
@@ -212,10 +261,40 @@ fn normalized_strategy_key(value: &str) -> String {
 
 fn strip_native_user_emails(inbounds: &mut [InboundPlan]) {
     for inbound in inbounds {
-        for user in &mut inbound.users {
+        for user in inbound.users.make_mut() {
             user.email.clear();
         }
     }
+}
+
+fn share_identical_inbound_user_lists(inbounds: &mut [InboundPlan]) {
+    let mut buckets: BTreeMap<u64, Vec<InboundUserList>> = BTreeMap::new();
+    for inbound in inbounds {
+        let fingerprint = inbound_user_list_fingerprint(inbound.users.as_slice());
+        let bucket = buckets.entry(fingerprint).or_default();
+        if let Some(existing) = bucket
+            .iter()
+            .find(|candidate| candidate.as_slice() == inbound.users.as_slice())
+        {
+            inbound.users = existing.clone();
+        } else {
+            bucket.push(inbound.users.clone());
+        }
+    }
+}
+
+fn inbound_user_list_fingerprint(users: &[InboundUserPlan]) -> u64 {
+    let mut bytes = Vec::with_capacity(users.len().saturating_mul(32));
+    for user in users {
+        bytes.extend_from_slice(&user.id.to_le_bytes());
+        bytes.extend_from_slice(&(user.uuid.len() as u64).to_le_bytes());
+        bytes.extend_from_slice(user.uuid.as_bytes());
+        bytes.extend_from_slice(&(user.email.len() as u64).to_le_bytes());
+        bytes.extend_from_slice(user.email.as_bytes());
+        bytes.extend_from_slice(&user.speed_limit.to_le_bytes());
+        bytes.extend_from_slice(&user.device_limit.to_le_bytes());
+    }
+    fnv1a64(&bytes)
 }
 
 pub fn core_kind_from_name(value: &str) -> Result<CoreKind, CoreError> {
@@ -3107,7 +3186,8 @@ pub fn build_inbound_plan_with_users(
             .iter()
             .filter(|user| !user.uuid.trim().is_empty())
             .map(|user| inbound_user_plan(&node.tag, user, node_device_limit_fallback(node)))
-            .collect(),
+            .collect::<Vec<_>>()
+            .into(),
         routes: node
             .common
             .routes
@@ -3723,6 +3803,40 @@ mod tests {
 
         assert_eq!(config["inbounds"][0]["users"][0]["device_limit"], 3);
         assert_eq!(config["inbounds"][0]["users"][1]["device_limit"], 5);
+    }
+
+    #[test]
+    fn core_plan_shares_identical_inbound_user_lists() {
+        let node_a = test_node("socks", 120, "127.0.0.1");
+        let node_b = test_node("socks", 121, "127.0.0.1");
+        let users = vec![
+            UserInfo {
+                id: 7,
+                uuid: "shared-user-a".to_string(),
+                speed_limit: 0,
+                device_limit: 0,
+            },
+            UserInfo {
+                id: 8,
+                uuid: "shared-user-b".to_string(),
+                speed_limit: 1024,
+                device_limit: 2,
+            },
+        ];
+        let plan = CorePlan::from_nodes_with_users(
+            CoreKind::KeliCoreRs,
+            temp_test_dir("shared-inbound-users"),
+            &[node_a.clone(), node_b.clone()],
+            &BTreeMap::from([
+                (node_a.tag.clone(), users.clone()),
+                (node_b.tag.clone(), users),
+            ]),
+        )
+        .unwrap();
+
+        assert!(plan.inbounds[0].users.ptr_eq(&plan.inbounds[1].users));
+        assert_eq!(plan.inbounds[0].users[0].email, "");
+        assert_eq!(plan.inbounds[1].users[0].email, "");
     }
 
     #[test]

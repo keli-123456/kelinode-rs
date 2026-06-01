@@ -1235,7 +1235,7 @@ mod tests {
                 reality_private_key: String::new(),
                 reality_short_id: String::new(),
                 reality_mldsa65_seed: String::new(),
-                users: vec![user(7, "uuid-a"), user(8, "uuid-b")],
+                users: vec![user(7, "uuid-a"), user(8, "uuid-b")].into(),
                 routes: Vec::new(),
             }],
             dns: Default::default(),
