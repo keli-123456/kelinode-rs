@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Mutex, OnceLock};
@@ -226,8 +226,13 @@ struct RuntimeUserDeltaChange {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct PanelUserSyncUnchangedSummary {
     panels: BTreeMap<String, PanelUserSyncUnchangedPanelSummary>,
+    snapshots: BTreeSet<String>,
     nodes: usize,
     cached_users: usize,
+    unique_cached_users: usize,
+    shared_cached_users: usize,
+    unique_snapshots: usize,
+    shared_entries: usize,
     min_revision: Option<i64>,
     max_revision: Option<i64>,
 }
@@ -246,6 +251,7 @@ impl PanelUserSyncUnchangedSummary {
         let cached_users = entry.state.users.len();
         self.nodes += 1;
         self.cached_users += cached_users;
+        self.record_snapshot(&entry.state.users);
         update_revision_range(
             &mut self.min_revision,
             &mut self.max_revision,
@@ -260,6 +266,20 @@ impl PanelUserSyncUnchangedSummary {
             &mut panel.max_revision,
             entry.state.revision,
         );
+    }
+
+    fn record_snapshot(&mut self, users: &UserList) {
+        if users.is_empty() {
+            return;
+        }
+        let fingerprint = user_snapshot_fingerprint(users);
+        if !self.snapshots.insert(fingerprint) {
+            self.shared_entries = self.shared_entries.saturating_add(1);
+            self.shared_cached_users = self.shared_cached_users.saturating_add(users.len());
+        } else {
+            self.unique_snapshots = self.unique_snapshots.saturating_add(1);
+            self.unique_cached_users = self.unique_cached_users.saturating_add(users.len());
+        }
     }
 }
 
@@ -679,10 +699,14 @@ fn panel_user_sync_unchanged_summary_log_message(
         .collect::<Vec<_>>()
         .join(";");
     Some(format!(
-        "panel unchanged summary panels={} nodes={} cached_users={} revisions={} panel_breakdown={}",
+        "panel unchanged summary panels={} nodes={} cached_users={} unique_cached_users={} shared_cached_users={} unique_snapshots={} shared_entries={} revisions={} panel_breakdown={}",
         summary.panels.len(),
         summary.nodes,
         summary.cached_users,
+        summary.unique_cached_users,
+        summary.shared_cached_users,
+        summary.unique_snapshots,
+        summary.shared_entries,
         revision_range_label(summary.min_revision, summary.max_revision),
         panel_breakdown
     ))
@@ -2003,6 +2027,8 @@ struct UserSyncSnapshotStats {
     cached_users: usize,
     unique_snapshots: usize,
     shared_entries: usize,
+    unique_cached_users: usize,
+    shared_cached_users: usize,
 }
 
 fn user_sync_snapshot_status_value(sync_state: &BTreeMap<String, RuntimeUserSyncEntry>) -> Value {
@@ -2010,6 +2036,8 @@ fn user_sync_snapshot_status_value(sync_state: &BTreeMap<String, RuntimeUserSync
     json!({
         "entries": stats.entries,
         "cached_users": stats.cached_users,
+        "unique_cached_users": stats.unique_cached_users,
+        "shared_cached_users": stats.shared_cached_users,
         "unique_snapshots": stats.unique_snapshots,
         "shared_entries": stats.shared_entries
     })
@@ -2035,8 +2063,14 @@ fn user_sync_snapshot_stats(
             .any(|candidate| candidate.as_slice() == entry.state.users.as_slice())
         {
             stats.shared_entries = stats.shared_entries.saturating_add(1);
+            stats.shared_cached_users = stats
+                .shared_cached_users
+                .saturating_add(entry.state.users.len());
         } else {
             stats.unique_snapshots = stats.unique_snapshots.saturating_add(1);
+            stats.unique_cached_users = stats
+                .unique_cached_users
+                .saturating_add(entry.state.users.len());
             bucket.push(entry.state.users.clone());
         }
     }
@@ -2312,6 +2346,8 @@ mod tests {
             json!({
                 "entries": 3,
                 "cached_users": 5,
+                "unique_cached_users": 3,
+                "shared_cached_users": 2,
                 "unique_snapshots": 2,
                 "shared_entries": 1
             })
@@ -2678,7 +2714,7 @@ mod tests {
 
         assert_eq!(
             panel_user_sync_unchanged_summary_log_message(&summary).as_deref(),
-            Some("panel unchanged summary panels=2 nodes=3 cached_users=4 revisions=10..11 panel_breakdown=https://panel-a.example.test:nodes=2,cached_users=3,revisions=10..11;https://panel-b.example.test:nodes=1,cached_users=1,revisions=11")
+            Some("panel unchanged summary panels=2 nodes=3 cached_users=4 unique_cached_users=3 shared_cached_users=1 unique_snapshots=2 shared_entries=1 revisions=10..11 panel_breakdown=https://panel-a.example.test:nodes=2,cached_users=3,revisions=10..11;https://panel-b.example.test:nodes=1,cached_users=1,revisions=11")
         );
     }
 

@@ -368,12 +368,14 @@ fn native_core_gray_health_value(metrics: &Map<String, Value>) -> Value {
         || tls_handshake_backoff_blocked_ips > 0
         || tcp_auth_backoff_reject_total > 0
         || tcp_auth_backoff_blocked_ips > 0;
-    let dns_guard_pressure = dns_private_ip_block_total > 0 || dns_resolve_error_total > 0;
+    let dns_guard_activity = dns_private_ip_filter_total > 0
+        || dns_private_ip_block_total > 0
+        || vless_tcp_dns_private_blocked_total > 0;
+    let dns_resolve_pressure = dns_resolve_error_total > 0;
     let connection_error_pressure = hy2_connection_timeout_total > 0
         || hy2_tcp_relay_timeout_total > 0
         || vless_tcp_upstream_timeout_total > 0
-        || vless_tcp_upstream_connect_failed_total > 0
-        || vless_tcp_dns_private_blocked_total > 0;
+        || vless_tcp_upstream_connect_failed_total > 0;
     let metrics_failure = metrics.get("keli_core_rs_error").is_some();
     let core_apply_successes = core_incremental.saturating_add(runtime_core_full_snapshot);
     let native_apply_recovered = native_failed > 0 && native_success > native_failed;
@@ -485,8 +487,8 @@ fn native_core_gray_health_value(metrics: &Map<String, Value>) -> Value {
         "QUIC resource usage is high; hold gray rollout until capacity is adjusted"
     } else if abuse_backoff_pressure {
         "client abuse backoff observed; monitor CPU and auth failure rate before widening"
-    } else if dns_guard_pressure {
-        "DNS guard or resolve errors observed; verify route rules and upstream DNS before widening"
+    } else if dns_resolve_pressure {
+        "DNS resolve errors observed; verify upstream DNS before widening"
     } else if connection_error_pressure {
         "native core connection errors observed; inspect HY2/VLESS counters before widening"
     } else {
@@ -509,7 +511,7 @@ fn native_core_gray_health_value(metrics: &Map<String, Value>) -> Value {
     if abuse_backoff_pressure && gate == "allow_widen" {
         gate = "hold_monitor";
     }
-    if dns_guard_pressure && gate == "allow_widen" {
+    if dns_resolve_pressure && gate == "allow_widen" {
         gate = "hold_monitor";
     }
     if connection_error_pressure && gate == "allow_widen" {
@@ -698,6 +700,7 @@ fn native_core_gray_health_value(metrics: &Map<String, Value>) -> Value {
         vless_tcp_dns_private_blocked_total,
     );
     summary.insert("metrics_available".to_string(), json!(!metrics_failure));
+    summary.insert("dns_guard_activity".to_string(), json!(dns_guard_activity));
     summary.insert("reasons".to_string(), json!(reasons));
     Value::Object(summary)
 }
@@ -1346,10 +1349,9 @@ mod tests {
         assert_eq!(summary["apply_error_recovered"], json!(true));
         assert_eq!(
             summary["warning"],
-            json!(
-                "DNS guard or resolve errors observed; verify route rules and upstream DNS before widening"
-            )
+            json!("DNS resolve errors observed; verify upstream DNS before widening")
         );
+        assert_eq!(summary["dns_guard_activity"], json!(true));
         assert_eq!(
             summary["reasons"],
             json!([
@@ -1551,9 +1553,7 @@ mod tests {
         assert_eq!(summary["rollback_recommended"], json!(false));
         assert_eq!(
             summary["warning"],
-            json!(
-                "DNS guard or resolve errors observed; verify route rules and upstream DNS before widening"
-            )
+            json!("DNS resolve errors observed; verify upstream DNS before widening")
         );
         assert_eq!(summary["dns_resolve_total"], json!(30));
         assert_eq!(summary["dns_system_query_total"], json!(4));
@@ -1563,6 +1563,7 @@ mod tests {
         assert_eq!(summary["dns_resolve_error_total"], json!(2));
         assert_eq!(summary["dns_private_ip_filter_total"], json!(3));
         assert_eq!(summary["dns_private_ip_block_total"], json!(1));
+        assert_eq!(summary["dns_guard_activity"], json!(true));
         assert_eq!(
             summary["reasons"],
             json!(["dns_resolve_error", "dns_private_ip_block"])
@@ -1570,6 +1571,40 @@ mod tests {
         let serialized = summary.to_string();
         assert!(!serialized.contains("KELI_CORE_CONTROL_TOKEN"));
         assert!(!serialized.contains("api.rebind.example"));
+    }
+
+    #[test]
+    fn native_core_metrics_summary_treats_dns_private_ip_blocks_as_guard_activity() {
+        let metrics = json!({
+            "user_delta": {
+                "kelinode_user_delta_native_apply_success_total": 12
+            },
+            "keli_core_rs": {
+                "keli_core_user_delta_incremental_total": 12,
+                "keli_core_dns": {
+                    "keli_core_dns_resolve_total": 30,
+                    "keli_core_dns_private_ip_filter_total": 3,
+                    "keli_core_dns_private_ip_block_total": 2
+                },
+                "keli_core_connection_error_total": {
+                    "vless.tcp.dns_private_blocked": 5
+                }
+            }
+        });
+
+        let summary = metrics_value(metrics)["native_core_gray_health"].clone();
+
+        assert_eq!(summary["mode"], json!("native_delta"));
+        assert_eq!(summary["gate"], json!("allow_widen"));
+        assert_eq!(summary["can_widen"], json!(true));
+        assert_eq!(summary["warning"], json!(""));
+        assert_eq!(summary["dns_guard_activity"], json!(true));
+        assert_eq!(summary["dns_private_ip_block_total"], json!(2));
+        assert_eq!(summary["vless_tcp_dns_private_blocked_total"], json!(5));
+        assert_eq!(
+            summary["reasons"],
+            json!(["dns_private_ip_block", "vless_dns_private_block"])
+        );
     }
 
     #[test]
