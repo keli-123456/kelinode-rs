@@ -277,6 +277,7 @@ struct RuntimeUserDeltaMetrics {
     kelinode_user_delta_native_apply_failed_total: u64,
     kelinode_user_delta_skipped_port_range_total: u64,
     kelinode_user_delta_full_rebuild_total: u64,
+    kelinode_user_delta_revision_baseline_total: u64,
 }
 
 impl RuntimeUserDeltaMetrics {
@@ -304,13 +305,20 @@ impl RuntimeUserDeltaMetrics {
             .saturating_add(1);
     }
 
+    fn record_revision_baseline(&mut self, applied: u64) {
+        self.kelinode_user_delta_revision_baseline_total = self
+            .kelinode_user_delta_revision_baseline_total
+            .saturating_add(applied);
+    }
+
     fn status_value(&self) -> Value {
         json!({
             "kelinode_user_delta_full_snapshot_fallback_total": self.kelinode_user_delta_full_snapshot_fallback_total,
             "kelinode_user_delta_native_apply_success_total": self.kelinode_user_delta_native_apply_success_total,
             "kelinode_user_delta_native_apply_failed_total": self.kelinode_user_delta_native_apply_failed_total,
             "kelinode_user_delta_skipped_port_range_total": self.kelinode_user_delta_skipped_port_range_total,
-            "kelinode_user_delta_full_rebuild_total": self.kelinode_user_delta_full_rebuild_total
+            "kelinode_user_delta_full_rebuild_total": self.kelinode_user_delta_full_rebuild_total,
+            "kelinode_user_delta_revision_baseline_total": self.kelinode_user_delta_revision_baseline_total
         })
     }
 }
@@ -549,11 +557,15 @@ where
             )
             .await?;
             if !startup_full_snapshot_tags.is_empty() {
-                try_establish_keli_core_rs_revision_baseline(
+                let baseline_applied = try_establish_keli_core_rs_revision_baseline(
                     &self.plan,
                     &self.user_sync,
                     &startup_full_snapshot_tags,
                 );
+                if baseline_applied > 0 {
+                    self.user_delta_metrics
+                        .record_revision_baseline(baseline_applied as u64);
+                }
             }
             nonfatal_keli_core_device_limit_snapshot(
                 refresh_keli_core_device_limit_snapshots(&self.plan).await,
@@ -1053,9 +1065,9 @@ fn try_establish_keli_core_rs_revision_baseline(
     plan: &RuntimeBootstrapPlan,
     sync_state: &BTreeMap<String, RuntimeUserSyncEntry>,
     node_tags: &[String],
-) -> bool {
+) -> usize {
     let Some(core_plan) = plan.core_plan.as_ref() else {
-        return false;
+        return 0;
     };
     let client = match keli_core_rs_control_client(&core_plan.config_path) {
         Ok(client) => client.with_timeout(KELI_CORE_APPLY_CONTROL_TIMEOUT),
@@ -1064,7 +1076,7 @@ fn try_establish_keli_core_rs_revision_baseline(
                 "core",
                 format!("revision baseline skipped: {}", error.message),
             );
-            return false;
+            return 0;
         }
     };
     let mut applied = 0usize;
@@ -1081,7 +1093,7 @@ fn try_establish_keli_core_rs_revision_baseline(
                         "revision baseline target resolution failed node_tag={node_tag} error={error}"
                     ),
                 );
-                return false;
+                return 0;
             }
         };
         if target_tags.is_empty() {
@@ -1117,7 +1129,7 @@ fn try_establish_keli_core_rs_revision_baseline(
                             error.message
                         ),
                     );
-                    return false;
+                    return 0;
                 }
             }
         }
@@ -1128,7 +1140,7 @@ fn try_establish_keli_core_rs_revision_baseline(
             format!("revision baseline established full_snapshots={applied}"),
         );
     }
-    applied > 0
+    applied
 }
 
 fn keli_core_rs_process_is_running<P>(
@@ -3193,6 +3205,10 @@ mod tests {
             status["kelinode_user_delta_skipped_port_range_total"],
             json!(0)
         );
+        assert_eq!(
+            status["kelinode_user_delta_revision_baseline_total"],
+            json!(0)
+        );
         let _ = fs::remove_dir_all(dir);
     }
 
@@ -3359,7 +3375,7 @@ mod tests {
         });
 
         let established = try_establish_keli_core_rs_revision_baseline(&plan, &sync_state, &[tag]);
-        assert!(established);
+        assert_eq!(established, expected_tags.len());
         assert_eq!(control_thread.join().unwrap(), expected_tags.to_vec());
 
         let _ = fs::remove_dir_all(dir);

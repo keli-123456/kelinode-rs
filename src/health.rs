@@ -150,6 +150,11 @@ fn native_core_gray_health_value(metrics: &Map<String, Value>) -> Value {
         "user_delta",
         "kelinode_user_delta_full_snapshot_fallback_total",
     );
+    let revision_baseline = nested_metric_u64(
+        metrics,
+        "user_delta",
+        "kelinode_user_delta_revision_baseline_total",
+    );
     let full_rebuild = nested_metric_u64(
         metrics,
         "user_delta",
@@ -167,6 +172,7 @@ fn native_core_gray_health_value(metrics: &Map<String, Value>) -> Value {
         "keli_core_rs",
         "keli_core_user_delta_full_snapshot_total",
     );
+    let runtime_core_full_snapshot = core_full_snapshot.saturating_sub(revision_baseline);
     let revision_mismatch = nested_metric_u64(
         metrics,
         "keli_core_rs",
@@ -369,7 +375,7 @@ fn native_core_gray_health_value(metrics: &Map<String, Value>) -> Value {
         || vless_tcp_upstream_connect_failed_total > 0
         || vless_tcp_dns_private_blocked_total > 0;
     let metrics_failure = metrics.get("keli_core_rs_error").is_some();
-    let core_apply_successes = core_incremental.saturating_add(core_full_snapshot);
+    let core_apply_successes = core_incremental.saturating_add(runtime_core_full_snapshot);
     let native_apply_recovered = native_failed > 0 && native_success > native_failed;
     let core_apply_recovered = core_apply_errors > 0 && core_apply_successes > core_apply_errors;
     let full_rebuild_recovered =
@@ -382,6 +388,7 @@ fn native_core_gray_health_value(metrics: &Map<String, Value>) -> Value {
     if native_success == 0
         && native_failed == 0
         && full_snapshot_fallback == 0
+        && revision_baseline == 0
         && full_rebuild == 0
         && core_apply_total == 0
         && core_incremental == 0
@@ -525,10 +532,16 @@ fn native_core_gray_health_value(metrics: &Map<String, Value>) -> Value {
         "full_snapshot_fallback_total",
         full_snapshot_fallback,
     );
+    insert_u64(&mut summary, "revision_baseline_total", revision_baseline);
     insert_u64(&mut summary, "full_rebuild_total", full_rebuild);
     insert_u64(&mut summary, "core_apply_total", core_apply_total);
     insert_u64(&mut summary, "core_incremental_total", core_incremental);
     insert_u64(&mut summary, "core_full_snapshot_total", core_full_snapshot);
+    insert_u64(
+        &mut summary,
+        "runtime_core_full_snapshot_total",
+        runtime_core_full_snapshot,
+    );
     insert_u64(&mut summary, "revision_mismatch_total", revision_mismatch);
     insert_u64(
         &mut summary,
@@ -1394,6 +1407,37 @@ mod tests {
         assert_eq!(summary["gate"], json!("allow_widen"));
         assert_eq!(summary["can_widen"], json!(true));
         assert_eq!(summary["rollback_recommended"], json!(false));
+        assert_eq!(summary["warning"], json!(""));
+    }
+
+    #[test]
+    fn native_core_metrics_summary_ignores_startup_revision_baseline_full_snapshots() {
+        let metrics = json!({
+            "user_delta": {
+                "kelinode_user_delta_native_apply_success_total": 2,
+                "kelinode_user_delta_revision_baseline_total": 13
+            },
+            "keli_core_rs": {
+                "keli_core_user_delta_apply_total": 15,
+                "keli_core_user_delta_incremental_total": 2,
+                "keli_core_user_delta_full_snapshot_total": 13,
+                "keli_core_user_delta_apply_duration_ms": {
+                    "count": 15,
+                    "last_ms": 1,
+                    "max_ms": 10
+                }
+            }
+        });
+
+        let summary = metrics_value(metrics)["native_core_gray_health"].clone();
+
+        assert_eq!(summary["mode"], json!("native_delta"));
+        assert_eq!(summary["gate"], json!("allow_widen"));
+        assert_eq!(summary["can_widen"], json!(true));
+        assert_eq!(summary["revision_baseline_total"], json!(13));
+        assert_eq!(summary["core_full_snapshot_total"], json!(13));
+        assert_eq!(summary["runtime_core_full_snapshot_total"], json!(0));
+        assert_eq!(summary["reasons"], json!([]));
         assert_eq!(summary["warning"], json!(""));
     }
 
