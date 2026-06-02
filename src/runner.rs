@@ -224,6 +224,79 @@ struct RuntimeUserDeltaChange {
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct PanelUserSyncDeltaSummary {
+    panels: BTreeMap<String, PanelUserSyncDeltaPanelSummary>,
+    nodes: usize,
+    full_snapshots: usize,
+    added: usize,
+    updated: usize,
+    deleted: usize,
+    cached_users: usize,
+    min_base_revision: Option<i64>,
+    max_base_revision: Option<i64>,
+    min_revision: Option<i64>,
+    max_revision: Option<i64>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct PanelUserSyncDeltaPanelSummary {
+    nodes: usize,
+    full_snapshots: usize,
+    added: usize,
+    updated: usize,
+    deleted: usize,
+    cached_users: usize,
+    min_revision: Option<i64>,
+    max_revision: Option<i64>,
+}
+
+impl PanelUserSyncDeltaSummary {
+    fn record(&mut self, config: &NodeConfig, entry: &RuntimeUserSyncEntry) {
+        let Some(change) = entry.last_change.as_ref() else {
+            return;
+        };
+        let api_host = config.url.trim_end_matches('/').to_string();
+        let added = change.diff.added.len();
+        let updated = change.diff.updated.len();
+        let deleted = change.diff.deleted.len();
+        let cached_users = entry.state.users.len();
+        self.nodes += 1;
+        if change.full {
+            self.full_snapshots += 1;
+        }
+        self.added += added;
+        self.updated += updated;
+        self.deleted += deleted;
+        self.cached_users += cached_users;
+        update_revision_range(
+            &mut self.min_base_revision,
+            &mut self.max_base_revision,
+            change.base_revision,
+        );
+        update_revision_range(
+            &mut self.min_revision,
+            &mut self.max_revision,
+            change.revision,
+        );
+
+        let panel = self.panels.entry(api_host).or_default();
+        panel.nodes += 1;
+        if change.full {
+            panel.full_snapshots += 1;
+        }
+        panel.added += added;
+        panel.updated += updated;
+        panel.deleted += deleted;
+        panel.cached_users += cached_users;
+        update_revision_range(
+            &mut panel.min_revision,
+            &mut panel.max_revision,
+            change.revision,
+        );
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct PanelUserSyncUnchangedSummary {
     panels: BTreeMap<String, PanelUserSyncUnchangedPanelSummary>,
     snapshots: BTreeSet<String>,
@@ -707,6 +780,44 @@ fn panel_user_sync_unchanged_summary_log_message(
         summary.shared_cached_users,
         summary.unique_snapshots,
         summary.shared_entries,
+        revision_range_label(summary.min_revision, summary.max_revision),
+        panel_breakdown
+    ))
+}
+
+fn panel_user_sync_delta_summary_log_message(
+    summary: &PanelUserSyncDeltaSummary,
+) -> Option<String> {
+    if summary.nodes == 0 {
+        return None;
+    }
+    let panel_breakdown = summary
+        .panels
+        .iter()
+        .map(|(api_host, panel)| {
+            format!(
+                "{api_host}:nodes={},full_snapshots={},added={},updated={},deleted={},cached_users={},revisions={}",
+                panel.nodes,
+                panel.full_snapshots,
+                panel.added,
+                panel.updated,
+                panel.deleted,
+                panel.cached_users,
+                revision_range_label(panel.min_revision, panel.max_revision)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(";");
+    Some(format!(
+        "panel delta summary panels={} nodes={} full_snapshots={} added={} updated={} deleted={} cached_users={} base_revisions={} revisions={} panel_breakdown={}",
+        summary.panels.len(),
+        summary.nodes,
+        summary.full_snapshots,
+        summary.added,
+        summary.updated,
+        summary.deleted,
+        summary.cached_users,
+        revision_range_label(summary.min_base_revision, summary.max_base_revision),
         revision_range_label(summary.min_revision, summary.max_revision),
         panel_breakdown
     ))
@@ -1803,6 +1914,7 @@ async fn load_users_by_node_tag_from_panel_with_state_and_mode(
     payload_mode: UserRefreshPayloadMode,
 ) -> Result<BTreeMap<String, Vec<UserInfo>>, String> {
     let mut users_by_tag = BTreeMap::new();
+    let mut delta_summary = PanelUserSyncDeltaSummary::default();
     let mut unchanged_summary = PanelUserSyncUnchangedSummary::default();
     for node in &plan.node_infos {
         let Some(config) = node_config_for_info(plan, node.id, &node.tag) else {
@@ -1831,10 +1943,7 @@ async fn load_users_by_node_tag_from_panel_with_state_and_mode(
             Err(error) => return Err(error),
         }
         if entry.last_change.is_some() {
-            logging::info(
-                "users",
-                panel_user_sync_log_message(config, &node.tag, entry),
-            );
+            delta_summary.record(config, entry);
         } else {
             unchanged_summary.record(config, entry);
         }
@@ -1849,6 +1958,9 @@ async fn load_users_by_node_tag_from_panel_with_state_and_mode(
         }
     }
     share_user_sync_snapshots(sync_state);
+    if let Some(message) = panel_user_sync_delta_summary_log_message(&delta_summary) {
+        logging::info("users", message);
+    }
     if should_log_panel_user_sync_unchanged_summary() {
         if let Some(message) = panel_user_sync_unchanged_summary_log_message(&unchanged_summary) {
             logging::info("users", message);
@@ -2177,18 +2289,20 @@ mod tests {
         keli_core_user_full_snapshot_apply_log_message, keli_core_user_full_snapshot_payload,
         load_users_by_node_tag_from_panel_with_state, node_config_for_info,
         nonfatal_keli_core_activity_report, nonfatal_panel_status_report,
-        panel_user_sync_log_message, panel_user_sync_unchanged_summary_log_message,
-        refresh_runtime_health, refresh_subscription_proxy_health, run_runtime_loop,
-        run_runtime_loop_async, run_runtime_loop_async_with_events, runtime_loop_event_for_task,
+        panel_user_sync_delta_summary_log_message, panel_user_sync_log_message,
+        panel_user_sync_unchanged_summary_log_message, refresh_runtime_health,
+        refresh_subscription_proxy_health, run_runtime_loop, run_runtime_loop_async,
+        run_runtime_loop_async_with_events, runtime_loop_event_for_task,
         runtime_plan_needs_cached_users, runtime_user_delta_change, share_user_sync_snapshots,
         should_log_keli_core_relay_metrics_at, should_log_panel_user_sync_unchanged_at, should_run,
         try_apply_keli_core_rs_user_deltas, try_establish_keli_core_rs_revision_baseline,
         user_delta_body_is_revision_only, user_delta_not_supported, user_device_limit_counts,
         user_sync_snapshot_status_value, user_sync_users_for_runtime_rebuild,
-        AsyncRuntimeLoopCallbacks, PanelRuntimeLoop, PanelUserSyncUnchangedSummary,
-        RuntimeLoopCallbacks, RuntimeLoopEvent, RuntimeLoopEventKind, RuntimeLoopExit,
-        RuntimeLoopExitReason, RuntimeLoopFuture, RuntimeLoopOptions, RuntimeUserDeltaApplyOutcome,
-        RuntimeUserDeltaChange, RuntimeUserDeltaMetrics, RuntimeUserSyncEntry,
+        AsyncRuntimeLoopCallbacks, PanelRuntimeLoop, PanelUserSyncDeltaSummary,
+        PanelUserSyncUnchangedSummary, RuntimeLoopCallbacks, RuntimeLoopEvent,
+        RuntimeLoopEventKind, RuntimeLoopExit, RuntimeLoopExitReason, RuntimeLoopFuture,
+        RuntimeLoopOptions, RuntimeUserDeltaApplyOutcome, RuntimeUserDeltaChange,
+        RuntimeUserDeltaMetrics, RuntimeUserSyncEntry,
     };
     use crate::config::{NodeConfig, ResolvedConfig, ResolvedMachineConfig};
     use crate::control::RuntimeControlOptions;
@@ -2715,6 +2829,81 @@ mod tests {
         assert_eq!(
             panel_user_sync_unchanged_summary_log_message(&summary).as_deref(),
             Some("panel unchanged summary panels=2 nodes=3 cached_users=4 unique_cached_users=3 shared_cached_users=1 unique_snapshots=2 shared_entries=1 revisions=10..11 panel_breakdown=https://panel-a.example.test:nodes=2,cached_users=3,revisions=10..11;https://panel-b.example.test:nodes=1,cached_users=1,revisions=11")
+        );
+    }
+
+    #[test]
+    fn panel_user_sync_delta_summary_reports_counts_without_node_spam() {
+        let mut summary = PanelUserSyncDeltaSummary::default();
+        let panel_a = NodeConfig {
+            url: "https://panel-a.example.test/".to_string(),
+            node_id: 12,
+            ..NodeConfig::default()
+        };
+        let panel_b = NodeConfig {
+            url: "https://panel-b.example.test".to_string(),
+            node_id: 7,
+            ..NodeConfig::default()
+        };
+        let users = vec![
+            UserInfo {
+                id: 1,
+                uuid: "panel-a-one".to_string(),
+                speed_limit: 0,
+                device_limit: 0,
+            },
+            UserInfo {
+                id: 2,
+                uuid: "panel-a-two".to_string(),
+                speed_limit: 0,
+                device_limit: 0,
+            },
+            UserInfo {
+                id: 3,
+                uuid: "panel-b-one".to_string(),
+                speed_limit: 0,
+                device_limit: 0,
+            },
+        ];
+        let entry_a = RuntimeUserSyncEntry {
+            state: UserSyncState {
+                revision: 10,
+                users: users.clone().into(),
+                updated_at: None,
+            },
+            delta_supported: true,
+            path: String::new(),
+            last_change: Some(RuntimeUserDeltaChange {
+                full: false,
+                base_revision: 9,
+                revision: 10,
+                diff: UserListDiff {
+                    added: vec![users[0].clone()],
+                    updated: vec![users[1].clone()],
+                    deleted: Vec::new(),
+                },
+            }),
+        };
+        let mut entry_b = entry_a.clone();
+        entry_b.state.revision = 11;
+        entry_b.last_change = Some(RuntimeUserDeltaChange {
+            full: true,
+            base_revision: 10,
+            revision: 11,
+            diff: UserListDiff {
+                added: vec![users[2].clone()],
+                updated: Vec::new(),
+                deleted: vec![users[1].clone()],
+            },
+        });
+
+        summary.record(&panel_a, &entry_a);
+        summary.record(&panel_a, &entry_b);
+        summary.record(&panel_b, &entry_b);
+
+        assert_eq!(
+            panel_user_sync_delta_summary_log_message(&summary).as_deref(),
+            Some("panel delta summary panels=2 nodes=3 full_snapshots=2 added=3 updated=1 deleted=2 cached_users=9 base_revisions=9..10 revisions=10..11 panel_breakdown=https://panel-a.example.test:nodes=2,full_snapshots=1,added=2,updated=1,deleted=1,cached_users=6,revisions=10..11;https://panel-b.example.test:nodes=1,full_snapshots=1,added=1,updated=0,deleted=1,cached_users=3,revisions=11")
         );
     }
 

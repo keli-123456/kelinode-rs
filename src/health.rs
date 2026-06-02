@@ -12,6 +12,9 @@ use crate::subscription_proxy::SubscriptionProxyStatus;
 
 const DEFAULT_INSTALL_DIR: &str = "/usr/local/kelinode";
 const INSTALLED_CORE_VERSION_FILES: &[(&str, &str)] = &[("keli-core-rs", ".keli-core-rs_version")];
+const NATIVE_CORE_BUSY_OPEN_FDS_THRESHOLD: u64 = 3000;
+const NATIVE_CORE_BUSY_ACTIVE_CONNECTION_THRESHOLD: u64 = 200;
+const NATIVE_CORE_BUSY_ASYNC_RELAY_THRESHOLD: u64 = 128;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct UsageSnapshot {
@@ -323,6 +326,28 @@ fn native_core_gray_health_value(metrics: &Map<String, Value>) -> Value {
     );
     let connection_error_total =
         nested_metric_object_sum_u64(metrics, "keli_core_rs", "keli_core_connection_error_total");
+    let core_connection_active_total =
+        nested_metric_u64(metrics, "keli_core_rs", "keli_core_connection_active_total");
+    let core_connection_active_blocking = nested_metric_u64(
+        metrics,
+        "keli_core_rs",
+        "keli_core_connection_active_blocking",
+    );
+    let core_connection_active_async =
+        nested_metric_u64(metrics, "keli_core_rs", "keli_core_connection_active_async");
+    let core_process_open_fds =
+        nested_metric_u64(metrics, "keli_core_rs", "keli_core_process_open_fds");
+    let core_native_relay_active_total =
+        nested_metric_object_sum_u64(metrics, "keli_core_rs", "keli_core_native_relay_active");
+    let core_async_relay_active_total =
+        nested_metric_object_sum_u64(metrics, "keli_core_rs", "keli_core_async_relay_active");
+    let core_detached_blocking_relay_active_total = nested_metric_object_sum_u64(
+        metrics,
+        "keli_core_rs",
+        "keli_core_detached_blocking_relay_active",
+    );
+    let core_native_relay_pending =
+        nested_metric_u64(metrics, "keli_core_rs", "keli_core_native_relay_pending");
     let hy2_connection_timeout_total = nested_metric_object_u64(
         metrics,
         "keli_core_rs",
@@ -416,10 +441,33 @@ fn native_core_gray_health_value(metrics: &Map<String, Value>) -> Value {
         && dns_private_ip_filter_total == 0
         && dns_private_ip_block_total == 0
         && connection_error_total == 0
+        && core_connection_active_total == 0
+        && core_connection_active_blocking == 0
+        && core_connection_active_async == 0
+        && core_process_open_fds == 0
+        && core_native_relay_active_total == 0
+        && core_async_relay_active_total == 0
+        && core_detached_blocking_relay_active_total == 0
+        && core_native_relay_pending == 0
         && !metrics_failure
     {
         return Value::Null;
     }
+
+    let mut busy_reasons = Vec::new();
+    if core_process_open_fds >= NATIVE_CORE_BUSY_OPEN_FDS_THRESHOLD {
+        busy_reasons.push("fd_high");
+    }
+    if core_connection_active_total >= NATIVE_CORE_BUSY_ACTIVE_CONNECTION_THRESHOLD {
+        busy_reasons.push("connection_active_high");
+    }
+    if core_async_relay_active_total >= NATIVE_CORE_BUSY_ASYNC_RELAY_THRESHOLD {
+        busy_reasons.push("async_relay_active_high");
+    }
+    if core_native_relay_pending > 0 {
+        busy_reasons.push("native_relay_pending");
+    }
+    let busy = !busy_reasons.is_empty();
 
     let mut reasons = Vec::new();
     if metrics_failure {
@@ -701,6 +749,44 @@ fn native_core_gray_health_value(metrics: &Map<String, Value>) -> Value {
     );
     summary.insert("metrics_available".to_string(), json!(!metrics_failure));
     summary.insert("dns_guard_activity".to_string(), json!(dns_guard_activity));
+    summary.insert("busy".to_string(), json!(busy));
+    summary.insert("busy_reason".to_string(), json!(busy_reasons.join(",")));
+    insert_u64(
+        &mut summary,
+        "core_connection_active_total",
+        core_connection_active_total,
+    );
+    insert_u64(
+        &mut summary,
+        "core_connection_active_blocking",
+        core_connection_active_blocking,
+    );
+    insert_u64(
+        &mut summary,
+        "core_connection_active_async",
+        core_connection_active_async,
+    );
+    insert_u64(&mut summary, "core_process_open_fds", core_process_open_fds);
+    insert_u64(
+        &mut summary,
+        "core_native_relay_active_total",
+        core_native_relay_active_total,
+    );
+    insert_u64(
+        &mut summary,
+        "core_async_relay_active_total",
+        core_async_relay_active_total,
+    );
+    insert_u64(
+        &mut summary,
+        "core_detached_blocking_relay_active_total",
+        core_detached_blocking_relay_active_total,
+    );
+    insert_u64(
+        &mut summary,
+        "core_native_relay_pending",
+        core_native_relay_pending,
+    );
     summary.insert("reasons".to_string(), json!(reasons));
     Value::Object(summary)
 }
@@ -1409,6 +1495,41 @@ mod tests {
         assert_eq!(summary["gate"], json!("allow_widen"));
         assert_eq!(summary["can_widen"], json!(true));
         assert_eq!(summary["rollback_recommended"], json!(false));
+        assert_eq!(summary["warning"], json!(""));
+    }
+
+    #[test]
+    fn native_core_metrics_summary_marks_busy_resources_without_holding_widen() {
+        let metrics = json!({
+            "user_delta": {
+                "kelinode_user_delta_native_apply_success_total": 12
+            },
+            "keli_core_rs": {
+                "keli_core_user_delta_incremental_total": 12,
+                "keli_core_connection_active_total": 260,
+                "keli_core_connection_active_async": 240,
+                "keli_core_process_open_fds": 4200,
+                "keli_core_async_relay_active": {
+                    "keli-core-vless-relay": 204
+                }
+            }
+        });
+
+        let summary = metrics_value(metrics)["native_core_gray_health"].clone();
+
+        assert_eq!(summary["mode"], json!("native_delta"));
+        assert_eq!(summary["gate"], json!("allow_widen"));
+        assert_eq!(summary["can_widen"], json!(true));
+        assert_eq!(summary["rollback_recommended"], json!(false));
+        assert_eq!(summary["busy"], json!(true));
+        assert_eq!(
+            summary["busy_reason"],
+            json!("fd_high,connection_active_high,async_relay_active_high")
+        );
+        assert_eq!(summary["core_process_open_fds"], json!(4200));
+        assert_eq!(summary["core_connection_active_total"], json!(260));
+        assert_eq!(summary["core_connection_active_async"], json!(240));
+        assert_eq!(summary["core_async_relay_active_total"], json!(204));
         assert_eq!(summary["warning"], json!(""));
     }
 
