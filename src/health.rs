@@ -337,6 +337,26 @@ fn native_core_gray_health_value(metrics: &Map<String, Value>) -> Value {
         nested_metric_u64(metrics, "keli_core_rs", "keli_core_connection_active_async");
     let core_process_open_fds =
         nested_metric_u64(metrics, "keli_core_rs", "keli_core_process_open_fds");
+    let core_process_rss_bytes =
+        nested_metric_u64(metrics, "keli_core_rs", "keli_core_process_rss_bytes");
+    let core_process_peak_rss_bytes =
+        nested_metric_u64(metrics, "keli_core_rs", "keli_core_process_peak_rss_bytes");
+    let core_process_anonymous_rss_bytes = nested_metric_u64(
+        metrics,
+        "keli_core_rs",
+        "keli_core_process_anonymous_rss_bytes",
+    );
+    let core_process_file_rss_bytes =
+        nested_metric_u64(metrics, "keli_core_rs", "keli_core_process_file_rss_bytes");
+    let core_process_data_bytes =
+        nested_metric_u64(metrics, "keli_core_rs", "keli_core_process_data_bytes");
+    let core_process_threads =
+        nested_metric_u64(metrics, "keli_core_rs", "keli_core_process_threads");
+    let core_process_cpu_percent_x100 = nested_metric_u64(
+        metrics,
+        "keli_core_rs",
+        "keli_core_process_cpu_percent_x100",
+    );
     let core_native_relay_active_total =
         nested_metric_object_sum_u64(metrics, "keli_core_rs", "keli_core_native_relay_active");
     let core_async_relay_active_total =
@@ -445,6 +465,13 @@ fn native_core_gray_health_value(metrics: &Map<String, Value>) -> Value {
         && core_connection_active_blocking == 0
         && core_connection_active_async == 0
         && core_process_open_fds == 0
+        && core_process_rss_bytes == 0
+        && core_process_peak_rss_bytes == 0
+        && core_process_anonymous_rss_bytes == 0
+        && core_process_file_rss_bytes == 0
+        && core_process_data_bytes == 0
+        && core_process_threads == 0
+        && core_process_cpu_percent_x100 == 0
         && core_native_relay_active_total == 0
         && core_async_relay_active_total == 0
         && core_detached_blocking_relay_active_total == 0
@@ -767,6 +794,37 @@ fn native_core_gray_health_value(metrics: &Map<String, Value>) -> Value {
         core_connection_active_async,
     );
     insert_u64(&mut summary, "core_process_open_fds", core_process_open_fds);
+    insert_u64(
+        &mut summary,
+        "core_process_rss_bytes",
+        core_process_rss_bytes,
+    );
+    insert_u64(
+        &mut summary,
+        "core_process_peak_rss_bytes",
+        core_process_peak_rss_bytes,
+    );
+    insert_u64(
+        &mut summary,
+        "core_process_anonymous_rss_bytes",
+        core_process_anonymous_rss_bytes,
+    );
+    insert_u64(
+        &mut summary,
+        "core_process_file_rss_bytes",
+        core_process_file_rss_bytes,
+    );
+    insert_u64(
+        &mut summary,
+        "core_process_data_bytes",
+        core_process_data_bytes,
+    );
+    insert_u64(&mut summary, "core_process_threads", core_process_threads);
+    insert_u64(
+        &mut summary,
+        "core_process_cpu_percent_x100",
+        core_process_cpu_percent_x100,
+    );
     insert_u64(
         &mut summary,
         "core_native_relay_active_total",
@@ -1509,6 +1567,13 @@ mod tests {
                 "keli_core_connection_active_total": 260,
                 "keli_core_connection_active_async": 240,
                 "keli_core_process_open_fds": 4200,
+                "keli_core_process_rss_bytes": 851443712,
+                "keli_core_process_peak_rss_bytes": 997150720,
+                "keli_core_process_anonymous_rss_bytes": 839524352,
+                "keli_core_process_file_rss_bytes": 8912896,
+                "keli_core_process_data_bytes": 973451264,
+                "keli_core_process_threads": 64,
+                "keli_core_process_cpu_percent_x100": 6075,
                 "keli_core_async_relay_active": {
                     "keli-core-vless-relay": 204
                 }
@@ -1527,6 +1592,16 @@ mod tests {
             json!("fd_high,connection_active_high,async_relay_active_high")
         );
         assert_eq!(summary["core_process_open_fds"], json!(4200));
+        assert_eq!(summary["core_process_rss_bytes"], json!(851443712));
+        assert_eq!(summary["core_process_peak_rss_bytes"], json!(997150720));
+        assert_eq!(
+            summary["core_process_anonymous_rss_bytes"],
+            json!(839524352)
+        );
+        assert_eq!(summary["core_process_file_rss_bytes"], json!(8912896));
+        assert_eq!(summary["core_process_data_bytes"], json!(973451264));
+        assert_eq!(summary["core_process_threads"], json!(64));
+        assert_eq!(summary["core_process_cpu_percent_x100"], json!(6075));
         assert_eq!(summary["core_connection_active_total"], json!(260));
         assert_eq!(summary["core_connection_active_async"], json!(240));
         assert_eq!(summary["core_async_relay_active_total"], json!(204));

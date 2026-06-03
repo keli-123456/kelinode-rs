@@ -156,6 +156,15 @@ Use machine status metrics to verify that small user changes stay on the native 
 - `metrics.native_core_gray_health.core_full_snapshot_total`
 - `metrics.native_core_gray_health.core_apply_duration_last_ms`
 - `metrics.native_core_gray_health.core_apply_duration_max_ms`
+- `metrics.native_core_gray_health.core_process_rss_bytes`
+- `metrics.native_core_gray_health.core_process_peak_rss_bytes`
+- `metrics.native_core_gray_health.core_process_anonymous_rss_bytes`
+- `metrics.native_core_gray_health.core_process_file_rss_bytes`
+- `metrics.native_core_gray_health.core_process_data_bytes`
+- `metrics.native_core_gray_health.core_process_threads`
+- `metrics.native_core_gray_health.core_process_cpu_percent_x100`
+- `metrics.native_core_gray_health.core_process_open_fds`
+- `metrics.native_core_gray_health.core_connection_active_total`
 
 Healthy gray behavior:
 
@@ -171,6 +180,26 @@ Healthy gray behavior:
 - `native_core_gray_health.reasons` explains the gate, for example `metrics_unavailable`,
   `native_apply_failed`, `core_apply_error`, `full_rebuild`, `revision_mismatch`, or
   `current_revision_missing`.
+
+Resource sampling notes:
+
+- `core_process_rss_bytes` and `core_process_peak_rss_bytes` come from the native core process and
+  should be tracked as a trend, not as a single absolute pass/fail number.
+- `core_process_anonymous_rss_bytes` helps distinguish heap/private memory from mapped file cache.
+- `core_process_cpu_percent_x100` is CPU percentage multiplied by 100. For example `6075` means
+  about `60.75%` of one CPU core between samples.
+- `core_process_open_fds`, `core_connection_active_total`, and relay-active counters are still the
+  first place to look when RSS grows with connection pressure.
+
+Linux side-check commands for a gray node:
+
+```bash
+pid=$(pgrep -f 'kelinode server --config|keli-core-rs' | head -n1)
+grep -E 'VmRSS|VmHWM|RssAnon|RssFile|VmData|Threads' /proc/$pid/status
+ls /proc/$pid/fd | wc -l
+ps -p "$pid" -o pid,pcpu,pmem,rss,vsz,nlwp,comm
+ss -tanp 2>/dev/null | grep "pid=$pid," | awk '{count[$1]++} END {for (s in count) print s,count[s]}'
+```
 
 Do not expose `user_uuid` or token values as metric dimensions.
 
