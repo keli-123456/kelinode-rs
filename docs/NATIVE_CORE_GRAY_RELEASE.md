@@ -201,6 +201,21 @@ ps -p "$pid" -o pid,pcpu,pmem,rss,vsz,nlwp,comm
 ss -tanp 2>/dev/null | grep "pid=$pid," | awk '{count[$1]++} END {for (s in count) print s,count[s]}'
 ```
 
+For a release or 24-hour soak, prefer the resource trend helper so every run records the same
+fields and can be compared later:
+
+```bash
+scripts/ops/native_resource_watch.sh --samples 1440 --interval 60 \
+  --since "$(date -Iseconds)" \
+  --out /tmp/keli-native-resource-watch-24h
+```
+
+The helper writes `samples.tsv` with per-sample RSS/HWM/anonymous RSS, file RSS, data size, thread
+count, FD count, instant CPU percentage, service state, latest relay scheduler activity, and
+cumulative journal counters for external-core start failures, panic lines, native user-delta applies,
+Trojan connection failures, HY2 timeouts, and invalid-auth noise. Keep the output directory on the
+test host or in private release artifacts; do not commit raw journals.
+
 Do not expose `user_uuid` or token values as metric dimensions.
 
 ## Traffic Reliability Signals
