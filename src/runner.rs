@@ -35,8 +35,9 @@ use crate::runtime::{
 use crate::subscription_proxy::SubscriptionProxyRuntimeManager;
 use crate::system::{ResourceSampler, SystemPublicIpProbe};
 use crate::user::{
-    apply_full_user_list, apply_user_delta_body, load_user_sync_state, save_user_sync_state,
-    user_delta_body_diff, user_sync_state_path, UserList, UserListDiff, UserSyncState,
+    apply_full_user_list_owned, apply_user_delta_body_owned, load_user_sync_state,
+    save_user_sync_state, user_delta_body_diff, user_sync_state_path, UserList, UserListDiff,
+    UserSyncState,
 };
 use serde_json::{json, Value};
 use sha1::{Digest, Sha1};
@@ -2009,15 +2010,16 @@ async fn load_users_for_node(
                     );
                     return Ok(());
                 }
+                let full = delta.full;
+                let revision = delta.revision;
                 let diff = user_delta_body_diff(&entry.state, &delta);
-                let change =
-                    runtime_user_delta_change(delta.full, base_revision, delta.revision, diff);
+                let change = runtime_user_delta_change(full, base_revision, revision, diff);
                 if change.is_none() {
-                    entry.state.revision = delta.revision;
+                    entry.state.revision = revision;
                     entry.last_change = None;
                     return Ok(());
                 }
-                let result = apply_user_delta_body(&entry.state, &delta);
+                let result = apply_user_delta_body_owned(&entry.state, delta);
                 entry.state = result.state;
                 entry.last_change = change;
                 save_runtime_user_sync_entry(entry);
@@ -2037,19 +2039,18 @@ async fn load_users_for_node(
         }
     }
 
-    let users = client
-        .get_user_list()
-        .await
-        .map_err(|err| {
-            format!(
-                "get user list [{}-{}] error: {}",
-                config.url.trim_end_matches('/'),
-                config.node_id,
-                err
-            )
-        })?
-        .unwrap_or_else(|| entry.state.users.to_vec());
-    let result = apply_full_user_list(&entry.state, &users);
+    let users = client.get_user_list().await.map_err(|err| {
+        format!(
+            "get user list [{}-{}] error: {}",
+            config.url.trim_end_matches('/'),
+            config.node_id,
+            err
+        )
+    })?;
+    let result = match users {
+        Some(users) => apply_full_user_list_owned(&entry.state, users),
+        None => apply_full_user_list_owned(&entry.state, Vec::new()),
+    };
     let change = runtime_user_delta_change(
         true,
         entry.state.revision,

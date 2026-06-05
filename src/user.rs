@@ -89,50 +89,66 @@ pub struct UserSyncState {
     pub updated_at: Option<String>,
 }
 
+enum UserDeltaEntry<'a> {
+    Existing(&'a UserInfo),
+    Upsert(&'a UserInfo),
+}
+
+impl<'a> UserDeltaEntry<'a> {
+    fn user(&self) -> &'a UserInfo {
+        match self {
+            Self::Existing(user) | Self::Upsert(user) => user,
+        }
+    }
+}
+
 pub fn apply_user_delta(
     old: &[UserInfo],
     deleted: &[UserInfo],
     upsert: &[UserInfo],
 ) -> UserDeltaApplyResult {
-    let mut old_map = user_map_by_uuid(old);
+    let mut next_by_uuid = user_delta_entries_by_uuid(old);
     let mut result = UserDeltaApplyResult::default();
 
     for user in deleted {
-        if let Some(old_user) = old_map.remove(&user.uuid) {
-            result.deleted_applied.push(old_user);
+        if let Some(old_user) = next_by_uuid.remove(user.uuid.as_str()) {
+            result.deleted_applied.push(old_user.user().clone());
         }
     }
 
     for user in upsert {
-        if let Some(old_user) = old_map.get(&user.uuid) {
-            if user_changed(old_user, user) {
+        if let Some(old_user) = next_by_uuid.get(user.uuid.as_str()) {
+            if user_changed(old_user.user(), user) {
                 result.updated.push(user.clone());
             }
         } else {
             result.added.push(user.clone());
         }
-        old_map.insert(user.uuid.clone(), user.clone());
+        next_by_uuid.insert(user.uuid.as_str(), UserDeltaEntry::Upsert(user));
     }
 
-    result.next = old_map.into_values().collect();
+    result.next = next_by_uuid
+        .into_values()
+        .map(|entry| entry.user().clone())
+        .collect();
     result
 }
 
 pub fn compare_user_list(old: &[UserInfo], new: &[UserInfo]) -> UserListDiff {
-    let mut old_map = user_map_by_uuid(old);
+    let mut old_map = user_refs_by_uuid(old);
     let mut diff = UserListDiff::default();
 
     for user in new {
-        let Some(old_user) = old_map.remove(&user.uuid) else {
+        let Some(old_user) = old_map.remove(user.uuid.as_str()) else {
             diff.added.push(user.clone());
             continue;
         };
-        if user_changed(&old_user, user) {
+        if user_changed(old_user, user) {
             diff.updated.push(user.clone());
         }
     }
 
-    diff.deleted = old_map.into_values().collect();
+    diff.deleted = old_map.into_values().cloned().collect();
     diff
 }
 
@@ -146,6 +162,39 @@ pub fn apply_user_delta_body(state: &UserSyncState, delta: &UserDeltaBody) -> Us
         } else {
             let diff = compare_user_list(&state.users, &delta.users);
             next_state.users = delta.users.clone().into();
+            diff
+        }
+    } else if delta.deleted.is_empty() && delta.upsert.is_empty() {
+        UserListDiff::default()
+    } else {
+        let applied = apply_user_delta(&state.users, &delta.deleted, &delta.upsert);
+        next_state.users = applied.next.into();
+        UserListDiff {
+            deleted: applied.deleted_applied,
+            added: applied.added,
+            updated: applied.updated,
+        }
+    };
+
+    UserSyncStepResult {
+        state: next_state,
+        diff,
+    }
+}
+
+pub fn apply_user_delta_body_owned(
+    state: &UserSyncState,
+    delta: UserDeltaBody,
+) -> UserSyncStepResult {
+    let mut next_state = state.clone();
+    next_state.revision = delta.revision;
+
+    let diff = if delta.full {
+        if delta.users.is_empty() {
+            UserListDiff::default()
+        } else {
+            let diff = compare_user_list(&state.users, &delta.users);
+            next_state.users = delta.users.into();
             diff
         }
     } else if delta.deleted.is_empty() && delta.upsert.is_empty() {
@@ -193,6 +242,27 @@ pub fn apply_full_user_list(state: &UserSyncState, users: &[UserInfo]) -> UserSy
     }
 }
 
+pub fn apply_full_user_list_owned(
+    state: &UserSyncState,
+    users: Vec<UserInfo>,
+) -> UserSyncStepResult {
+    if users.is_empty() {
+        return UserSyncStepResult {
+            state: state.clone(),
+            diff: UserListDiff::default(),
+        };
+    }
+
+    let diff = compare_user_list(&state.users, &users);
+    UserSyncStepResult {
+        state: UserSyncState {
+            users: users.into(),
+            ..state.clone()
+        },
+        diff,
+    }
+}
+
 fn compare_incremental_delta(
     old: &[UserInfo],
     deleted: &[UserInfo],
@@ -224,10 +294,17 @@ fn compare_incremental_delta(
     diff
 }
 
-fn user_map_by_uuid(users: &[UserInfo]) -> BTreeMap<String, UserInfo> {
+fn user_refs_by_uuid(users: &[UserInfo]) -> BTreeMap<&str, &UserInfo> {
     users
         .iter()
-        .map(|user| (user.uuid.clone(), user.clone()))
+        .map(|user| (user.uuid.as_str(), user))
+        .collect()
+}
+
+fn user_delta_entries_by_uuid(users: &[UserInfo]) -> BTreeMap<&str, UserDeltaEntry<'_>> {
+    users
+        .iter()
+        .map(|user| (user.uuid.as_str(), UserDeltaEntry::Existing(user)))
         .collect()
 }
 
@@ -293,9 +370,9 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::{
-        apply_full_user_list, apply_user_delta, apply_user_delta_body, compare_user_list,
-        load_user_sync_state, save_user_sync_state, user_delta_body_diff, user_sync_state_path,
-        UserSyncState,
+        apply_full_user_list, apply_full_user_list_owned, apply_user_delta, apply_user_delta_body,
+        compare_user_list, load_user_sync_state, save_user_sync_state, user_delta_body_diff,
+        user_sync_state_path, UserSyncState,
     };
     use crate::panel::types::{UserDeltaBody, UserInfo};
 
@@ -312,6 +389,35 @@ mod tests {
         assert_eq!(uuids(&result.added), vec!["d"]);
         assert_eq!(uuids(&result.updated), vec!["c"]);
         assert_eq!(result.next[1].speed_limit, 10);
+    }
+
+    #[test]
+    fn apply_user_delta_keeps_legacy_uuid_sorted_next_order() {
+        let old = vec![user(2, "b", 0, 1), user(1, "a", 0, 1), user(3, "c", 0, 1)];
+        let deleted = vec![user(3, "c", 0, 1)];
+        let upsert = vec![user(4, "d", 0, 2), user(1, "a", 10, 1)];
+
+        let result = apply_user_delta(&old, &deleted, &upsert);
+
+        assert_eq!(uuids(&result.next), vec!["a", "b", "d"]);
+        assert_eq!(uuids(&result.deleted_applied), vec!["c"]);
+        assert_eq!(uuids(&result.added), vec!["d"]);
+        assert_eq!(uuids(&result.updated), vec!["a"]);
+    }
+
+    #[test]
+    fn owned_full_user_list_matches_borrowed_apply_result() {
+        let state = UserSyncState {
+            revision: 7,
+            users: vec![user(1, "a", 0, 1), user(2, "b", 0, 1)].into(),
+            updated_at: None,
+        };
+        let users = vec![user(1, "a", 0, 2), user(3, "c", 0, 1)];
+
+        let borrowed = apply_full_user_list(&state, &users);
+        let owned = apply_full_user_list_owned(&state, users);
+
+        assert_eq!(owned, borrowed);
     }
 
     #[test]
