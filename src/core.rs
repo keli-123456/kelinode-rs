@@ -286,7 +286,7 @@ fn normalized_strategy_key(value: &str) -> String {
 fn strip_native_user_emails(inbounds: &mut [InboundPlan]) {
     for inbound in inbounds {
         for user in inbound.users.make_mut() {
-            user.email.clear();
+            user.email = String::new();
         }
     }
 }
@@ -3886,6 +3886,8 @@ mod tests {
         assert!(plan.inbounds[0].users.ptr_eq(&plan.inbounds[1].users));
         assert_eq!(plan.inbounds[0].users[0].email, "");
         assert_eq!(plan.inbounds[1].users[0].email, "");
+        assert_eq!(plan.inbounds[0].users[0].email.capacity(), 0);
+        assert_eq!(plan.inbounds[1].users[0].email.capacity(), 0);
     }
 
     #[test]
