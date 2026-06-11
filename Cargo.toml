@@ -1,6 +1,6 @@
 [package]
 name = "kelinode-rs"
-version = "0.1.303"
+version = "0.1.304"
 edition = "2021"
 rust-version = "1.74"
 license = "MPL-2.0"
