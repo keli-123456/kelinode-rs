@@ -3953,6 +3953,7 @@ mod tests {
                 id: "upgrade-1".to_string(),
                 target_version: "v0.4.0".to_string(),
                 component: String::new(),
+                ..MachineUpgradeCommand::default()
             }),
             ..FakeCallbacks::default()
         };
@@ -3974,6 +3975,7 @@ mod tests {
                 id: "upgrade-1".to_string(),
                 target_version: "v0.4.0".to_string(),
                 component: String::new(),
+                ..MachineUpgradeCommand::default()
             }))
         );
     }

@@ -17,6 +17,7 @@ MACHINE_URL_ARG=""
 MACHINE_ID_ARG=""
 MACHINE_TOKEN_ARG=""
 MACHINE_NAME_ARG=""
+RELEASE_BASE_URL_ARG="${KELINODE_RELEASE_BASE_URL:-}"
 ACTION="install"
 PURGE_CONFIG="false"
 SKIP_GEO_RULES="false"
@@ -34,6 +35,7 @@ Options:
   --machine-id ID         server machine ID.
   --machine-token TOKEN   server machine token.
   --machine-name NAME     local profile name.
+  --release-base-url URL  release API base URL. Defaults to GitHub releases.
   --skip-geo-rules        do not download default geoip/geosite text route rules.
   --purge-config          uninstall only: also remove /etc/kelinode.
 EOF
@@ -61,6 +63,8 @@ parse_args() {
                 MACHINE_TOKEN_ARG="${2:-}"; shift 2 ;;
             --machine-name)
                 MACHINE_NAME_ARG="${2:-}"; shift 2 ;;
+            --release-base-url)
+                RELEASE_BASE_URL_ARG="${2:-}"; shift 2 ;;
             --skip-geo-rules)
                 SKIP_GEO_RULES="true"; shift ;;
             --purge-config)
@@ -165,6 +169,36 @@ detect_target() {
     esac
 }
 
+release_query() {
+    printf "machine_id=${MACHINE_ID_ARG}&machine_token=${MACHINE_TOKEN_ARG}"
+}
+
+release_manifest_url() {
+    local component="$1"
+    local version="$2"
+    local target="$3"
+    if [[ -n "$RELEASE_BASE_URL_ARG" ]]; then
+        printf '%s/%s/%s/%s/manifest.json?%s' "${RELEASE_BASE_URL_ARG%/}" "$component" "$version" "$target" "$(release_query)"
+        return
+    fi
+
+    local asset="keli-native-node-${version}-${target}"
+    printf 'https://github.com/keli-123456/kelinode-rs/releases/download/%s/%s.manifest.json' "$version" "$asset"
+}
+
+release_archive_url() {
+    local component="$1"
+    local version="$2"
+    local target="$3"
+    if [[ -n "$RELEASE_BASE_URL_ARG" ]]; then
+        printf '%s/%s/%s/%s/archive.tar.gz?%s' "${RELEASE_BASE_URL_ARG%/}" "$component" "$version" "$target" "$(release_query)"
+        return
+    fi
+
+    local asset="keli-native-node-${version}-${target}"
+    printf 'https://github.com/keli-123456/kelinode-rs/releases/download/%s/%s.tar.gz' "$version" "$asset"
+}
+
 resolve_version() {
     if [[ -n "$VERSION_ARG" ]]; then
         printf '%s' "$VERSION_ARG"
@@ -172,9 +206,15 @@ resolve_version() {
     fi
 
     local version
-    version="$(curl -fsSL 'https://api.github.com/repos/keli-123456/kelinode-rs/releases/latest' \
-        | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
-        | head -n 1)"
+    if [[ -n "$RELEASE_BASE_URL_ARG" ]]; then
+        version="$(curl -fsSL "${RELEASE_BASE_URL_ARG%/}/kelinode-rs/$(detect_target)/latest?$(release_query)" \
+            | sed -n 's/.*"latest_version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
+            | head -n 1)"
+    else
+        version="$(curl -fsSL 'https://api.github.com/repos/keli-123456/kelinode-rs/releases/latest' \
+            | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
+            | head -n 1)"
+    fi
     if [[ -z "$version" ]]; then
         echo -e "${red}Failed to resolve latest kelinode-rs version. Pass --version manually.${plain}" >&2
         exit 1
@@ -712,8 +752,13 @@ EOF
 install_native_node() {
     local version="$1"
     local target="$2"
+    local component="kelinode-rs"
     local asset="keli-native-node-${version}-${target}"
-    local url="https://github.com/keli-123456/kelinode-rs/releases/download/${version}/${asset}.tar.gz"
+    local manifest_url
+    local archive_url
+    manifest_url="$(release_manifest_url "$component" "$version" "$target")"
+    archive_url="$(release_archive_url "$component" "$version" "$target")"
+    local manifest="${WORK_DIR}/${asset}.manifest.json"
     local archive="${WORK_DIR}/${asset}.tar.gz"
 
     if is_native_node_installed_version "$version"; then
@@ -722,8 +767,24 @@ install_native_node() {
     fi
 
     echo -e "${green}Installing Keli native node ${version} (${target})${plain}"
-    echo "Download: ${url}"
-    curl -fL "$url" -o "$archive"
+    echo "Manifest: ${manifest_url}"
+    curl -fL "$manifest_url" -o "$manifest"
+    local manifest_sha
+    local manifest_binary
+    manifest_sha="$(sed -n 's/.*"sha256"[[:space:]]*:[[:space:]]*"\([0-9a-fA-F]\{64\}\)".*/\1/p' "$manifest" | head -n 1)"
+    manifest_binary="$(sed -n 's/.*"binary"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$manifest" | head -n 1)"
+    if [[ -z "$manifest_sha" ]]; then
+        echo -e "${red}Release manifest is missing sha256.${plain}" >&2
+        exit 1
+    fi
+    if [[ -n "$manifest_binary" && "$manifest_binary" != "$BINARY_NAME" ]]; then
+        echo -e "${red}Release manifest binary mismatch: ${manifest_binary}.${plain}" >&2
+        exit 1
+    fi
+
+    echo "Download: ${archive_url}"
+    curl -fL "$archive_url" -o "$archive"
+    (cd "$WORK_DIR" && printf '%s  %s\n' "$manifest_sha" "${asset}.tar.gz" | sha256sum -c -)
     tar -xzf "$archive" -C "$WORK_DIR" --strip-components=1
     stop_existing_service
     (cd "$WORK_DIR" && sh ./install.sh "$INSTALL_DIR")

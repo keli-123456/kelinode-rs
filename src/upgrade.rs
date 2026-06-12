@@ -45,6 +45,14 @@ pub struct ReleaseUpgradeSpec {
     pub platform: String,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ReleaseSource {
+    pub source: String,
+    pub base_url: String,
+    pub machine_id: String,
+    pub machine_token: String,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum UpgradeComponent {
     Node,
@@ -118,7 +126,11 @@ impl UpgradeManager {
             return Ok(Some(status));
         }
 
-        let plan = upgrade_launch_plan_for_component(&target_version, component);
+        let plan = upgrade_launch_plan_for_component_with_source(
+            &target_version,
+            component,
+            ReleaseSource::from_command(&command),
+        );
         if let Err(error) = executor.launch(&plan) {
             status.status = "failed".to_string();
             status.error = truncate_upgrade_error(&error);
@@ -171,6 +183,14 @@ pub fn upgrade_launch_plan_for_component(
     component: UpgradeComponent,
 ) -> UpgradeLaunchPlan {
     release_upgrade_launch_plan(target_version, &component.release_spec())
+}
+
+pub fn upgrade_launch_plan_for_component_with_source(
+    target_version: &str,
+    component: UpgradeComponent,
+    source: ReleaseSource,
+) -> UpgradeLaunchPlan {
+    release_upgrade_launch_plan_with_source(target_version, &component.release_spec(), source)
 }
 
 impl UpgradeComponent {
@@ -248,12 +268,70 @@ impl ReleaseUpgradeSpec {
     }
 }
 
+impl ReleaseSource {
+    fn from_command(command: &MachineUpgradeCommand) -> Self {
+        Self {
+            source: command.release_source.trim().to_string(),
+            base_url: command
+                .release_base_url
+                .trim()
+                .trim_end_matches('/')
+                .to_string(),
+            machine_id: command.release_auth.machine_id.trim().to_string(),
+            machine_token: command.release_auth.machine_token.trim().to_string(),
+        }
+    }
+
+    fn is_panel_like(&self) -> bool {
+        !self.base_url.is_empty()
+    }
+
+    fn query(&self) -> String {
+        if self.machine_id.is_empty() || self.machine_token.is_empty() {
+            return String::new();
+        }
+        format!(
+            "?machine_id={}&machine_token={}",
+            self.machine_id, self.machine_token
+        )
+    }
+
+    fn asset_url(&self, spec: &ReleaseUpgradeSpec, target_version: &str, suffix: &str) -> String {
+        if !self.is_panel_like() {
+            return spec.release_asset_url(target_version, suffix);
+        }
+
+        let endpoint = if suffix == ".manifest.json" {
+            "manifest.json"
+        } else {
+            "archive.tar.gz"
+        };
+        format!(
+            "{}/{}/{}/{}/{}{}",
+            self.base_url,
+            spec.name,
+            target_version,
+            spec.platform,
+            endpoint,
+            self.query()
+        )
+    }
+}
+
 pub fn release_upgrade_launch_plan(
     target_version: &str,
     spec: &ReleaseUpgradeSpec,
 ) -> UpgradeLaunchPlan {
+    release_upgrade_launch_plan_with_source(target_version, spec, ReleaseSource::default())
+}
+
+pub fn release_upgrade_launch_plan_with_source(
+    target_version: &str,
+    spec: &ReleaseUpgradeSpec,
+    source: ReleaseSource,
+) -> UpgradeLaunchPlan {
     let target_version = target_version.trim().to_string();
-    let script = release_upgrade_shell_script(&target_version, spec);
+    let script = release_upgrade_shell_script_with_source(&target_version, spec, &source);
 
     if tool_exists("systemd-run") {
         return UpgradeLaunchPlan {
@@ -294,10 +372,19 @@ pub fn release_upgrade_launch_plan(
     }
 }
 
+#[cfg(test)]
 fn release_upgrade_shell_script(target_version: &str, spec: &ReleaseUpgradeSpec) -> String {
+    release_upgrade_shell_script_with_source(target_version, spec, &ReleaseSource::default())
+}
+
+fn release_upgrade_shell_script_with_source(
+    target_version: &str,
+    spec: &ReleaseUpgradeSpec,
+    source: &ReleaseSource,
+) -> String {
     let asset_prefix = spec.asset_prefix(target_version);
-    let manifest_url = spec.release_asset_url(target_version, ".manifest.json");
-    let archive_url = spec.release_asset_url(target_version, ".tar.gz");
+    let manifest_url = source.asset_url(spec, target_version, ".manifest.json");
+    let archive_url = source.asset_url(spec, target_version, ".tar.gz");
     let mut lines = Vec::new();
     lines.push("set -eu".to_string());
     lines.push(format!("target_version={}", shell_quote(target_version)));
@@ -483,7 +570,7 @@ fn is_zero(value: &i64) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use crate::machine::MachineUpgradeCommand;
+    use crate::machine::{MachineReleaseAuth, MachineUpgradeCommand};
 
     use super::{
         release_upgrade_launch_plan, release_upgrade_shell_script, shell_quote,
@@ -510,6 +597,7 @@ mod tests {
                     id: "upgrade-1".to_string(),
                     target_version: "v1.2.3".to_string(),
                     component: String::new(),
+                    ..MachineUpgradeCommand::default()
                 },
                 "1.2.3",
                 100,
@@ -538,6 +626,7 @@ mod tests {
                     id: "upgrade-1".to_string(),
                     target_version: "v1.2.4".to_string(),
                     component: String::new(),
+                    ..MachineUpgradeCommand::default()
                 },
                 "v1.2.3",
                 200,
@@ -559,6 +648,7 @@ mod tests {
             id: "upgrade-1".to_string(),
             target_version: "v1.2.4".to_string(),
             component: String::new(),
+            ..MachineUpgradeCommand::default()
         };
 
         manager
@@ -583,6 +673,7 @@ mod tests {
                     id: "upgrade-core-1".to_string(),
                     target_version: "v1.2.4".to_string(),
                     component: "core".to_string(),
+                    ..MachineUpgradeCommand::default()
                 },
                 "v1.2.4",
                 210,
@@ -611,6 +702,7 @@ mod tests {
                     id: "upgrade-bad".to_string(),
                     target_version: "v1.2.4".to_string(),
                     component: "browser".to_string(),
+                    ..MachineUpgradeCommand::default()
                 },
                 "v1.2.3",
                 210,
@@ -661,6 +753,39 @@ mod tests {
         assert!(script.contains("keli-core-rs-v0.1.1-linux-x86_64.tar.gz"));
         assert!(script.contains("if [ \"$component\" = \"kelinode-rs\" ]; then"));
         assert!(script.contains("$install_dir/.${component}_version"));
+    }
+
+    #[test]
+    fn upgrade_shell_script_uses_panel_release_source() {
+        let mut manager = UpgradeManager::default();
+        let mut executor = MemoryUpgradeExecutor::default();
+
+        manager
+            .request(
+                MachineUpgradeCommand {
+                    id: "upgrade-panel".to_string(),
+                    target_version: "v1.2.5".to_string(),
+                    component: String::new(),
+                    release_source: "panel".to_string(),
+                    release_base_url: "https://panel.example.test/server/machine/releases"
+                        .to_string(),
+                    release_auth: MachineReleaseAuth {
+                        machine_id: "7".to_string(),
+                        machine_token: "secret-token".to_string(),
+                    },
+                },
+                "v1.2.4",
+                123,
+                &mut executor,
+            )
+            .expect("upgrade request");
+
+        let launched = executor.launches.first().expect("upgrade launch");
+        let script = launched.args.join(" ");
+
+        assert!(script.contains("https://panel.example.test/server/machine/releases/kelinode-rs/v1.2.5/linux-x86_64/manifest.json?machine_id=7&machine_token=secret-token"));
+        assert!(script.contains("https://panel.example.test/server/machine/releases/kelinode-rs/v1.2.5/linux-x86_64/archive.tar.gz?machine_id=7&machine_token=secret-token"));
+        assert!(!script.contains("github.com/keli-123456/kelinode-rs"));
     }
 
     #[test]

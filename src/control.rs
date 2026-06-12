@@ -1606,6 +1606,7 @@ mod tests {
                 id: "upgrade-1".to_string(),
                 target_version: "v0.4.1".to_string(),
                 component: String::new(),
+                ..MachineUpgradeCommand::default()
             }),
         };
 
@@ -1623,6 +1624,7 @@ mod tests {
                 id: "upgrade-1".to_string(),
                 target_version: "v0.4.1".to_string(),
                 component: String::new(),
+                ..MachineUpgradeCommand::default()
             }),
         };
 
@@ -1632,6 +1634,7 @@ mod tests {
                 id: "upgrade-1".to_string(),
                 target_version: "v0.4.1".to_string(),
                 component: String::new(),
+                ..MachineUpgradeCommand::default()
             })
         );
     }
@@ -1649,6 +1652,7 @@ mod tests {
                     id: "upgrade-1".to_string(),
                     target_version: "v0.4.1".to_string(),
                     component: String::new(),
+                    ..MachineUpgradeCommand::default()
                 }),
             },
         );
@@ -1660,6 +1664,7 @@ mod tests {
                     id: "upgrade-2".to_string(),
                     target_version: "v0.4.2".to_string(),
                     component: String::new(),
+                    ..MachineUpgradeCommand::default()
                 }),
             },
         );
@@ -1839,6 +1844,7 @@ mod tests {
             id: "upgrade-1".to_string(),
             target_version: "v0.4.1".to_string(),
             component: String::new(),
+            ..MachineUpgradeCommand::default()
         });
 
         let status = handle_runtime_signal(&signal, &mut manager, "v0.4.0", 300, &mut executor)

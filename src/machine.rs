@@ -119,11 +119,25 @@ pub struct MachineStatusResponse {
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
+pub struct MachineReleaseAuth {
+    #[serde(default)]
+    pub machine_id: String,
+    #[serde(default)]
+    pub machine_token: String,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
 pub struct MachineUpgradeCommand {
     pub id: String,
     pub target_version: String,
     #[serde(default)]
     pub component: String,
+    #[serde(default)]
+    pub release_source: String,
+    #[serde(default)]
+    pub release_base_url: String,
+    #[serde(default)]
+    pub release_auth: MachineReleaseAuth,
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
