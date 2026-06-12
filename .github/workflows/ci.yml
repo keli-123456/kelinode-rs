@@ -58,6 +58,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          bash scripts/ops/native_resource_watch.sh --self-test-patterns
           tmp="$(mktemp -d)"
           cat >"${tmp}/samples.tsv" <<'EOF'
           timestamp	pid	binary_sha	active_state	sub_state	rss_kb	hwm_kb	rss_anon_kb	rss_file_kb	vm_data_kb	threads	fd_count	cpu_percent	proc_ticks	total_ticks	active_async	active_native	active_blocking	native_workers	native_pending	external_core_errors	panic_lines	native_user_deltas	trojan_failures	hy2_timeouts	invalid_auth

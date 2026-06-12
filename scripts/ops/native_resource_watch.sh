@@ -9,6 +9,8 @@ SAMPLES="${SAMPLES:-60}"
 PID_OVERRIDE="${PID:-}"
 SINCE="${SINCE:-}"
 USE_JOURNAL=1
+SELF_TEST_PATTERNS=0
+PANIC_LOG_PATTERN="(^|[[:space:]])(thread[[:space:]].*panicked|panicked at|panic!|fatal runtime error)([[:space:]:]|$)"
 
 usage() {
   cat <<'USAGE'
@@ -24,12 +26,33 @@ Options:
   --interval SECONDS   seconds between CPU samples (default: 60)
   --since TIME         journal start time for cumulative counters
   --no-journal         skip journal-derived counters
+  --self-test-patterns validate internal log classification patterns
   -h, --help           show this help
 
 Examples:
   scripts/ops/native_resource_watch.sh --samples 10 --interval 60
   scripts/ops/native_resource_watch.sh --samples 1440 --interval 60 --out /tmp/keli-native-resource-24h
 USAGE
+}
+
+run_pattern_self_tests() {
+  local false_positive='core hysteria2 tcp relay timeout: tcp connect timed out target=download-cdn.panic.com:443'
+  local rust_panic="thread 'tokio-runtime-worker' panicked at src/main.rs:1: boom"
+  local fatal_runtime='fatal runtime error: stack overflow'
+
+  if printf '%s\n' "${false_positive}" | grep -Eq "${PANIC_LOG_PATTERN}"; then
+    echo "panic pattern matched benign domain: ${false_positive}" >&2
+    return 1
+  fi
+  if ! printf '%s\n' "${rust_panic}" | grep -Eq "${PANIC_LOG_PATTERN}"; then
+    echo "panic pattern missed Rust panic line: ${rust_panic}" >&2
+    return 1
+  fi
+  if ! printf '%s\n' "${fatal_runtime}" | grep -Eq "${PANIC_LOG_PATTERN}"; then
+    echo "panic pattern missed fatal runtime line: ${fatal_runtime}" >&2
+    return 1
+  fi
+  echo "native_resource_watch pattern self-test ok"
 }
 
 while [ "$#" -gt 0 ]; do
@@ -63,6 +86,10 @@ while [ "$#" -gt 0 ]; do
       USE_JOURNAL=0
       shift
       ;;
+    --self-test-patterns)
+      SELF_TEST_PATTERNS=1
+      shift
+      ;;
     -h | --help)
       usage
       exit 0
@@ -75,6 +102,11 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
+if [ "${SELF_TEST_PATTERNS}" -eq 1 ]; then
+  run_pattern_self_tests
+  exit $?
+fi
+
 require_cmd() {
   if ! command -v "$1" >/dev/null 2>&1; then
     echo "missing required command: $1" >&2
@@ -85,6 +117,7 @@ require_cmd() {
 require_cmd awk
 require_cmd date
 require_cmd find
+require_cmd grep
 require_cmd wc
 
 if ! [[ "${SAMPLES}" =~ ^[0-9]+$ ]] || [ "${SAMPLES}" -lt 1 ]; then
@@ -243,7 +276,7 @@ for sample in $(seq 1 "${SAMPLES}"); do
   native_workers="$(scheduler_field native_workers "${scheduler_line}")"
   native_pending="$(scheduler_field native_pending "${scheduler_line}")"
   external_core_errors="$(count_pattern 'agent start process core:keli-core-rs')"
-  panic_lines="$(count_pattern 'panic|thread.*panicked')"
+  panic_lines="$(count_pattern "${PANIC_LOG_PATTERN}")"
   native_user_deltas="$(count_pattern 'core user delta applied natively')"
   trojan_failures="$(count_pattern 'core trojan connection failed')"
   hy2_timeouts="$(count_pattern 'hysteria2 connection timeout')"
