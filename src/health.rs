@@ -1090,6 +1090,17 @@ fn agent_value(agent: &AgentConfig, subscription_proxy: Option<&SubscriptionProx
             })
         })
         .collect::<Vec<_>>();
+    let website_profiles = proxy
+        .website_profiles
+        .iter()
+        .map(|profile| {
+            json!({
+                "site_id": &profile.site_id,
+                "upstream_base_url": &profile.upstream_base_url,
+                "path_prefix": &profile.path_prefix
+            })
+        })
+        .collect::<Vec<_>>();
 
     json!({
         "subscription_proxy": {
@@ -1100,7 +1111,8 @@ fn agent_value(agent: &AgentConfig, subscription_proxy: Option<&SubscriptionProx
             "site_id": &proxy.site_id,
             "upstream_base_url": &proxy.upstream_base_url,
             "subscribe_path": &proxy.subscribe_path,
-            "profiles": profiles
+            "profiles": profiles,
+            "website_profiles": website_profiles
         }
     })
 }
@@ -1113,6 +1125,7 @@ fn subscription_proxy_status_value(status: &SubscriptionProxyStatus) -> Value {
         "mode": &status.mode,
         "https_listen": &status.https_listen,
         "profiles": status.profiles,
+        "website_profiles": status.website_profiles,
         "certificate_domain": &status.certificate_domain,
         "certificate_owner_site_id": &status.certificate_owner_site_id,
         "certificate_id": &status.certificate_id,
@@ -1870,6 +1883,7 @@ mod tests {
                     mode: "https".to_string(),
                     https_listen: "0.0.0.0:443".to_string(),
                     profiles: 2,
+                    website_profiles: 1,
                     certificate_domain: "proxy.example.test".to_string(),
                     certificate_owner_site_id: "site-a".to_string(),
                     certificate_id: "cert-1".to_string(),

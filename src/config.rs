@@ -130,6 +130,8 @@ pub struct SubscriptionProxyConfig {
     pub max_response_bytes: u64,
     #[serde(default)]
     pub profiles: Vec<SubscriptionProxyProfile>,
+    #[serde(default)]
+    pub website_profiles: Vec<WebsiteProxyProfile>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
@@ -158,6 +160,16 @@ pub struct SubscriptionProxyProfile {
     pub upstream_base_url: String,
     #[serde(default)]
     pub subscribe_path: String,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
+pub struct WebsiteProxyProfile {
+    #[serde(default)]
+    pub site_id: String,
+    #[serde(default)]
+    pub upstream_base_url: String,
+    #[serde(default)]
+    pub path_prefix: String,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
@@ -477,9 +489,18 @@ fn normalize_subscription_proxy(src: &SubscriptionProxyConfig) -> SubscriptionPr
             subscribe_path: row.subscribe_path.trim().trim_matches('/').to_string(),
         })
         .collect::<Vec<_>>();
+    let website_profiles = src
+        .website_profiles
+        .iter()
+        .map(|row| WebsiteProxyProfile {
+            site_id: row.site_id.trim().to_string(),
+            upstream_base_url: trim_trailing_slashes(row.upstream_base_url.trim()),
+            path_prefix: normalize_proxy_path_prefix(&row.path_prefix),
+        })
+        .collect::<Vec<_>>();
 
     SubscriptionProxyConfig {
-        enabled: src.enabled || !profiles.is_empty(),
+        enabled: src.enabled || !profiles.is_empty() || !website_profiles.is_empty(),
         https_listen: src.https_listen.trim().to_string(),
         http_listen: src.http_listen.trim().to_string(),
         cert_file: src.cert_file.trim().to_string(),
@@ -493,6 +514,7 @@ fn normalize_subscription_proxy(src: &SubscriptionProxyConfig) -> SubscriptionPr
         allow_http_fallback: src.allow_http_fallback,
         max_response_bytes: src.max_response_bytes,
         profiles,
+        website_profiles,
     }
 }
 
@@ -556,6 +578,18 @@ fn join_posix_path(root: &str, child: &str) -> String {
 
 fn trim_trailing_slashes(value: &str) -> String {
     value.trim_end_matches('/').to_string()
+}
+
+fn normalize_proxy_path_prefix(value: &str) -> String {
+    let value = value.trim().trim_end_matches('/');
+    if value.is_empty() || value == "/" {
+        return "/".to_string();
+    }
+    if value.starts_with('/') {
+        value.to_string()
+    } else {
+        format!("/{value}")
+    }
 }
 
 fn clean_posix_path(path: &str) -> String {

@@ -10,11 +10,12 @@ use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
-use crate::config::{SubscriptionProxyConfig, SubscriptionProxyProfile};
+use crate::config::{SubscriptionProxyConfig, SubscriptionProxyProfile, WebsiteProxyProfile};
 
 pub const DEFAULT_HTTPS_LISTEN: &str = "0.0.0.0:443";
 pub const DEFAULT_CHALLENGE_DIR: &str = "/etc/kelinode/subproxy/challenges";
 pub const DEFAULT_MAX_RESPONSE_BYTES: u64 = 10 * 1024 * 1024;
+pub const DEFAULT_MAX_REQUEST_BODY_BYTES: u64 = 10 * 1024 * 1024;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct SubscriptionProxyInboundRequest {
@@ -24,19 +25,31 @@ pub struct SubscriptionProxyInboundRequest {
     pub host: String,
     pub remote_addr: String,
     pub headers: BTreeMap<String, String>,
+    pub body: Vec<u8>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SubscriptionProxyUpstreamRequest {
+    pub method: String,
     pub url: String,
     pub headers: BTreeMap<String, String>,
+    pub body: Vec<u8>,
     pub head_only: bool,
+    pub follow_redirects: bool,
+    pub response_rewrite: Option<WebsiteProxyRewriteContext>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WebsiteProxyRewriteContext {
+    pub upstream_base_url: String,
+    pub proxy_path_prefix: String,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct SubscriptionProxyUpstreamResponse {
     pub status: u16,
     pub headers: BTreeMap<String, String>,
+    pub set_cookie_headers: Vec<String>,
     pub body: Vec<u8>,
     pub content_length: Option<u64>,
 }
@@ -45,6 +58,7 @@ pub struct SubscriptionProxyUpstreamResponse {
 pub struct SubscriptionProxyClientResponse {
     pub status: u16,
     pub headers: BTreeMap<String, String>,
+    pub set_cookie_headers: Vec<String>,
     pub body: Vec<u8>,
 }
 
@@ -63,6 +77,7 @@ pub struct SubscriptionProxyStatus {
     pub mode: String,
     pub https_listen: String,
     pub profiles: usize,
+    pub website_profiles: usize,
     pub certificate_domain: String,
     pub certificate_owner_site_id: String,
     pub certificate_id: String,
@@ -94,6 +109,7 @@ pub struct SubscriptionProxyApplyPlan {
     pub status: SubscriptionProxyStatus,
     pub serve_mode: Option<SubscriptionProxyServeMode>,
     pub profiles: Vec<SubscriptionProxyProfile>,
+    pub website_profiles: Vec<WebsiteProxyProfile>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -110,6 +126,7 @@ pub struct SubscriptionProxyMainServerPlan {
     pub key_file: String,
     pub max_response_bytes: u64,
     pub profiles: Vec<SubscriptionProxyProfile>,
+    pub website_profiles: Vec<WebsiteProxyProfile>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -186,10 +203,13 @@ pub fn parse_subscription_proxy_http_request(
     raw: &[u8],
     remote_addr: &str,
 ) -> Result<SubscriptionProxyInboundRequest, String> {
-    let text = std::str::from_utf8(raw).map_err(|_| "invalid utf-8 request".to_string())?;
-    let Some((head, _)) = text.split_once("\r\n\r\n") else {
+    let Some(header_end) = http_header_end(raw) else {
         return Err("incomplete http request".to_string());
     };
+    let head =
+        std::str::from_utf8(&raw[..header_end]).map_err(|_| "invalid utf-8 request".to_string())?;
+    let body_start = header_end + 4;
+    let body = raw.get(body_start..).unwrap_or_default().to_vec();
     let mut lines = head.split("\r\n");
     let request_line = lines
         .next()
@@ -243,6 +263,7 @@ pub fn parse_subscription_proxy_http_request(
         host,
         remote_addr: remote_addr.to_string(),
         headers,
+        body,
     })
 }
 
@@ -257,6 +278,11 @@ pub fn render_subscription_proxy_http_response(
     for (key, value) in &response.headers {
         if valid_http_header_name(key) && valid_http_header_value(value) {
             output.extend_from_slice(format!("{key}: {value}\r\n").as_bytes());
+        }
+    }
+    for value in &response.set_cookie_headers {
+        if valid_http_header_value(value) {
+            output.extend_from_slice(format!("Set-Cookie: {value}\r\n").as_bytes());
         }
     }
     output.extend_from_slice(b"\r\n");
@@ -280,6 +306,7 @@ pub fn subscription_proxy_error_response(
     SubscriptionProxyClientResponse {
         status: error.status_code(),
         headers,
+        set_cookie_headers: Vec::new(),
         body: format!("{message}\n").into_bytes(),
     }
 }
@@ -293,6 +320,7 @@ fn subscription_proxy_bad_request_response(error: &str) -> SubscriptionProxyClie
     SubscriptionProxyClientResponse {
         status: 400,
         headers,
+        set_cookie_headers: Vec::new(),
         body: format!("{error}\n").into_bytes(),
     }
 }
@@ -496,8 +524,33 @@ pub fn normalize_subscription_proxy_config(
     }
 
     config.profiles = profiles;
-    config.enabled = config.enabled || !config.profiles.is_empty();
-    if config.enabled && config.profiles.is_empty() {
+    let mut seen = BTreeSet::new();
+    let mut website_profiles = Vec::new();
+    for profile in config.website_profiles {
+        let site_id = profile.site_id.trim().to_string();
+        let upstream_base_url = trim_trailing_slashes(profile.upstream_base_url.trim());
+        let path_prefix = normalize_proxy_path_prefix(&profile.path_prefix);
+        if site_id.is_empty() || upstream_base_url.is_empty() {
+            continue;
+        }
+        if !is_valid_upstream_base_url(&upstream_base_url) {
+            return Err(format!("invalid website proxy upstream for site {site_id}"));
+        }
+        let dedupe_key = format!("{}\0{}", site_id.to_ascii_lowercase(), path_prefix);
+        if !seen.insert(dedupe_key) {
+            continue;
+        }
+        website_profiles.push(WebsiteProxyProfile {
+            site_id,
+            upstream_base_url,
+            path_prefix,
+        });
+    }
+
+    config.website_profiles = website_profiles;
+    config.enabled =
+        config.enabled || !config.profiles.is_empty() || !config.website_profiles.is_empty();
+    if config.enabled && config.profiles.is_empty() && config.website_profiles.is_empty() {
         return Err("subscription proxy enabled without profiles".to_string());
     }
 
@@ -550,40 +603,118 @@ where
 
 pub fn plan_subscription_proxy_request(
     profiles: &[SubscriptionProxyProfile],
+    website_profiles: &[WebsiteProxyProfile],
     request: &SubscriptionProxyInboundRequest,
 ) -> Result<SubscriptionProxyRoute, SubscriptionProxyRouteError> {
     let method = request.method.trim().to_ascii_uppercase();
-    if method != "GET" && method != "HEAD" {
-        return Err(SubscriptionProxyRouteError::MethodNotAllowed);
-    }
 
     if request.path == "/health" {
+        if method != "GET" && method != "HEAD" {
+            return Err(SubscriptionProxyRouteError::MethodNotAllowed);
+        }
         return Ok(SubscriptionProxyRoute::Health);
     }
 
-    let Some(rest) = request.path.strip_prefix("/sub/") else {
-        return Err(SubscriptionProxyRouteError::NotFound);
-    };
-    let Some((site_id, token_part)) = rest.split_once('/') else {
-        return Err(SubscriptionProxyRouteError::NotFound);
-    };
-    if site_id.trim().is_empty() || token_part.trim().is_empty() {
-        return Err(SubscriptionProxyRouteError::NotFound);
+    if let Some(rest) = request.path.strip_prefix("/sub/") {
+        if method != "GET" && method != "HEAD" {
+            return Err(SubscriptionProxyRouteError::MethodNotAllowed);
+        }
+        let Some((site_id, token_part)) = rest.split_once('/') else {
+            return Err(SubscriptionProxyRouteError::NotFound);
+        };
+        if site_id.trim().is_empty() || token_part.trim().is_empty() {
+            return Err(SubscriptionProxyRouteError::NotFound);
+        }
+        let Some(profile) = profiles
+            .iter()
+            .find(|profile| profile.site_id.eq_ignore_ascii_case(site_id))
+        else {
+            return Err(SubscriptionProxyRouteError::NotFound);
+        };
+        let token = percent_decode_path_segment(token_part)
+            .map_err(SubscriptionProxyRouteError::BadGateway)?;
+        if token.trim().is_empty() {
+            return Err(SubscriptionProxyRouteError::NotFound);
+        }
+
+        let url = build_subscription_upstream_url(profile, &token, &request.raw_query)
+            .map_err(SubscriptionProxyRouteError::BadGateway)?;
+        return Ok(SubscriptionProxyRoute::Upstream(
+            SubscriptionProxyUpstreamRequest {
+                method,
+                url,
+                headers: upstream_forwarded_headers(request),
+                body: Vec::new(),
+                head_only: request.method.trim().eq_ignore_ascii_case("HEAD"),
+                follow_redirects: true,
+                response_rewrite: None,
+            },
+        ));
     }
-    let Some(profile) = profiles
-        .iter()
-        .find(|profile| profile.site_id.eq_ignore_ascii_case(site_id))
+
+    if !is_allowed_website_proxy_method(&method) {
+        return Err(SubscriptionProxyRouteError::MethodNotAllowed);
+    }
+
+    let Some((profile, path_prefix, upstream_path)) =
+        website_proxy_match(website_profiles, &request.path)
     else {
         return Err(SubscriptionProxyRouteError::NotFound);
     };
-    let token =
-        percent_decode_path_segment(token_part).map_err(SubscriptionProxyRouteError::BadGateway)?;
-    if token.trim().is_empty() {
-        return Err(SubscriptionProxyRouteError::NotFound);
-    }
-
-    let url = build_subscription_upstream_url(profile, &token, &request.raw_query)
+    let url = build_website_upstream_url(profile, &upstream_path, &request.raw_query)
         .map_err(SubscriptionProxyRouteError::BadGateway)?;
+    let head_only = method == "HEAD";
+    let body = if head_only {
+        Vec::new()
+    } else {
+        request.body.clone()
+    };
+
+    Ok(SubscriptionProxyRoute::Upstream(
+        SubscriptionProxyUpstreamRequest {
+            method,
+            url,
+            headers: upstream_forwarded_headers(request),
+            body,
+            head_only,
+            follow_redirects: false,
+            response_rewrite: Some(WebsiteProxyRewriteContext {
+                upstream_base_url: trim_trailing_slashes(profile.upstream_base_url.trim()),
+                proxy_path_prefix: path_prefix,
+            }),
+        },
+    ))
+}
+
+pub fn build_website_upstream_url(
+    profile: &WebsiteProxyProfile,
+    upstream_path: &str,
+    raw_query: &str,
+) -> Result<String, String> {
+    let base = trim_trailing_slashes(profile.upstream_base_url.trim());
+    if !is_valid_upstream_base_url(&base) {
+        return Err("invalid base url".to_string());
+    }
+    let path = if upstream_path.trim().is_empty() {
+        "/"
+    } else {
+        upstream_path
+    };
+    let mut url = format!("{base}/{}", path.trim_start_matches('/'));
+    if path == "/" {
+        url = format!("{base}/");
+    }
+    let query = raw_query.trim_start_matches('?');
+    if !query.is_empty() {
+        url.push('?');
+        url.push_str(query);
+    }
+    Ok(url)
+}
+
+fn upstream_forwarded_headers(
+    request: &SubscriptionProxyInboundRequest,
+) -> BTreeMap<String, String> {
     let mut headers = forwarded_headers(&request.headers);
     if !request.host.trim().is_empty() {
         headers.insert(
@@ -591,17 +722,11 @@ pub fn plan_subscription_proxy_request(
             request.host.trim().to_string(),
         );
     }
+    headers.insert("X-Forwarded-Proto".to_string(), "https".to_string());
     if let Some(ip) = client_ip(&request.remote_addr) {
         append_forwarded_for(&mut headers, &ip);
     }
-
-    Ok(SubscriptionProxyRoute::Upstream(
-        SubscriptionProxyUpstreamRequest {
-            url,
-            headers,
-            head_only: method == "HEAD",
-        },
-    ))
+    headers
 }
 
 pub fn plan_subscription_proxy_http_request(
@@ -659,6 +784,7 @@ pub fn plan_subscription_proxy_main_server(
             config.max_response_bytes
         },
         profiles: config.profiles.clone(),
+        website_profiles: config.website_profiles.clone(),
     }
 }
 
@@ -673,11 +799,16 @@ pub fn spawn_subscription_proxy_main_http_fallback_server(
     }
     let listen = plan.listen.clone();
     let profiles = plan.profiles.clone();
+    let website_profiles = plan.website_profiles.clone();
     let max_response_bytes = plan.max_response_bytes;
     spawn_subscription_proxy_blocking_server(listen, move |request| {
-        handle_subscription_proxy_request(&profiles, &request, max_response_bytes, |upstream| {
-            fetch_subscription_proxy_upstream_blocking(upstream, max_response_bytes)
-        })
+        handle_subscription_proxy_request(
+            &profiles,
+            &website_profiles,
+            &request,
+            max_response_bytes,
+            |upstream| fetch_subscription_proxy_upstream_blocking(upstream, max_response_bytes),
+        )
         .unwrap_or_else(|err| subscription_proxy_error_response(&err))
     })
 }
@@ -694,11 +825,16 @@ pub fn spawn_subscription_proxy_main_https_server(
     )?);
     let listen = plan.listen.clone();
     let profiles = plan.profiles.clone();
+    let website_profiles = plan.website_profiles.clone();
     let max_response_bytes = plan.max_response_bytes;
     spawn_subscription_proxy_tls_blocking_server(listen, tls_config, move |request| {
-        handle_subscription_proxy_request(&profiles, &request, max_response_bytes, |upstream| {
-            fetch_subscription_proxy_upstream_blocking(upstream, max_response_bytes)
-        })
+        handle_subscription_proxy_request(
+            &profiles,
+            &website_profiles,
+            &request,
+            max_response_bytes,
+            |upstream| fetch_subscription_proxy_upstream_blocking(upstream, max_response_bytes),
+        )
         .unwrap_or_else(|err| subscription_proxy_error_response(&err))
     })
 }
@@ -756,6 +892,7 @@ pub fn plan_subscription_proxy_response(
     response: SubscriptionProxyUpstreamResponse,
     max_response_bytes: u64,
     head_only: bool,
+    rewrite: Option<&WebsiteProxyRewriteContext>,
 ) -> Result<SubscriptionProxyClientResponse, SubscriptionProxyRouteError> {
     let max_response_bytes = if max_response_bytes == 0 {
         DEFAULT_MAX_RESPONSE_BYTES
@@ -773,9 +910,16 @@ pub fn plan_subscription_proxy_response(
         ));
     }
 
+    let (headers, set_cookie_headers) = rewrite_response_headers(
+        forwarded_headers(&response.headers),
+        response.set_cookie_headers,
+        rewrite,
+    );
+
     Ok(SubscriptionProxyClientResponse {
         status: response.status,
-        headers: forwarded_headers(&response.headers),
+        headers,
+        set_cookie_headers,
         body: if head_only { Vec::new() } else { response.body },
     })
 }
@@ -789,21 +933,27 @@ pub fn fetch_subscription_proxy_upstream_blocking(
     } else {
         max_response_bytes
     };
+    let redirect_policy = if request.follow_redirects {
+        reqwest::redirect::Policy::limited(5)
+    } else {
+        reqwest::redirect::Policy::none()
+    };
     let client = reqwest::blocking::Client::builder()
-        .redirect(reqwest::redirect::Policy::limited(5))
+        .redirect(redirect_policy)
         .build()
         .map_err(|err| SubscriptionProxyRouteError::BadGateway(err.to_string()))?;
-    let mut builder = if request.head_only {
-        client.head(&request.url)
-    } else {
-        client.get(&request.url)
-    };
+    let method = reqwest::Method::from_bytes(request.method.as_bytes())
+        .map_err(|err| SubscriptionProxyRouteError::BadGateway(err.to_string()))?;
+    let mut builder = client.request(method, &request.url);
     for (key, value) in &request.headers {
         let name = reqwest::header::HeaderName::from_bytes(key.as_bytes())
             .map_err(|err| SubscriptionProxyRouteError::BadGateway(err.to_string()))?;
         let value = reqwest::header::HeaderValue::from_str(value)
             .map_err(|err| SubscriptionProxyRouteError::BadGateway(err.to_string()))?;
         builder = builder.header(name, value);
+    }
+    if !request.body.is_empty() {
+        builder = builder.body(request.body.clone());
     }
 
     let response = builder
@@ -819,9 +969,16 @@ pub fn fetch_subscription_proxy_upstream_blocking(
             "upstream response too large".to_string(),
         ));
     }
+    let set_cookie_headers = response
+        .headers()
+        .get_all(reqwest::header::SET_COOKIE)
+        .iter()
+        .filter_map(|value| value.to_str().ok().map(|value| value.to_string()))
+        .collect();
     let headers = response
         .headers()
         .iter()
+        .filter(|(key, _)| !key.as_str().eq_ignore_ascii_case("set-cookie"))
         .filter_map(|(key, value)| {
             value
                 .to_str()
@@ -839,6 +996,7 @@ pub fn fetch_subscription_proxy_upstream_blocking(
     Ok(SubscriptionProxyUpstreamResponse {
         status,
         headers,
+        set_cookie_headers,
         body,
         content_length,
     })
@@ -846,6 +1004,7 @@ pub fn fetch_subscription_proxy_upstream_blocking(
 
 pub fn handle_subscription_proxy_request<F>(
     profiles: &[SubscriptionProxyProfile],
+    website_profiles: &[WebsiteProxyProfile],
     request: &SubscriptionProxyInboundRequest,
     max_response_bytes: u64,
     mut fetch_upstream: F,
@@ -856,12 +1015,17 @@ where
     ) -> Result<SubscriptionProxyUpstreamResponse, SubscriptionProxyRouteError>,
 {
     let head_only = request.method.trim().eq_ignore_ascii_case("HEAD");
-    match plan_subscription_proxy_request(profiles, request)? {
+    match plan_subscription_proxy_request(profiles, website_profiles, request)? {
         SubscriptionProxyRoute::Health => Ok(plan_subscription_proxy_health_response(head_only)),
         SubscriptionProxyRoute::Upstream(upstream) => {
             let head_only = upstream.head_only;
             let response = fetch_upstream(&upstream)?;
-            plan_subscription_proxy_response(response, max_response_bytes, head_only)
+            plan_subscription_proxy_response(
+                response,
+                max_response_bytes,
+                head_only,
+                upstream.response_rewrite.as_ref(),
+            )
         }
         SubscriptionProxyRoute::ChallengeFile(_) => Err(SubscriptionProxyRouteError::NotFound),
     }
@@ -891,6 +1055,7 @@ where
             Ok(SubscriptionProxyClientResponse {
                 status: 200,
                 headers,
+                set_cookie_headers: Vec::new(),
                 body: if head_only { Vec::new() } else { body },
             })
         }
@@ -904,6 +1069,7 @@ pub fn plan_subscription_proxy_health_response(head_only: bool) -> SubscriptionP
     SubscriptionProxyClientResponse {
         status: 200,
         headers,
+        set_cookie_headers: Vec::new(),
         body: if head_only {
             Vec::new()
         } else {
@@ -1198,7 +1364,7 @@ pub fn plan_subscription_proxy_apply<F>(
 where
     F: FnMut(&str) -> bool,
 {
-    if !config.enabled || config.profiles.is_empty() {
+    if !config.enabled || (config.profiles.is_empty() && config.website_profiles.is_empty()) {
         return SubscriptionProxyApplyPlan {
             action: SubscriptionProxyApplyAction::Disabled,
             fingerprint: String::new(),
@@ -1211,6 +1377,7 @@ where
             },
             serve_mode: None,
             profiles: Vec::new(),
+            website_profiles: Vec::new(),
         };
     }
 
@@ -1222,6 +1389,7 @@ where
             status: certificate_status,
             serve_mode: None,
             profiles: config.profiles.clone(),
+            website_profiles: config.website_profiles.clone(),
         };
     }
 
@@ -1239,6 +1407,7 @@ where
                 mode: mode.to_string(),
                 https_listen: config.https_listen.trim().to_string(),
                 profiles: config.profiles.len(),
+                website_profiles: config.website_profiles.len(),
                 certificate_owner_site_id,
                 ..SubscriptionProxyStatus::default()
             };
@@ -1249,6 +1418,7 @@ where
                 status,
                 serve_mode: Some(serve_mode),
                 profiles: config.profiles.clone(),
+                website_profiles: config.website_profiles.clone(),
             }
         }
         Err(err) => {
@@ -1259,6 +1429,7 @@ where
                 mode: "error".to_string(),
                 https_listen: config.https_listen.trim().to_string(),
                 profiles: config.profiles.len(),
+                website_profiles: config.website_profiles.len(),
                 certificate_owner_site_id,
                 last_error: err,
                 ..SubscriptionProxyStatus::default()
@@ -1270,6 +1441,7 @@ where
                 status,
                 serve_mode: None,
                 profiles: config.profiles.clone(),
+                website_profiles: config.website_profiles.clone(),
             }
         }
     }
@@ -1297,6 +1469,17 @@ pub fn subscription_proxy_fingerprint(config: &SubscriptionProxyConfig) -> Strin
         parts.push(profile.site_id.trim().to_string());
         parts.push(profile.upstream_base_url.trim_end_matches('/').to_string());
         parts.push(profile.subscribe_path.trim_matches('/').to_string());
+    }
+    let mut website_profiles = config.website_profiles.clone();
+    website_profiles.sort_by(|left, right| {
+        left.path_prefix
+            .cmp(&right.path_prefix)
+            .then_with(|| left.site_id.cmp(&right.site_id))
+    });
+    for profile in website_profiles {
+        parts.push(profile.site_id.trim().to_string());
+        parts.push(profile.upstream_base_url.trim_end_matches('/').to_string());
+        parts.push(normalize_proxy_path_prefix(&profile.path_prefix));
     }
     parts.join("\0")
 }
@@ -1543,8 +1726,12 @@ where
         .peer_addr()
         .map(|addr| addr.to_string())
         .unwrap_or_default();
-    let response = match read_subscription_proxy_http_request_head(&mut stream, 32 * 1024)
-        .and_then(|raw| parse_subscription_proxy_http_request(&raw, &remote_addr))
+    let response = match read_subscription_proxy_http_request(
+        &mut stream,
+        32 * 1024,
+        DEFAULT_MAX_REQUEST_BODY_BYTES as usize,
+    )
+    .and_then(|raw| parse_subscription_proxy_http_request(&raw, &remote_addr))
     {
         Ok(request) => handler(request),
         Err(err) => subscription_proxy_bad_request_response(&err),
@@ -1575,8 +1762,12 @@ where
     let connection = rustls::ServerConnection::new(tls_config)
         .map_err(|err| format!("create subscription proxy TLS connection: {err}"))?;
     let mut stream = rustls::StreamOwned::new(connection, stream);
-    let response = match read_subscription_proxy_http_request_head(&mut stream, 32 * 1024)
-        .and_then(|raw| parse_subscription_proxy_http_request(&raw, &remote_addr))
+    let response = match read_subscription_proxy_http_request(
+        &mut stream,
+        32 * 1024,
+        DEFAULT_MAX_REQUEST_BODY_BYTES as usize,
+    )
+    .and_then(|raw| parse_subscription_proxy_http_request(&raw, &remote_addr))
     {
         Ok(request) => handler(request),
         Err(err) => subscription_proxy_bad_request_response(&err),
@@ -1668,6 +1859,47 @@ fn read_subscription_proxy_http_request_head<R: Read>(
     }
 }
 
+fn read_subscription_proxy_http_request<R: Read>(
+    mut reader: R,
+    max_header_bytes: usize,
+    max_body_bytes: usize,
+) -> Result<Vec<u8>, String> {
+    let mut raw = read_subscription_proxy_http_request_head(&mut reader, max_header_bytes)?;
+    let Some(header_end) = http_header_end(&raw) else {
+        return Err("incomplete http request".to_string());
+    };
+    let content_length = request_content_length(&raw[..header_end])?;
+    let body_start = header_end + 4;
+    let already_read = raw.len().saturating_sub(body_start);
+
+    if content_length.is_none() && request_has_chunked_body(&raw[..header_end]) {
+        return Err("chunked request bodies are not supported".to_string());
+    }
+
+    let Some(content_length) = content_length else {
+        raw.truncate(body_start);
+        return Ok(raw);
+    };
+    if content_length > max_body_bytes {
+        return Err("http request body too large".to_string());
+    }
+    if already_read > content_length {
+        raw.truncate(body_start + content_length);
+        return Ok(raw);
+    }
+
+    let remaining = content_length - already_read;
+    if remaining == 0 {
+        return Ok(raw);
+    }
+    let mut body = vec![0u8; remaining];
+    reader
+        .read_exact(&mut body)
+        .map_err(|err| format!("read subscription proxy request body: {err}"))?;
+    raw.extend_from_slice(&body);
+    Ok(raw)
+}
+
 fn read_subscription_proxy_file_optional(path: &str) -> Result<Option<Vec<u8>>, String> {
     match fs::read(path) {
         Ok(content) => Ok(Some(content)),
@@ -1699,6 +1931,11 @@ fn read_limited_upstream_body<R: Read>(
 fn http_reason_phrase(status: u16) -> &'static str {
     match status {
         200 => "OK",
+        301 => "Moved Permanently",
+        302 => "Found",
+        303 => "See Other",
+        307 => "Temporary Redirect",
+        308 => "Permanent Redirect",
         400 => "Bad Request",
         404 => "Not Found",
         405 => "Method Not Allowed",
@@ -1737,6 +1974,47 @@ fn valid_http_header_value(value: &str) -> bool {
     !value.bytes().any(|byte| matches!(byte, b'\r' | b'\n'))
 }
 
+fn http_header_end(raw: &[u8]) -> Option<usize> {
+    raw.windows(4).position(|window| window == b"\r\n\r\n")
+}
+
+fn request_content_length(head: &[u8]) -> Result<Option<usize>, String> {
+    let text = std::str::from_utf8(head).map_err(|_| "invalid utf-8 request".to_string())?;
+    let mut length = None;
+    for line in text.split("\r\n").skip(1) {
+        let Some((key, value)) = line.split_once(':') else {
+            continue;
+        };
+        if !key.trim().eq_ignore_ascii_case("content-length") {
+            continue;
+        }
+        let parsed = value
+            .trim()
+            .parse::<usize>()
+            .map_err(|_| "invalid content-length header".to_string())?;
+        if length.map(|existing| existing != parsed).unwrap_or(false) {
+            return Err("conflicting content-length headers".to_string());
+        }
+        length = Some(parsed);
+    }
+    Ok(length)
+}
+
+fn request_has_chunked_body(head: &[u8]) -> bool {
+    let Ok(text) = std::str::from_utf8(head) else {
+        return false;
+    };
+    text.split("\r\n").skip(1).any(|line| {
+        let Some((key, value)) = line.split_once(':') else {
+            return false;
+        };
+        key.trim().eq_ignore_ascii_case("transfer-encoding")
+            && value
+                .split(',')
+                .any(|part| part.trim().eq_ignore_ascii_case("chunked"))
+    })
+}
+
 fn first_non_empty(value: &str, fallback: &str) -> String {
     if value.is_empty() {
         fallback.to_string()
@@ -1751,6 +2029,18 @@ fn trim_subscription_path(value: &str) -> String {
 
 fn trim_trailing_slashes(value: &str) -> String {
     value.trim_end_matches('/').to_string()
+}
+
+fn normalize_proxy_path_prefix(value: &str) -> String {
+    let value = value.trim().trim_end_matches('/');
+    if value.is_empty() || value == "/" {
+        return "/".to_string();
+    }
+    if value.starts_with('/') {
+        value.to_string()
+    } else {
+        format!("/{value}")
+    }
 }
 
 fn join_posix_path(root: &str, child: &str) -> String {
@@ -1870,6 +2160,64 @@ fn percent_decode_path_segment(value: &str) -> Result<String, String> {
     String::from_utf8(output).map_err(|_| "invalid escaped token".to_string())
 }
 
+fn is_allowed_website_proxy_method(method: &str) -> bool {
+    matches!(
+        method,
+        "GET" | "HEAD" | "POST" | "PUT" | "PATCH" | "DELETE" | "OPTIONS"
+    )
+}
+
+fn website_proxy_match<'a>(
+    profiles: &'a [WebsiteProxyProfile],
+    request_path: &str,
+) -> Option<(&'a WebsiteProxyProfile, String, String)> {
+    let request_path = if request_path.is_empty() {
+        "/"
+    } else {
+        request_path
+    };
+    profiles
+        .iter()
+        .filter_map(|profile| {
+            let prefix = normalize_proxy_path_prefix(&profile.path_prefix);
+            if !website_proxy_path_matches(&prefix, request_path) {
+                return None;
+            }
+            let upstream_path = website_proxy_upstream_path(&prefix, request_path);
+            Some((profile, prefix, upstream_path))
+        })
+        .max_by_key(|(_, prefix, _)| prefix.len())
+}
+
+fn website_proxy_path_matches(prefix: &str, request_path: &str) -> bool {
+    if prefix == "/" {
+        return true;
+    }
+    request_path == prefix
+        || request_path
+            .strip_prefix(prefix)
+            .map(|rest| rest.starts_with('/'))
+            .unwrap_or(false)
+}
+
+fn website_proxy_upstream_path(prefix: &str, request_path: &str) -> String {
+    if prefix == "/" {
+        return if request_path.is_empty() {
+            "/".to_string()
+        } else {
+            request_path.to_string()
+        };
+    }
+    let stripped = request_path.strip_prefix(prefix).unwrap_or(request_path);
+    if stripped.is_empty() {
+        "/".to_string()
+    } else if stripped.starts_with('/') {
+        stripped.to_string()
+    } else {
+        format!("/{stripped}")
+    }
+}
+
 fn hex_value(byte: u8) -> Option<u8> {
     match byte {
         b'0'..=b'9' => Some(byte - b'0'),
@@ -1882,9 +2230,128 @@ fn hex_value(byte: u8) -> Option<u8> {
 fn forwarded_headers(source: &BTreeMap<String, String>) -> BTreeMap<String, String> {
     source
         .iter()
-        .filter(|(key, _)| !is_hop_by_hop_header(key) && !key.eq_ignore_ascii_case("host"))
+        .filter(|(key, _)| {
+            !is_hop_by_hop_header(key)
+                && !key.eq_ignore_ascii_case("host")
+                && !key.eq_ignore_ascii_case("content-length")
+        })
         .map(|(key, value)| (key.clone(), value.clone()))
         .collect()
+}
+
+fn rewrite_response_headers(
+    mut headers: BTreeMap<String, String>,
+    extra_set_cookie_headers: Vec<String>,
+    rewrite: Option<&WebsiteProxyRewriteContext>,
+) -> (BTreeMap<String, String>, Vec<String>) {
+    let mut set_cookie_headers = extra_set_cookie_headers;
+    let cookie_keys = headers
+        .keys()
+        .filter(|key| key.eq_ignore_ascii_case("set-cookie"))
+        .cloned()
+        .collect::<Vec<_>>();
+    for key in cookie_keys {
+        if let Some(value) = headers.remove(&key) {
+            set_cookie_headers.push(value);
+        }
+    }
+
+    let Some(rewrite) = rewrite else {
+        return (headers, set_cookie_headers);
+    };
+    for (key, value) in headers.iter_mut() {
+        if key.eq_ignore_ascii_case("location") {
+            *value = rewrite_website_location(value, rewrite);
+        }
+    }
+    let set_cookie_headers = set_cookie_headers
+        .into_iter()
+        .map(|value| rewrite_website_set_cookie(&value, rewrite))
+        .collect();
+    (headers, set_cookie_headers)
+}
+
+fn rewrite_website_location(value: &str, rewrite: &WebsiteProxyRewriteContext) -> String {
+    let base = trim_trailing_slashes(rewrite.upstream_base_url.trim());
+    let prefix = normalize_proxy_path_prefix(&rewrite.proxy_path_prefix);
+    let value = value.trim();
+    if let Some(rest) = value.strip_prefix(&base) {
+        if rest.is_empty() || rest.starts_with('/') || rest.starts_with('?') {
+            return prefixed_proxy_path(&prefix, &first_non_empty(rest, "/"));
+        }
+    }
+    if value.starts_with('/') {
+        return prefixed_proxy_path(&prefix, value);
+    }
+    value.to_string()
+}
+
+fn rewrite_website_set_cookie(value: &str, rewrite: &WebsiteProxyRewriteContext) -> String {
+    let prefix = normalize_proxy_path_prefix(&rewrite.proxy_path_prefix);
+    let mut parts = value.split(';');
+    let Some(first) = parts.next() else {
+        return value.to_string();
+    };
+    let mut output = vec![first.trim().to_string()];
+    let mut has_path = false;
+    for part in parts {
+        let trimmed = part.trim();
+        if trimmed.eq_ignore_ascii_case("domain") || starts_with_header_attr(trimmed, "domain") {
+            continue;
+        }
+        if starts_with_header_attr(trimmed, "path") {
+            has_path = true;
+            if prefix != "/" {
+                output.push(format!("Path={prefix}"));
+            } else {
+                output.push(trimmed.to_string());
+            }
+            continue;
+        }
+        output.push(trimmed.to_string());
+    }
+    if prefix != "/" && !has_path {
+        output.push(format!("Path={prefix}"));
+    }
+    output.join("; ")
+}
+
+fn starts_with_header_attr(value: &str, name: &str) -> bool {
+    value
+        .get(..name.len())
+        .map(|prefix| prefix.eq_ignore_ascii_case(name))
+        .unwrap_or(false)
+        && value
+            .as_bytes()
+            .get(name.len())
+            .map(|byte| *byte == b'=')
+            .unwrap_or(false)
+}
+
+fn prefixed_proxy_path(prefix: &str, path: &str) -> String {
+    let path = if path.trim().is_empty() { "/" } else { path };
+    if path.starts_with('?') {
+        return if prefix == "/" {
+            format!("/{path}")
+        } else {
+            format!("{prefix}{path}")
+        };
+    }
+    if prefix == "/" {
+        if path.starts_with('/') {
+            path.to_string()
+        } else {
+            format!("/{path}")
+        }
+    } else if path == "/" {
+        prefix.to_string()
+    } else {
+        format!(
+            "{}/{}",
+            prefix.trim_end_matches('/'),
+            path.trim_start_matches('/')
+        )
+    }
 }
 
 fn append_forwarded_for(headers: &mut BTreeMap<String, String>, ip: &str) {
@@ -1948,14 +2415,16 @@ mod tests {
     use std::cell::RefCell;
     use std::collections::BTreeMap;
     use std::fs;
-    use std::io::Cursor;
+    use std::io::{Cursor, Read, Write};
+    use std::net::{TcpListener, TcpStream};
     use std::path::Path;
+    use std::thread;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::{
-        build_subscription_upstream_url, handle_subscription_proxy_http_request,
-        handle_subscription_proxy_request, normalize_subscription_proxy_config,
-        normalize_subscription_proxy_config_with_public_ipv4,
+        build_subscription_upstream_url, build_website_upstream_url,
+        handle_subscription_proxy_http_request, handle_subscription_proxy_request,
+        normalize_subscription_proxy_config, normalize_subscription_proxy_config_with_public_ipv4,
         parse_subscription_proxy_http_request, plan_subscription_proxy_apply,
         plan_subscription_proxy_certificate_file, plan_subscription_proxy_csr,
         plan_subscription_proxy_health_response, plan_subscription_proxy_http_request,
@@ -1964,8 +2433,9 @@ mod tests {
         plan_subscription_proxy_serve_mode, plan_subscription_proxy_validation_file,
         prepare_subscription_proxy_certificate_status,
         prepare_subscription_proxy_certificate_status_with_file_writes, read_limited_upstream_body,
-        read_subscription_proxy_http_request_head, render_subscription_proxy_http_response,
-        resolve_subscription_certificate_domain, spawn_subscription_proxy_http_challenge_server,
+        read_subscription_proxy_http_request, read_subscription_proxy_http_request_head,
+        render_subscription_proxy_http_response, resolve_subscription_certificate_domain,
+        spawn_subscription_proxy_http_challenge_server,
         spawn_subscription_proxy_main_http_fallback_server,
         spawn_subscription_proxy_main_https_server, subscription_proxy_certificate_owner_site_id,
         subscription_proxy_error_response, subscription_proxy_file_readable,
@@ -1973,11 +2443,12 @@ mod tests {
         SubscriptionProxyApplyAction, SubscriptionProxyClientResponse, SubscriptionProxyFileWrite,
         SubscriptionProxyInboundRequest, SubscriptionProxyMainServerPlan, SubscriptionProxyRoute,
         SubscriptionProxyRouteError, SubscriptionProxyRuntimeManager, SubscriptionProxyServeMode,
-        SubscriptionProxyStatus, SubscriptionProxyUpstreamResponse, DEFAULT_CHALLENGE_DIR,
-        DEFAULT_HTTPS_LISTEN, DEFAULT_MAX_RESPONSE_BYTES,
+        SubscriptionProxyStatus, SubscriptionProxyUpstreamResponse, WebsiteProxyRewriteContext,
+        DEFAULT_CHALLENGE_DIR, DEFAULT_HTTPS_LISTEN, DEFAULT_MAX_RESPONSE_BYTES,
     };
     use crate::config::{
         SubscriptionProxyConfig, SubscriptionProxyProfile, SubscriptionProxyZeroSslConfig,
+        WebsiteProxyProfile,
     };
 
     #[test]
@@ -2781,8 +3252,58 @@ mod tests {
     }
 
     #[test]
+    fn normalizes_website_proxy_profiles_and_enables_shared_gateway() {
+        let config = normalize_subscription_proxy_config(&SubscriptionProxyConfig {
+            website_profiles: vec![
+                WebsiteProxyProfile {
+                    site_id: " site-a ".to_string(),
+                    upstream_base_url: " https://panel.example.test/ ".to_string(),
+                    path_prefix: " shop/ ".to_string(),
+                },
+                WebsiteProxyProfile {
+                    site_id: "site-a".to_string(),
+                    upstream_base_url: "https://ignored.example.test".to_string(),
+                    path_prefix: "/shop".to_string(),
+                },
+            ],
+            ..SubscriptionProxyConfig::default()
+        })
+        .unwrap();
+
+        assert!(config.enabled);
+        assert!(config.profiles.is_empty());
+        assert_eq!(config.website_profiles.len(), 1);
+        assert_eq!(config.website_profiles[0].site_id, "site-a");
+        assert_eq!(
+            config.website_profiles[0].upstream_base_url,
+            "https://panel.example.test"
+        );
+        assert_eq!(config.website_profiles[0].path_prefix, "/shop");
+    }
+
+    #[test]
+    fn builds_website_upstream_url() {
+        let url = build_website_upstream_url(
+            &WebsiteProxyProfile {
+                site_id: "site-a".to_string(),
+                upstream_base_url: "https://panel.example.test/root/".to_string(),
+                path_prefix: "/site/site-a".to_string(),
+            },
+            "/admin/login",
+            "?redirect=/cart",
+        )
+        .unwrap();
+
+        assert_eq!(
+            url,
+            "https://panel.example.test/root/admin/login?redirect=/cart"
+        );
+    }
+
+    #[test]
     fn plans_health_request() {
         let route = plan_subscription_proxy_request(
+            &[],
             &[],
             &SubscriptionProxyInboundRequest {
                 method: "GET".to_string(),
@@ -2910,6 +3431,7 @@ mod tests {
                 upstream_base_url: "https://panel.example.test".to_string(),
                 subscribe_path: "answer/land".to_string(),
             }],
+            &[],
             &SubscriptionProxyInboundRequest {
                 method: "HEAD".to_string(),
                 path: "/sub/site-a/token%20123".to_string(),
@@ -2917,6 +3439,7 @@ mod tests {
                 host: "proxy.example.test".to_string(),
                 remote_addr: "198.51.100.8:51234".to_string(),
                 headers,
+                body: Vec::new(),
             },
         )
         .unwrap();
@@ -2924,7 +3447,9 @@ mod tests {
         let SubscriptionProxyRoute::Upstream(upstream) = route else {
             panic!("expected upstream route");
         };
+        assert_eq!(upstream.method, "HEAD");
         assert!(upstream.head_only);
+        assert!(upstream.follow_redirects);
         assert_eq!(
             upstream.url,
             "https://panel.example.test/answer/land/token%20123?flag=sing-box"
@@ -2941,6 +3466,117 @@ mod tests {
     }
 
     #[test]
+    fn plans_direct_website_proxy_request_with_post_body() {
+        let mut headers = BTreeMap::new();
+        headers.insert("Host".to_string(), "2.56.116.39".to_string());
+        headers.insert("Content-Type".to_string(), "application/json".to_string());
+        headers.insert("Content-Length".to_string(), "13".to_string());
+        headers.insert("Connection".to_string(), "close".to_string());
+
+        let route = plan_subscription_proxy_request(
+            &[],
+            &[WebsiteProxyProfile {
+                site_id: "site-a".to_string(),
+                upstream_base_url: "https://panel.example.test".to_string(),
+                path_prefix: "/".to_string(),
+            }],
+            &SubscriptionProxyInboundRequest {
+                method: "POST".to_string(),
+                path: "/api/order".to_string(),
+                raw_query: "plan=1".to_string(),
+                host: "2.56.116.39".to_string(),
+                remote_addr: "198.51.100.8:51234".to_string(),
+                headers,
+                body: br#"{"qty":1}"#.to_vec(),
+            },
+        )
+        .unwrap();
+
+        let SubscriptionProxyRoute::Upstream(upstream) = route else {
+            panic!("expected upstream route");
+        };
+        assert_eq!(upstream.method, "POST");
+        assert_eq!(upstream.url, "https://panel.example.test/api/order?plan=1");
+        assert_eq!(upstream.body, br#"{"qty":1}"#.to_vec());
+        assert!(!upstream.follow_redirects);
+        assert_eq!(upstream.headers["Content-Type"], "application/json");
+        assert_eq!(upstream.headers["X-Forwarded-Host"], "2.56.116.39");
+        assert_eq!(upstream.headers["X-Forwarded-Proto"], "https");
+        assert_eq!(upstream.headers["X-Forwarded-For"], "198.51.100.8");
+        assert!(!upstream.headers.contains_key("Content-Length"));
+        assert!(!upstream.headers.contains_key("Connection"));
+        assert_eq!(
+            upstream.response_rewrite,
+            Some(WebsiteProxyRewriteContext {
+                upstream_base_url: "https://panel.example.test".to_string(),
+                proxy_path_prefix: "/".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn plans_path_prefixed_website_proxy_request() {
+        let route = plan_subscription_proxy_request(
+            &[],
+            &[WebsiteProxyProfile {
+                site_id: "site-a".to_string(),
+                upstream_base_url: "https://panel.example.test".to_string(),
+                path_prefix: "/site/site-a".to_string(),
+            }],
+            &SubscriptionProxyInboundRequest {
+                method: "GET".to_string(),
+                path: "/site/site-a/admin/login".to_string(),
+                raw_query: "from=proxy".to_string(),
+                ..SubscriptionProxyInboundRequest::default()
+            },
+        )
+        .unwrap();
+
+        let SubscriptionProxyRoute::Upstream(upstream) = route else {
+            panic!("expected upstream route");
+        };
+        assert_eq!(
+            upstream.url,
+            "https://panel.example.test/admin/login?from=proxy"
+        );
+        assert_eq!(
+            upstream.response_rewrite,
+            Some(WebsiteProxyRewriteContext {
+                upstream_base_url: "https://panel.example.test".to_string(),
+                proxy_path_prefix: "/site/site-a".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn subscription_route_takes_precedence_over_root_website_proxy() {
+        let route = plan_subscription_proxy_request(
+            &[SubscriptionProxyProfile {
+                site_id: "site-a".to_string(),
+                upstream_base_url: "https://panel.example.test".to_string(),
+                subscribe_path: "s".to_string(),
+            }],
+            &[WebsiteProxyProfile {
+                site_id: "site-a".to_string(),
+                upstream_base_url: "https://shop.example.test".to_string(),
+                path_prefix: "/".to_string(),
+            }],
+            &SubscriptionProxyInboundRequest {
+                method: "GET".to_string(),
+                path: "/sub/site-a/token".to_string(),
+                ..SubscriptionProxyInboundRequest::default()
+            },
+        )
+        .unwrap();
+
+        let SubscriptionProxyRoute::Upstream(upstream) = route else {
+            panic!("expected upstream route");
+        };
+        assert_eq!(upstream.url, "https://panel.example.test/s/token");
+        assert!(upstream.response_rewrite.is_none());
+    }
+
+    #[test]
     fn handles_subscription_proxy_request_with_injected_upstream_fetcher() {
         let response = handle_subscription_proxy_request(
             &[SubscriptionProxyProfile {
@@ -2948,6 +3584,7 @@ mod tests {
                 upstream_base_url: "https://panel.example.test".to_string(),
                 subscribe_path: "s".to_string(),
             }],
+            &[],
             &SubscriptionProxyInboundRequest {
                 method: "GET".to_string(),
                 path: "/sub/site-a/token".to_string(),
@@ -2971,6 +3608,52 @@ mod tests {
 
         assert_eq!(response.status, 200);
         assert_eq!(response.body, b"subscription".to_vec());
+    }
+
+    #[test]
+    fn handles_website_proxy_request_with_response_rewrite() {
+        let response = handle_subscription_proxy_request(
+            &[],
+            &[WebsiteProxyProfile {
+                site_id: "site-a".to_string(),
+                upstream_base_url: "https://panel.example.test".to_string(),
+                path_prefix: "/site/site-a".to_string(),
+            }],
+            &SubscriptionProxyInboundRequest {
+                method: "GET".to_string(),
+                path: "/site/site-a/checkout".to_string(),
+                ..SubscriptionProxyInboundRequest::default()
+            },
+            1024,
+            |request| {
+                assert_eq!(request.url, "https://panel.example.test/checkout");
+                let mut headers = BTreeMap::new();
+                headers.insert(
+                    "Location".to_string(),
+                    "https://panel.example.test/login".to_string(),
+                );
+                Ok(SubscriptionProxyUpstreamResponse {
+                    status: 302,
+                    headers,
+                    set_cookie_headers: vec![
+                        "session=abc; Domain=panel.example.test; Path=/; HttpOnly".to_string(),
+                        "xsrf=token; Domain=panel.example.test; Path=/; SameSite=Lax".to_string(),
+                    ],
+                    ..SubscriptionProxyUpstreamResponse::default()
+                })
+            },
+        )
+        .unwrap();
+
+        assert_eq!(response.status, 302);
+        assert_eq!(response.headers["Location"], "/site/site-a/login");
+        assert_eq!(
+            response.set_cookie_headers,
+            vec![
+                "session=abc; Path=/site/site-a; HttpOnly".to_string(),
+                "xsrf=token; Path=/site/site-a; SameSite=Lax".to_string(),
+            ]
+        );
     }
 
     #[test]
@@ -3026,6 +3709,20 @@ mod tests {
         assert_eq!(request.host, "proxy.example.test");
         assert_eq!(request.remote_addr, "198.51.100.8:51234");
         assert_eq!(request.headers["User-Agent"], "Keli");
+        assert!(request.body.is_empty());
+    }
+
+    #[test]
+    fn parses_http_request_body_without_requiring_utf8_body() {
+        let request = parse_subscription_proxy_http_request(
+            b"POST /api/order HTTP/1.1\r\nHost: proxy.example.test\r\nContent-Length: 3\r\n\r\n\xff\x00\x01",
+            "198.51.100.8:51234",
+        )
+        .unwrap();
+
+        assert_eq!(request.method, "POST");
+        assert_eq!(request.path, "/api/order");
+        assert_eq!(request.body, vec![0xff, 0x00, 0x01]);
     }
 
     #[test]
@@ -3044,6 +3741,18 @@ mod tests {
     }
 
     #[test]
+    fn reads_http_request_body_with_size_limit() {
+        let raw = b"POST /api/order HTTP/1.1\r\nHost: proxy.example.test\r\nContent-Length: 5\r\n\r\nhello";
+        let request =
+            read_subscription_proxy_http_request(Cursor::new(raw.to_vec()), 1024, 5).unwrap();
+        assert_eq!(request, raw);
+
+        let err =
+            read_subscription_proxy_http_request(Cursor::new(raw.to_vec()), 1024, 4).unwrap_err();
+        assert_eq!(err, "http request body too large");
+    }
+
+    #[test]
     fn renders_http_response_and_route_errors() {
         let mut headers = BTreeMap::new();
         headers.insert("Content-Type".to_string(), "text/plain".to_string());
@@ -3051,6 +3760,10 @@ mod tests {
         let response = render_subscription_proxy_http_response(&SubscriptionProxyClientResponse {
             status: 200,
             headers,
+            set_cookie_headers: vec![
+                "session=abc; Path=/; HttpOnly".to_string(),
+                "xsrf=token; Path=/".to_string(),
+            ],
             body: b"ok".to_vec(),
         });
         let text = String::from_utf8(response).unwrap();
@@ -3058,6 +3771,8 @@ mod tests {
         assert!(text.starts_with("HTTP/1.1 200 OK\r\n"));
         assert!(text.contains("Content-Length: 2\r\n"));
         assert!(text.contains("Content-Type: text/plain\r\n"));
+        assert!(text.contains("Set-Cookie: session=abc; Path=/; HttpOnly\r\n"));
+        assert!(text.contains("Set-Cookie: xsrf=token; Path=/\r\n"));
         assert!(text.ends_with("\r\n\r\nok"));
 
         let response =
@@ -3076,6 +3791,7 @@ mod tests {
                 key_file: "/etc/v2node/private.key".to_string(),
                 max_response_bytes: 1024,
                 profiles: Vec::new(),
+                website_profiles: Vec::new(),
             })
             .unwrap_err();
         assert!(err.contains("only supports HTTP fallback"));
@@ -3084,6 +3800,51 @@ mod tests {
             spawn_subscription_proxy_http_challenge_server(SubscriptionProxyConfig::default())
                 .unwrap();
         assert!(handle.is_none());
+    }
+
+    #[test]
+    fn http_fallback_server_proxies_website_post_and_rewrites_redirects() {
+        let (upstream_base_url, upstream_join) = spawn_website_test_upstream();
+        let config = normalize_subscription_proxy_config(&SubscriptionProxyConfig {
+            enabled: true,
+            https_listen: "127.0.0.1:0".to_string(),
+            allow_http_fallback: true,
+            website_profiles: vec![WebsiteProxyProfile {
+                site_id: "site-a".to_string(),
+                upstream_base_url: upstream_base_url.clone(),
+                path_prefix: "/site/site-a".to_string(),
+            }],
+            ..SubscriptionProxyConfig::default()
+        })
+        .unwrap();
+        let server = spawn_subscription_proxy_main_http_fallback_server(
+            plan_subscription_proxy_main_server(&config, SubscriptionProxyServeMode::HttpFallback),
+        )
+        .unwrap();
+
+        let mut stream = TcpStream::connect(server.listen()).unwrap();
+        stream
+            .write_all(
+                b"POST /site/site-a/checkout?plan=1 HTTP/1.1\r\nHost: proxy.example.test\r\nContent-Type: text/plain\r\nContent-Length: 7\r\n\r\npayload",
+            )
+            .unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).unwrap();
+        server.stop();
+        let upstream_request = upstream_join.join().unwrap();
+
+        assert!(upstream_request.starts_with("POST /checkout?plan=1 HTTP/1.1\r\n"));
+        assert!(upstream_request
+            .to_ascii_lowercase()
+            .contains("x-forwarded-host: proxy.example.test\r\n"));
+        assert!(upstream_request.ends_with("\r\n\r\npayload"));
+        assert!(response.starts_with("HTTP/1.1 302 Found\r\n"));
+        let response_lower = response.to_ascii_lowercase();
+        assert!(response_lower.contains("location: /site/site-a/login\r\n"));
+        assert!(response_lower.contains("set-cookie: session=abc; path=/site/site-a; httponly\r\n"));
+        assert!(
+            response_lower.contains("set-cookie: xsrf=token; path=/site/site-a; samesite=lax\r\n")
+        );
     }
 
     #[test]
@@ -3096,6 +3857,7 @@ mod tests {
 
         let err = plan_subscription_proxy_request(
             &[profile.clone()],
+            &[],
             &SubscriptionProxyInboundRequest {
                 method: "POST".to_string(),
                 path: "/sub/site-a/token".to_string(),
@@ -3107,6 +3869,7 @@ mod tests {
 
         let err = plan_subscription_proxy_request(
             &[profile],
+            &[],
             &SubscriptionProxyInboundRequest {
                 method: "GET".to_string(),
                 path: "/sub/missing/token".to_string(),
@@ -3131,11 +3894,13 @@ mod tests {
             SubscriptionProxyUpstreamResponse {
                 status: 200,
                 headers,
+                set_cookie_headers: Vec::new(),
                 body: b"ok".to_vec(),
                 content_length: Some(2),
             },
             1024,
             false,
+            None,
         )
         .unwrap();
 
@@ -3159,6 +3924,7 @@ mod tests {
             },
             2,
             false,
+            None,
         )
         .unwrap_err();
         assert_eq!(err.status_code(), 502);
@@ -3171,6 +3937,7 @@ mod tests {
             },
             1024,
             true,
+            None,
         )
         .unwrap();
 
@@ -3203,6 +3970,44 @@ mod tests {
         let generated = rcgen::generate_simple_self_signed(vec!["localhost".to_string()]).unwrap();
         fs::write(cert_file, generated.cert.pem()).unwrap();
         fs::write(key_file, generated.key_pair.serialize_pem()).unwrap();
+    }
+
+    fn spawn_website_test_upstream() -> (String, thread::JoinHandle<String>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let response_base_url = base_url.clone();
+        let join = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut raw = Vec::new();
+            let mut chunk = [0u8; 1024];
+            loop {
+                let read = stream.read(&mut chunk).unwrap();
+                if read == 0 {
+                    break;
+                }
+                raw.extend_from_slice(&chunk[..read]);
+                let Some(header_end) = raw.windows(4).position(|window| window == b"\r\n\r\n")
+                else {
+                    continue;
+                };
+                let head = String::from_utf8_lossy(&raw[..header_end]);
+                let content_length = head
+                    .lines()
+                    .filter_map(|line| line.split_once(':'))
+                    .find(|(key, _)| key.eq_ignore_ascii_case("content-length"))
+                    .and_then(|(_, value)| value.trim().parse::<usize>().ok())
+                    .unwrap_or(0);
+                if raw.len() >= header_end + 4 + content_length {
+                    break;
+                }
+            }
+            let response = format!(
+                "HTTP/1.1 302 Found\r\nLocation: {response_base_url}/login\r\nSet-Cookie: session=abc; Domain=panel.example.test; Path=/; HttpOnly\r\nSet-Cookie: xsrf=token; Domain=panel.example.test; Path=/; SameSite=Lax\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+            String::from_utf8(raw).unwrap()
+        });
+        (base_url, join)
     }
 
     fn normalized_proxy_for_apply() -> SubscriptionProxyConfig {

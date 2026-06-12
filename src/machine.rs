@@ -7,7 +7,7 @@ use serde_json::Value;
 use crate::config::{
     AgentConfig, MachineProfileConfig, NodeConfig,
     SubscriptionProxyConfig as RuntimeSubscriptionProxyConfig, SubscriptionProxyProfile,
-    SubscriptionProxyZeroSslConfig, DEFAULT_CONFIG_DIR, DEFAULT_TIMEOUT_SECS,
+    SubscriptionProxyZeroSslConfig, WebsiteProxyProfile, DEFAULT_CONFIG_DIR, DEFAULT_TIMEOUT_SECS,
 };
 use crate::panel::types::RealtimeBaseConfig;
 use crate::panel::{PanelClient, PanelClientOptions};
@@ -98,6 +98,10 @@ pub struct SubscriptionProxyConfig {
     pub allow_http_fallback: bool,
     #[serde(default)]
     pub max_response_bytes: u64,
+    #[serde(default)]
+    pub profiles: Vec<SubscriptionProxyProfile>,
+    #[serde(default)]
+    pub website_profiles: Vec<WebsiteProxyProfile>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, PartialEq)]
@@ -315,20 +319,69 @@ pub fn merge_subscription_proxy(
     profile: &MachineProfileConfig,
     source: &SubscriptionProxyConfig,
 ) {
-    if !source.enabled {
+    if !source.enabled && source.profiles.is_empty() && source.website_profiles.is_empty() {
         return;
     }
 
-    let mut proxy_profile = SubscriptionProxyProfile {
-        site_id: first_non_empty(source.site_id.trim(), &machine_profile_label(profile)),
-        upstream_base_url: first_non_empty(
-            source.upstream_base_url.trim_end_matches('/'),
-            profile.url.trim_end_matches('/'),
-        ),
-        subscribe_path: first_non_empty(source.subscribe_path.trim_matches('/'), "s"),
-    };
-    proxy_profile.site_id = sanitize_machine_profile_name(&proxy_profile.site_id);
-    if proxy_profile.site_id.is_empty() || proxy_profile.upstream_base_url.is_empty() {
+    let mut subscription_profiles = source.profiles.clone();
+    let has_explicit_legacy_subscription = !source.site_id.trim().is_empty()
+        || !source.upstream_base_url.trim().is_empty()
+        || !source.subscribe_path.trim().is_empty();
+    if subscription_profiles.is_empty()
+        && (source.website_profiles.is_empty() || has_explicit_legacy_subscription)
+    {
+        subscription_profiles.push(SubscriptionProxyProfile {
+            site_id: source.site_id.clone(),
+            upstream_base_url: source.upstream_base_url.clone(),
+            subscribe_path: source.subscribe_path.clone(),
+        });
+    }
+
+    let subscription_profiles = subscription_profiles
+        .into_iter()
+        .filter_map(|row| {
+            let site_id = sanitize_machine_profile_name(&first_non_empty(
+                row.site_id.trim(),
+                &machine_profile_label(profile),
+            ));
+            let upstream_base_url = first_non_empty(
+                row.upstream_base_url.trim_end_matches('/'),
+                profile.url.trim_end_matches('/'),
+            );
+            if !valid_subscription_proxy_profile(&site_id, &upstream_base_url) {
+                return None;
+            }
+            Some(SubscriptionProxyProfile {
+                site_id,
+                upstream_base_url,
+                subscribe_path: first_non_empty(row.subscribe_path.trim_matches('/'), "s"),
+            })
+        })
+        .collect::<Vec<_>>();
+    let website_profiles = source
+        .website_profiles
+        .iter()
+        .filter_map(|row| {
+            let site_id = sanitize_machine_profile_name(&first_non_empty(
+                row.site_id.trim(),
+                &machine_profile_label(profile),
+            ));
+            let upstream_base_url = first_non_empty(
+                row.upstream_base_url.trim_end_matches('/'),
+                profile.url.trim_end_matches('/'),
+            );
+            if !valid_subscription_proxy_profile(&site_id, &upstream_base_url) {
+                return None;
+            }
+            Some(WebsiteProxyProfile {
+                site_id,
+                upstream_base_url,
+                path_prefix: normalize_proxy_path_prefix(&row.path_prefix),
+            })
+        })
+        .collect::<Vec<_>>();
+
+    if subscription_profiles.is_empty() && website_profiles.is_empty() {
         return;
     }
 
@@ -356,14 +409,22 @@ pub fn merge_subscription_proxy(
         }
     }
 
-    if target.profiles.iter().any(|existing| {
-        existing
-            .site_id
-            .eq_ignore_ascii_case(&proxy_profile.site_id)
-    }) {
-        return;
+    for profile in subscription_profiles {
+        if target
+            .profiles
+            .iter()
+            .any(|existing| existing.site_id.eq_ignore_ascii_case(&profile.site_id))
+        {
+            continue;
+        }
+        target.profiles.push(profile);
     }
-    target.profiles.push(proxy_profile);
+    for profile in website_profiles {
+        if website_proxy_profile_exists(&target.website_profiles, &profile) {
+            continue;
+        }
+        target.website_profiles.push(profile);
+    }
 }
 
 pub fn machine_profile_node_config_dir(profile: &MachineProfileConfig, node_id: u32) -> String {
@@ -439,6 +500,29 @@ fn fill_if_empty(target: &mut String, value: &str) {
     }
 }
 
+fn normalize_proxy_path_prefix(value: &str) -> String {
+    let value = value.trim().trim_end_matches('/');
+    if value.is_empty() || value == "/" {
+        return "/".to_string();
+    }
+    if value.starts_with('/') {
+        value.to_string()
+    } else {
+        format!("/{value}")
+    }
+}
+
+fn website_proxy_profile_exists(
+    profiles: &[WebsiteProxyProfile],
+    profile: &WebsiteProxyProfile,
+) -> bool {
+    let path_prefix = normalize_proxy_path_prefix(&profile.path_prefix);
+    profiles.iter().any(|existing| {
+        existing.site_id.eq_ignore_ascii_case(&profile.site_id)
+            && normalize_proxy_path_prefix(&existing.path_prefix) == path_prefix
+    })
+}
+
 fn merge_runtime_agent(target: &mut AgentConfig, source: AgentConfig) {
     let source_proxy = source.subscription_proxy;
     if !source_proxy.enabled {
@@ -493,6 +577,12 @@ fn merge_runtime_agent(target: &mut AgentConfig, source: AgentConfig) {
         }
         target.subscription_proxy.profiles.push(profile);
     }
+    for profile in source_proxy.website_profiles {
+        if website_proxy_profile_exists(&target.subscription_proxy.website_profiles, &profile) {
+            continue;
+        }
+        target.subscription_proxy.website_profiles.push(profile);
+    }
 }
 
 fn merge_subscription_proxy_zerossl(
@@ -544,7 +634,13 @@ fn can_run_subscription_proxy_only(agent: &AgentConfig) -> bool {
     }
     agent.subscription_proxy.profiles.iter().any(|profile| {
         valid_subscription_proxy_profile(&profile.site_id, &profile.upstream_base_url)
-    })
+    }) || agent
+        .subscription_proxy
+        .website_profiles
+        .iter()
+        .any(|profile| {
+            valid_subscription_proxy_profile(&profile.site_id, &profile.upstream_base_url)
+        })
 }
 
 fn valid_subscription_proxy_profile(site_id: &str, upstream_base_url: &str) -> bool {
@@ -613,7 +709,9 @@ mod tests {
         MachinePanelNode, MachineProfileBaseConfig, MachineProfileInput, MachineStatusPayload,
         MachineStatusResponse, NodeFailurePayload, SubscriptionProxyConfig,
     };
-    use crate::config::{MachineProfileConfig, SubscriptionProxyZeroSslConfig};
+    use crate::config::{
+        MachineProfileConfig, SubscriptionProxyZeroSslConfig, WebsiteProxyProfile,
+    };
     use crate::panel::types::RealtimeBaseConfig;
 
     #[test]
@@ -769,6 +867,42 @@ mod tests {
         assert_eq!(
             result.agent.subscription_proxy.zerossl.certificate_id,
             "cert-1"
+        );
+    }
+
+    #[test]
+    fn resolves_website_proxy_without_creating_subscription_route() {
+        let profile = MachineProfileConfig {
+            name: "site-a".to_string(),
+            url: "https://panel.example.test/".to_string(),
+            token: "machine-token".to_string(),
+            machine_id: 3,
+            ..MachineProfileConfig::default()
+        };
+        let response = MachineNodesResponse {
+            agent: Some(super::MachineAgentConfig {
+                subscription_proxy: Some(SubscriptionProxyConfig {
+                    enabled: true,
+                    https_listen: "0.0.0.0:443".to_string(),
+                    website_profiles: vec![WebsiteProxyProfile {
+                        site_id: "site-a".to_string(),
+                        upstream_base_url: "https://panel.example.test/".to_string(),
+                        path_prefix: "/".to_string(),
+                    }],
+                    ..SubscriptionProxyConfig::default()
+                }),
+            }),
+            ..MachineNodesResponse::default()
+        };
+
+        let result = resolve_machine_profile_result(&profile, &response);
+
+        assert!(result.agent.subscription_proxy.enabled);
+        assert!(result.agent.subscription_proxy.profiles.is_empty());
+        assert_eq!(result.agent.subscription_proxy.website_profiles.len(), 1);
+        assert_eq!(
+            result.agent.subscription_proxy.website_profiles[0].upstream_base_url,
+            "https://panel.example.test"
         );
     }
 
@@ -939,6 +1073,46 @@ mod tests {
         assert!(summary.nodes.is_empty());
         assert!(summary.subscription_proxy_only);
         assert_eq!(summary.agent.subscription_proxy.profiles.len(), 1);
+    }
+
+    #[test]
+    fn allows_website_proxy_only_when_no_nodes_returned() {
+        let profile = MachineProfileConfig {
+            name: "site-only".to_string(),
+            url: "https://site-only.example.test".to_string(),
+            token: "token".to_string(),
+            machine_id: 6,
+            ..MachineProfileConfig::default()
+        };
+        let response = MachineNodesResponse {
+            nodes: Vec::new(),
+            agent: Some(super::MachineAgentConfig {
+                subscription_proxy: Some(SubscriptionProxyConfig {
+                    enabled: true,
+                    website_profiles: vec![WebsiteProxyProfile {
+                        site_id: "site-only".to_string(),
+                        upstream_base_url: "https://site-only.example.test".to_string(),
+                        path_prefix: "/".to_string(),
+                    }],
+                    ..SubscriptionProxyConfig::default()
+                }),
+            }),
+            ..MachineNodesResponse::default()
+        };
+
+        let summary = resolve_machine_profiles(
+            vec![MachineProfileInput {
+                profile,
+                result: Ok(response),
+            }],
+            true,
+        )
+        .unwrap();
+
+        assert!(summary.nodes.is_empty());
+        assert!(summary.subscription_proxy_only);
+        assert!(summary.agent.subscription_proxy.profiles.is_empty());
+        assert_eq!(summary.agent.subscription_proxy.website_profiles.len(), 1);
     }
 
     #[test]
