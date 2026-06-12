@@ -67,6 +67,7 @@ jobs:
           EOF
           bash scripts/ops/native_resource_gate.sh \
             --samples "${tmp}/samples.tsv" \
+            --min-samples 2 \
             --max-rss-kb 800000 \
             --max-native-pending 0 \
             --max-panic-lines 0 \

@@ -8,6 +8,7 @@ MAX_PANIC_LINES="${MAX_PANIC_LINES:-0}"
 MAX_EXTERNAL_CORE_ERRORS="${MAX_EXTERNAL_CORE_ERRORS:-0}"
 MAX_CPU_PERCENT="${MAX_CPU_PERCENT:-0}"
 MAX_RSS_GROWTH_KB="${MAX_RSS_GROWTH_KB:-0}"
+MIN_SAMPLES="${MIN_SAMPLES:-0}"
 MIN_NATIVE_USER_DELTAS="${MIN_NATIVE_USER_DELTAS:-0}"
 
 usage() {
@@ -23,6 +24,7 @@ Limits:
   --max-panic-lines N
   --max-external-core-errors N
   --max-cpu-percent N
+  --min-samples N
   --min-native-user-deltas N
 USAGE
 }
@@ -57,6 +59,10 @@ while [ "$#" -gt 0 ]; do
       MAX_CPU_PERCENT="$2"
       shift 2
       ;;
+    --min-samples)
+      MIN_SAMPLES="$2"
+      shift 2
+      ;;
     --min-native-user-deltas)
       MIN_NATIVE_USER_DELTAS="$2"
       shift 2
@@ -84,6 +90,7 @@ awk -v max_rss="${MAX_RSS_KB}" \
   -v max_panic="${MAX_PANIC_LINES}" \
   -v max_external="${MAX_EXTERNAL_CORE_ERRORS}" \
   -v max_cpu="${MAX_CPU_PERCENT}" \
+  -v min_samples="${MIN_SAMPLES}" \
   -v min_deltas="${MIN_NATIVE_USER_DELTAS}" '
 BEGIN {
   FS = "\t"
@@ -180,6 +187,10 @@ END {
   if (rows == 0) {
     print "no sample rows" > "/dev/stderr"
     exit 2
+  }
+  if (min_samples > 0 && rows < min_samples) {
+    print "sample count below minimum: rows=" rows " min=" min_samples > "/dev/stderr"
+    failed = 1
   }
   growth = last_rss - first_rss
   if (max_growth > 0 && growth > max_growth) {

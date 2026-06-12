@@ -45,6 +45,7 @@ Current acceptance command:
 ```bash
 /tmp/native_resource_gate.sh \
   --samples /tmp/keli-native-resource-v0.1.310-24h/samples.tsv \
+  --min-samples 1440 \
   --max-native-pending 0 \
   --max-panic-lines 0 \
   --max-external-core-errors 0 \
@@ -126,6 +127,7 @@ The baseline is production-stable only when all of these are true:
 - `ActiveState=active` and `SubState=running`.
 - No unexplained service stop/start after the soak window begins.
 - `native_resource_gate.sh` passes the full watcher TSV.
+- The full watcher TSV has at least `1440` data rows for a 24-hour run.
 - `panic_lines=0`.
 - `external_core_errors=0`.
 - `native_pending=0` for every sample, or any nonzero row is investigated and explained as a
