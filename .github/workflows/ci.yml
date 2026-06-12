@@ -53,6 +53,29 @@ jobs:
         working-directory: kelinode-rs
         run: cargo fmt --check
 
+      - name: Smoke resource gate
+        working-directory: kelinode-rs
+        shell: bash
+        run: |
+          set -euo pipefail
+          tmp="$(mktemp -d)"
+          cat >"${tmp}/samples.tsv" <<'EOF'
+          timestamp	pid	binary_sha	active_state	sub_state	rss_kb	hwm_kb	rss_anon_kb	rss_file_kb	vm_data_kb	threads	fd_count	cpu_percent	proc_ticks	total_ticks	active_async	active_native	active_blocking	native_workers	native_pending	external_core_errors	panic_lines	native_user_deltas	trojan_failures	hy2_timeouts	invalid_auth
+          2026-06-13T00:00:00+08:00	1517667	abc	active	running	700000	710000	690000	10000	800000	90	900	120.00	10	100	-	-	-	16	0	0	0	4	1	2	3
+          2026-06-13T00:01:00+08:00	1517667	abc	active	running	705000	715000	695000	10000	805000	92	910	125.00	11	100	-	-	-	16	0	0	0	5	1	2	3
+          EOF
+          bash scripts/ops/native_resource_gate.sh \
+            --samples "${tmp}/samples.tsv" \
+            --max-rss-kb 800000 \
+            --max-native-pending 0 \
+            --max-panic-lines 0 \
+            --max-external-core-errors 0
+          sed 's/running/stopped/' "${tmp}/samples.tsv" > "${tmp}/bad-state.tsv"
+          if bash scripts/ops/native_resource_gate.sh --samples "${tmp}/bad-state.tsv" --max-native-pending 0; then
+            echo "resource gate unexpectedly passed stopped service fixture" >&2
+            exit 1
+          fi
+
       - name: Run tests
         working-directory: kelinode-rs
         run: cargo test --locked --all-targets -- --test-threads=1
