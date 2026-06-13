@@ -20,6 +20,7 @@ release CI all need evidence before this baseline can be treated as long-running
 | Resource gate smoke | `.github/workflows/ci.yml` | Keeps the resource TSV verifier from silently rotting | success |
 | Watcher pattern self-test | `scripts/ops/native_resource_watch.sh --self-test-patterns` | Prevents benign domains like `panic.com` from being counted as process panics | success |
 | Resource trend gate | `scripts/ops/native_resource_gate.sh` | Fails production samples on stopped service, panic lines, native relay backlog, external-core start failures, or excessive RSS | success |
+| Bench comparison gate | `keli-core-rs bench compare --max-throughput-drop-percent --max-p99-increase-percent --fail-on-errors --require-all-baseline-commands` | Makes same-host protocol benchmark regressions fail instead of only producing a report | success when enabled for release comparison |
 | Release workflow | `.github/workflows/release.yml` | Builds signed release artifacts and manifests | success before release |
 
 ## Production Watch
@@ -54,14 +55,15 @@ Current acceptance command:
 
 Current partial evidence, before the 24-hour window is complete:
 
-- `rows=16`
-- `max_rss_kb=751712`
-- `rss_growth_kb=-42604`
-- `max_cpu_percent=76.45`
+- sample time: `2026-06-12T20:01:01-04:00`
+- `rows=69`
+- `max_rss_kb=824168`
+- `rss_growth_kb=-39140`
+- `max_cpu_percent=112.77`
 - `max_native_pending=0`
 - `max_panic_lines=0`
 - `max_external_core_errors=0`
-- `max_native_user_deltas=38`
+- `max_native_user_deltas=39`
 
 The final 24-hour verdict must not be recorded until the watcher has produced the full sample set
 or the operator explicitly accepts a shorter soak window.
@@ -81,6 +83,23 @@ or the operator explicitly accepts a shorter soak window.
 Panel expiry is treated as a user-delta delete/update in the native runtime. Do not claim live
 expiry acceptance from unit tests alone; the production proof is the combination of panel delta
 logs, active user count changes, and rejected post-expiry authentication.
+
+Current targeted functional verification:
+
+```powershell
+# keli-core-rs
+cargo test apply_user_delta_changes -- --test-threads=1
+# 7 passed: AnyTLS, Hysteria2, Shadowsocks, Trojan, TUIC, VLESS, VMess auth updates/deletes.
+
+cargo test deleting_ -- --test-threads=1
+# 13 passed: existing deleted-user relays close/stop forwarding and report tail traffic across
+# AnyTLS, HTTP, Hysteria2, Mieru, Naive, Shadowsocks, SOCKS, Trojan, TUIC, VLESS, and VMess paths.
+
+# kelinode-rs
+cargo test user_delta -- --test-threads=1
+# 22 passed: panel user-delta decode, Go parity, control socket ApplyUserDelta, fallback, revision,
+# runtime loop, payload mapping, and no unnecessary full rebuild after successful delta apply.
+```
 
 ## Protocol Regression Matrix
 
