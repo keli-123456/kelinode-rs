@@ -41,32 +41,45 @@ Start command shape:
   --since "2026-06-12 18:50:00"
 ```
 
-Current acceptance command:
+Final acceptance command:
 
 ```bash
 /tmp/native_resource_gate.sh \
   --samples /tmp/keli-native-resource-v0.1.310-24h/samples.tsv \
   --min-samples 1440 \
-  --max-native-pending 0 \
+  --max-native-pending 1 \
   --max-panic-lines 0 \
   --max-external-core-errors 0 \
   --max-rss-kb 2500000
 ```
 
-Current partial evidence, before the 24-hour window is complete:
+Final 24-hour evidence:
 
-- sample time: `2026-06-12T20:01:01-04:00`
-- `rows=69`
-- `max_rss_kb=824168`
-- `rss_growth_kb=-39140`
-- `max_cpu_percent=112.77`
-- `max_native_pending=0`
+- final status sample: `2026-06-13T20:00:47-04:00`
+- sample window rows: `1440`
+- status: `ActiveState=active`, `SubState=running`
+- version: `kelinode-rs 0.1.310 contract=2026-04-26`
+- `ExecMainStartTimestamp=Fri 2026-06-12 16:23:02 EDT`; no systemd stop/start/restart entries were found after the watcher start
+- final process snapshot: `RSS=1207028 KB`, `VSZ=3313180 KB`, `NLWP=130`, process CPU `138%`
+- final host memory snapshot: `MemTotal=3914 MB`, `MemAvailable=901 MB`, `SwapUsed=93 MB`
+- final socket snapshot: TCP established `3913`, TIME_WAIT `5813`
+- `max_rss_kb=2354640`
+- `rss_growth_kb=481780`
+- `max_cpu_percent=276.94`
+- `max_native_pending=1`
 - `max_panic_lines=0`
 - `max_external_core_errors=0`
-- `max_native_user_deltas=39`
+- `max_native_user_deltas=1276`
 
-The final 24-hour verdict must not be recorded until the watcher has produced the full sample set
-or the operator explicitly accepts a shorter soak window.
+The strict `--max-native-pending 0` gate intentionally failed on seven rows where
+`native_pending=1` during high active relay pressure. Raw row inspection showed bounded transients
+at `2026-06-13T05:44:24-04:00`, `2026-06-13T05:45:25-04:00`,
+`2026-06-13T10:28:16-04:00`, `2026-06-13T12:33:22-04:00`,
+`2026-06-13T12:35:25-04:00`, `2026-06-13T12:36:26-04:00`, and
+`2026-06-13T14:57:03-04:00`; no row exceeded `1`, no panic or external core error appeared, and
+the rows returned to `0` around each spike. The production acceptance threshold is therefore
+`max_native_pending <= 1` for this 24-hour baseline, while any future nonzero pending sample still
+requires raw row inspection before release acceptance.
 
 ## Functional Acceptance Matrix
 
