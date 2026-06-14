@@ -6,10 +6,15 @@ param(
     [int]$Requests = 512,
     [int]$Payload = 1024,
     [int]$Repeats = 3,
-    [switch]$SkipBench
+    [switch]$SkipBench,
+    [switch]$CompareOnly
 )
 
 $ErrorActionPreference = "Stop"
+
+if ($SkipBench -and $CompareOnly) {
+    throw "-SkipBench and -CompareOnly cannot be used together"
+}
 
 $candidates = @(
     @{ Label = "thin-system"; Lto = "thin"; Features = "" },
@@ -30,11 +35,16 @@ $previousLto = $env:CARGO_PROFILE_RELEASE_LTO
 function Invoke-CargoChecked {
     param(
         [Parameter(Mandatory = $true)]
-        [string[]]$Args
+        [string[]]$Args,
+        [switch]$AllowFailure
     )
 
     Write-Host ("cargo " + ($Args -join " "))
     cargo @Args
+    $script:LastCargoExitCode = $LASTEXITCODE
+    if ($script:LastCargoExitCode -ne 0 -and -not $AllowFailure) {
+        throw "cargo failed with exit code $script:LastCargoExitCode"
+    }
 }
 
 Push-Location $CoreDir
@@ -70,6 +80,8 @@ try {
 
         if ($SkipBench) {
             Write-Host "SKIP bench for $label"
+        } elseif ($CompareOnly) {
+            Write-Host "USE existing bench report for $label"
         } else {
             Write-Host "Running bench for $label"
             Invoke-CargoChecked -Args $args
@@ -83,12 +95,13 @@ try {
 
     $env:CARGO_PROFILE_RELEASE_LTO = "thin"
     $baseline = Join-Path $OutDir "thin-system.json"
+    $failedComparisons = @()
 
     foreach ($candidate in $candidates | Where-Object { $_.Label -ne "thin-system" }) {
         $label = $candidate.Label
         $candidateReport = Join-Path $OutDir "$label.json"
         $compareReport = Join-Path $OutDir "$label-compare.json"
-        $args = @(
+        $commonArgs = @(
             "run",
             "--release",
             "--locked",
@@ -98,9 +111,13 @@ try {
             "--baseline",
             $baseline,
             "--candidate",
-            $candidateReport,
+            $candidateReport
+        )
+        $reportArgs = $commonArgs + @(
             "--out",
-            $compareReport,
+            $compareReport
+        )
+        $gateArgs = $commonArgs + @(
             "--max-throughput-drop-percent",
             "10",
             "--max-p99-increase-percent",
@@ -109,8 +126,18 @@ try {
             "--require-all-baseline-commands"
         )
 
-        Write-Host "Comparing thin-system vs $label"
-        Invoke-CargoChecked -Args $args
+        Write-Host "Writing compare report thin-system vs $label"
+        Invoke-CargoChecked -Args $reportArgs
+
+        Write-Host "Checking compare gate thin-system vs $label"
+        Invoke-CargoChecked -Args $gateArgs -AllowFailure
+        if ($script:LastCargoExitCode -ne 0) {
+            $failedComparisons += $label
+        }
+    }
+
+    if ($failedComparisons.Count -gt 0) {
+        throw ("bench compare failed for: " + ($failedComparisons -join ", "))
     }
 }
 finally {
