@@ -230,7 +230,7 @@ Run:
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\perf\build-allocator-ab.ps1 -SkipBench
 ```
 
-Expected: prints `SKIP bench for thin-system`, `fat-system`, `thin-jemalloc`, and `fat-jemalloc`, then fails during compare because JSON reports are absent. This proves argument parsing and candidate enumeration work before the long bench is run.
+Expected: prints `SKIP bench for thin-system`, `fat-system`, `thin-jemalloc`, and `fat-jemalloc`, then skips compare and exits successfully. This proves argument parsing and candidate enumeration work before the long bench is run.
 
 - [ ] **Step 3: Create operator documentation**
 
