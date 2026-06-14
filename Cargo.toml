@@ -34,6 +34,7 @@ tokio-tungstenite = { version = "0.29", default-features = false, features = ["c
 [features]
 default = []
 embedded-core = ["dep:keli-core-rs"]
+embedded-core-jemalloc = ["embedded-core", "keli-core-rs/jemalloc"]
 
 [profile.release]
 lto = "thin"
